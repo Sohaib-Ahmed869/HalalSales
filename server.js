@@ -8,6 +8,11 @@ require("dotenv").config();
 // Import routes
 const authRoutes = require("./routes/auth.routes");
 const customerRoutes = require("./routes/customer.routes");
+const prestashopRoutes = require("./routes/prestashop.routes");
+const productRoutes = require("./routes/product.routes");
+const itemRoutes = require("./routes/item.routes");
+const prestashopSyncService = require("./services/prestashopSyncService");
+const config = require("./services/config");
 
 // Initialize express app
 const app = express();
@@ -37,15 +42,29 @@ mongoose
     useNewUrlParser: true,
     useUnifiedTopology: true,
   })
-  .then(() => console.log("MongoDB connected"))
+  .then(() => {
+    // // Initial sync on startup if enabled
+    // if (config.prestashop.syncOnStartup) {
+    //   prestashopSyncService.syncMenusFromAPI();
+    // }
+
+    // // Schedule periodic syncs if enabled
+    // if (config.prestashop.enableScheduledSync) {
+    //   prestashopSyncService.scheduleSync(config.prestashop.syncInterval);
+    // }
+    console.log("✅ Connected to MongoDB");
+  })
   .catch((err) => {
-    console.error("MongoDB connection error:", err);
+    console.error("❌ MongoDB connection error:", err);
     process.exit(1);
   });
 
 // Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/customers", customerRoutes);
+app.use("/api/prestashop", prestashopRoutes);
+app.use("/api/products", productRoutes);
+app.use("/api/items", itemRoutes);
 
 // Health check route
 app.get("/health", (req, res) => {
