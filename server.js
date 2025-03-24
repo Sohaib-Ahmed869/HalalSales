@@ -11,6 +11,7 @@ const customerRoutes = require("./routes/customer.routes");
 const prestashopRoutes = require("./routes/prestashop.routes");
 const productRoutes = require("./routes/product.routes");
 const itemRoutes = require("./routes/item.routes");
+const salesOrderRoutes = require("./routes/salesOrders.routes");
 const prestashopSyncService = require("./services/prestashopSyncService");
 const config = require("./services/config");
 
@@ -65,6 +66,7 @@ app.use("/api/customers", customerRoutes);
 app.use("/api/prestashop", prestashopRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/items", itemRoutes);
+app.use("/api/sales-orders", salesOrderRoutes);
 
 // Health check route
 app.get("/health", (req, res) => {

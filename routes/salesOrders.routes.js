@@ -1,0 +1,46 @@
+// routes/orderRoutes.js
+const express = require("express");
+const router = express.Router();
+const orderController = require("../controllers/order.controller");
+
+// @route   POST /api/orders
+// @desc    Create a new sales order in local DB
+// @access  Private
+router.post("/", orderController.createOrder);
+
+// @route   GET /api/orders
+// @desc    Get all orders with pagination and filtering
+// @access  Private
+router.get("/", orderController.getAllOrders);
+
+// @route   GET /api/orders/:docEntry
+// @desc    Get a single order by DocEntry
+// @access  Private
+router.get("/:docEntry", orderController.getOrderByDocEntry);
+
+// @route   POST /api/orders/:docEntry/push-to-sap
+// @desc    Push an order to SAP B1
+// @access  Private
+router.post("/:docEntry/push-to-sap", orderController.pushOrderToSAP);
+
+// @route   PATCH /api/orders/:docEntry/status
+// @desc    Update order status
+// @access  Private
+// router.patch("/:docEntry/status", orderController.updateOrderStatus);
+
+// // @route   PATCH /api/orders/:docEntry/cancel
+// // @desc    Cancel an order
+// // @access  Private
+// router.patch("/:docEntry/cancel", orderController.cancelOrder);
+
+// // @route   GET /api/orders/:docEntry/sap-status
+// // @desc    Get order status from SAP B1
+// // @access  Private
+// router.get("/:docEntry/sap-status", orderController.getSAPOrderStatus);
+
+// // @route   POST /api/orders/:docEntry/duplicate
+// // @desc    Create a duplicate of an existing order
+// // @access  Private
+// router.post("/:docEntry/duplicate", orderController.duplicateOrder);
+
+module.exports = router;
