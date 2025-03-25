@@ -1,10 +1,34 @@
 const bcrypt = require("bcryptjs");
+const multer = require("multer");
+const csv = require("csv-parser");
+const fs = require("fs");
 const jwt = require("jsonwebtoken");
+const XLSX = require("xlsx");
+
 const User = require("../models/User");
 
 // Environment variables
 const JWT_SECRET = process.env.JWT_SECRET || "your_secret_key";
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "24h";
+// Set up multer for file upload
+const upload = multer({
+  dest: "uploads/",
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max file size
+  fileFilter: (req, file, cb) => {
+    // Accept only Excel files
+    if (
+      file.mimetype ===
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+      file.mimetype === "application/vnd.ms-excel" ||
+      file.originalname.endsWith(".xlsx") ||
+      file.originalname.endsWith(".xls")
+    ) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only Excel files (.xlsx, .xls) are allowed"));
+    }
+  },
+}).single("file");
 
 // Login controller
 exports.login = async (req, res) => {
@@ -288,6 +312,7 @@ exports.changePassword = async (req, res) => {
 exports.getUsers = async (req, res) => {
   try {
     const { role } = req.query;
+    console.log(role);
     const query = {};
 
     // Filter by role if provided
@@ -297,7 +322,6 @@ exports.getUsers = async (req, res) => {
 
     // Sales manager can only see their sales agents
     if (req.user.role === "sales_manager") {
-      query.createdBy = req.user._id;
       query.role = "sales_agent"; // Sales managers can only see sales agents
     }
 
@@ -384,14 +408,6 @@ exports.updateUser = async (req, res) => {
       // Admin can update any user
     } else if (req.user.role === "sales_manager") {
       // Sales manager can only update their sales agents
-      if (
-        userToUpdate.role !== "sales_agent" ||
-        userToUpdate.createdBy.toString() !== req.user._id.toString()
-      ) {
-        return res
-          .status(403)
-          .json({ message: "You can only update sales agents you created" });
-      }
     } else {
       // Sales agents cannot update other users
       return res.status(403).json({ message: "Access denied" });
@@ -429,6 +445,7 @@ exports.updateUser = async (req, res) => {
       .populate("createdBy", "firstName lastName email")
       .populate("manager", "firstName lastName email");
 
+    console.log(updatedUser);
     res.json({
       message: "User updated successfully",
       user: updatedUser,
@@ -484,6 +501,222 @@ exports.resetPassword = async (req, res) => {
     res.json({ message: "Password reset successfully" });
   } catch (error) {
     console.error("Password reset error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+exports.importSalesAgents = async (req, res) => {
+  // Use multer to handle file upload
+  upload(req, res, async (err) => {
+    try {
+      if (err) {
+        return res.status(400).json({ message: err.message });
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ message: "Please upload an Excel file" });
+      }
+
+      // Role-based permission check
+      const currentUserRole = req.user.role;
+      if (currentUserRole !== "admin" && currentUserRole !== "sales_manager") {
+        return res.status(403).json({
+          message: "Only admins and sales managers can import sales agents",
+        });
+      }
+
+      // Initialize results tracking
+      const results = {
+        total: 0,
+        success: 0,
+        failed: 0,
+        errors: [],
+      };
+
+      // Read the Excel file
+      const workbook = XLSX.readFile(req.file.path, {
+        cellDates: true, // Properly parse date values
+      });
+
+      // Get the first sheet
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+
+      // Convert to JSON
+      const jsonData = XLSX.utils.sheet_to_json(worksheet, {
+        raw: false, // Convert all cells to strings
+        defval: "", // Default to empty string for empty cells
+      });
+
+      results.total = jsonData.length;
+      const agents = [];
+
+      // Process each row
+      for (const row of jsonData) {
+        // Normalize field names (handle variations in column names)
+        const agent = {
+          firstName:
+            row["First Name"] ||
+            row["FirstName"] ||
+            row["First_Name"] ||
+            row["first_name"] ||
+            row["firstname"],
+          lastName:
+            row["Last Name"] ||
+            row["LastName"] ||
+            row["Last_Name"] ||
+            row["last_name"] ||
+            row["lastname"],
+          email: row["Email"] || row["email"],
+          hubspotId:
+            row["User ID"] ||
+            row["UserID"] ||
+            row["User_ID"] ||
+            row["user_id"] ||
+            row["userid"] ||
+            row["HubSpot ID"] ||
+            row["hubspot_id"] ||
+            row["hubspotId"],
+        };
+
+        // Skip rows without required fields
+        if (!agent.firstName || !agent.lastName || !agent.email) {
+          results.failed++;
+          results.errors.push(
+            `Missing required fields for row: ${JSON.stringify(row)}`
+          );
+          continue;
+        }
+
+        try {
+          // Check if user already exists
+          const existingUser = await User.findOne({ email: agent.email });
+          if (existingUser) {
+            results.failed++;
+            results.errors.push(
+              `User with email ${agent.email} already exists`
+            );
+            continue;
+          }
+
+          // Generate a random password (8 characters)
+          const tempPassword = Math.random().toString(36).slice(-8);
+
+          // Hash password
+          const salt = await bcrypt.genSalt(10);
+          const hashedPassword = await bcrypt.hash(tempPassword, salt);
+
+          // Create new user object
+          const newUser = new User({
+            firstName: agent.firstName,
+            lastName: agent.lastName,
+            email: agent.email.trim().toLowerCase(),
+            password: hashedPassword,
+            role: "sales_agent",
+            createdBy: req.user._id,
+            hubspotId: agent.hubspotId || undefined,
+            target: 0, // Default target
+          });
+
+          // Set manager based on current user role
+          if (currentUserRole === "sales_manager") {
+            // If sales manager is creating, they are the manager
+            newUser.manager = req.user._id;
+          } else if (currentUserRole === "admin") {
+            // For admin, we would ideally have a manager ID in the Excel
+            // For now, we'll just set it to the admin (can be updated later)
+            newUser.manager = req.user._id;
+          }
+
+          // Save user
+          await newUser.save();
+
+          // Add password to agent for the response
+          agent.tempPassword = tempPassword;
+          agents.push(agent);
+          results.success++;
+        } catch (error) {
+          results.failed++;
+          results.errors.push(
+            `Error creating ${agent.email}: ${error.message}`
+          );
+        }
+      }
+
+      // Clean up the uploaded file
+      fs.unlinkSync(req.file.path);
+
+      // Return results
+      res.json({
+        message: "Import completed",
+        results: {
+          total: results.total,
+          success: results.success,
+          failed: results.failed,
+        },
+        agents: agents.map((a) => ({
+          firstName: a.firstName,
+          lastName: a.lastName,
+          email: a.email,
+          tempPassword: a.tempPassword,
+        })),
+        errors: results.errors,
+      });
+    } catch (error) {
+      console.error("Import error:", error);
+
+      // Clean up the uploaded file if it exists
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+
+      res.status(500).json({ message: "Server error", error: error.message });
+    }
+  });
+};
+
+exports.setTarget = async (req, res) => {
+  try {
+    const { target } = req.body;
+
+    const { id } = req.params;
+
+    // Check if user exists
+    const userToUpdate = await User.findById(id);
+    if (!userToUpdate) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Permission check
+    if (req.user.role === "admin") {
+      // Admin can update any user
+    } else if (req.user.role === "sales_manager") {
+      // Sales manager can only update their sales agents
+    } else {
+      // Sales agents cannot update other users
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    // Build update object
+    const updatedFields = {};
+    if (target) updatedFields.target = target;
+
+    // Update user
+    const updated = await User.findByIdAndUpdate(
+      id,
+      { $set: updatedFields },
+      { new: true, runValidators: true }
+    )
+      .select("-password")
+      .populate("createdBy", "firstName lastName email")
+      .populate("manager", "firstName lastName email");
+
+    res.json({
+      message: "User updated successfully",
+      user: updated,
+    });
+  } catch (error) {
+    console.error("User update error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };

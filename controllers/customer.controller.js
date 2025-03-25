@@ -1,5 +1,65 @@
+// controllers/customer.controller.js
 const Customer = require("../models/Customer");
 const User = require("../models/User");
+const csv = require("csv-parser");
+const fs = require("fs");
+const path = require("path");
+const XLSX = require("xlsx");
+
+// Process customer data from text format
+const processCustomerData = (text) => {
+  const lines = text.split("\n");
+  const customers = [];
+
+  // Skip the header line
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line) {
+      // Match pattern: index CardCode CardName Email
+      const match = line.match(/^\d+\s+(C\d+)\s+(.*?)(?:\s+(\S+@\S+\.\S+))?$/);
+
+      if (match) {
+        const [, CardCode, CardName, Email] = match;
+
+        customers.push({
+          CardCode,
+          CardName: CardName.trim(),
+          Email: Email || "",
+          status: "active",
+        });
+      }
+    }
+  }
+
+  return customers;
+};
+
+// Process XLSX file
+const processXLSXFile = (filePath) => {
+  try {
+    const workbook = XLSX.readFile(filePath);
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+    const data = XLSX.utils.sheet_to_json(worksheet);
+
+    console.log("Excel data extracted:", data.length, "records");
+
+    // Map the data to our customer format
+    return data
+      .map((row) => {
+        return {
+          CardCode: row["BP Code"] || row["CardCode"] || "",
+          CardName: row["BP Name"] || row["CardName"] || "",
+          Email: row["E-Mail"] || row["Email"] || "",
+          status: "active",
+        };
+      })
+      .filter((customer) => customer.CardCode && customer.CardName); // Filter out invalid entries
+  } catch (error) {
+    console.error("Error processing XLSX file:", error);
+    throw new Error(`Failed to process XLSX file: ${error.message}`);
+  }
+};
 
 // Get all customers
 exports.getCustomers = async (req, res) => {
@@ -25,21 +85,10 @@ exports.getCustomers = async (req, res) => {
     }
 
     // Role-based queries
-    if (req.user.role === "sales_agent") {
+    if (req.user && req.user.role === "sales_agent") {
       // Sales agents can only see customers assigned to them
       query.assignedTo = req.user._id;
-    } else if (req.user.role === "sales_manager") {
-      // Sales managers can see all customers assigned to their agents
-      if (!assignedTo) {
-        const salesAgents = await User.find({
-          role: "sales_agent",
-          manager: req.user._id,
-        }).select("_id");
-
-        const agentIds = salesAgents.map((agent) => agent._id);
-        query.assignedTo = { $in: agentIds };
-      }
-    }
+    } 
     // Admins can see all customers
 
     const customers = await Customer.find(query).populate(
@@ -61,13 +110,13 @@ exports.getCustomerById = async (req, res) => {
     let customer;
 
     // Role-based permissions
-    if (req.user.role === "admin") {
+    if (req.user && req.user.role === "admin") {
       // Admin can see any customer
       customer = await Customer.findById(customerId).populate(
         "assignedTo",
         "firstName lastName email hubspotId"
       );
-    } else if (req.user.role === "sales_manager") {
+    } else if (req.user && req.user.role === "sales_manager") {
       // Get all agents managed by this manager
       const salesAgents = await User.find({
         role: "sales_agent",
@@ -136,17 +185,6 @@ exports.createCustomer = async (req, res) => {
       if (!agent || agent.role !== "sales_agent") {
         return res.status(400).json({ message: "Invalid sales agent ID" });
       }
-
-      // Sales manager can only assign to their agents
-      if (req.user.role === "sales_manager") {
-        if (agent.manager.toString() !== req.user._id.toString()) {
-          return res
-            .status(403)
-            .json({
-              message: "You can only assign customers to your sales agents",
-            });
-        }
-      }
     }
 
     // Create new customer
@@ -207,7 +245,7 @@ exports.updateCustomer = async (req, res) => {
     // Handle assignedTo separately with permission checks
     if (assignedTo !== undefined) {
       // Only admin and sales manager can reassign
-      if (req.user.role === "sales_agent") {
+      if (req.user && req.user.role === "sales_agent") {
         return res
           .status(403)
           .json({ message: "Sales agents cannot reassign customers" });
@@ -218,17 +256,6 @@ exports.updateCustomer = async (req, res) => {
         const agent = await User.findById(assignedTo);
         if (!agent || agent.role !== "sales_agent") {
           return res.status(400).json({ message: "Invalid sales agent ID" });
-        }
-
-        // Sales manager can only assign to their agents
-        if (req.user.role === "sales_manager") {
-          if (agent.manager.toString() !== req.user._id.toString()) {
-            return res
-              .status(403)
-              .json({
-                message: "You can only assign customers to your sales agents",
-              });
-          }
         }
       }
 
@@ -362,17 +389,6 @@ exports.assignCustomer = async (req, res) => {
       return res.status(400).json({ message: "Invalid sales agent ID" });
     }
 
-    // Sales manager can only assign to their agents
-    if (req.user.role === "sales_manager") {
-      if (agent.manager.toString() !== req.user._id.toString()) {
-        return res
-          .status(403)
-          .json({
-            message: "You can only assign customers to your sales agents",
-          });
-      }
-    }
-
     // Update customer
     customer.assignedTo = assignedTo;
     await customer.save();
@@ -399,6 +415,7 @@ exports.getCustomersByAgent = async (req, res) => {
 
     // Permission checks
     if (
+      req.user &&
       req.user.role === "sales_agent" &&
       req.user._id.toString() !== agentId
     ) {
@@ -407,7 +424,7 @@ exports.getCustomersByAgent = async (req, res) => {
         .json({ message: "You can only view your own customers" });
     }
 
-    if (req.user.role === "sales_manager") {
+    if (req.user && req.user.role === "sales_manager") {
       // Check if the agent belongs to this manager
       const agent = await User.findById(agentId);
       if (
@@ -415,11 +432,9 @@ exports.getCustomersByAgent = async (req, res) => {
         agent.role !== "sales_agent" ||
         agent.manager.toString() !== req.user._id.toString()
       ) {
-        return res
-          .status(403)
-          .json({
-            message: "You can only view customers of your sales agents",
-          });
+        return res.status(403).json({
+          message: "You can only view customers of your sales agents",
+        });
       }
     }
 
@@ -464,5 +479,192 @@ exports.addNotes = async (req, res) => {
   } catch (error) {
     console.error("Notes update error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// Upload customers from file (supports text and Excel)
+exports.uploadCustomers = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "Please upload a file",
+      });
+    }
+
+    // Ensure uploads directory exists
+    const uploadsDir = path.join(process.cwd(), "uploads");
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+      console.log("Created uploads directory at", uploadsDir);
+    }
+
+    console.log("File upload path:", req.file.path);
+    console.log("File exists check:", fs.existsSync(req.file.path));
+
+    let customers = [];
+    const fileExt = path.extname(req.file.originalname).toLowerCase();
+
+    // Process file based on extension
+    if (fileExt === ".xlsx" || fileExt === ".xls") {
+      // Process Excel file
+      customers = processXLSXFile(req.file.path);
+      console.log(`Processed ${customers.length} customers from Excel file`);
+    } else {
+      // Process text file
+      try {
+        const fileContent = fs.readFileSync(req.file.path, "utf8");
+        customers = processCustomerData(fileContent);
+        console.log(`Processed ${customers.length} customers from text file`);
+      } catch (readError) {
+        console.error("Error reading file:", readError);
+        throw new Error(`Could not read file: ${readError.message}`);
+      }
+    }
+
+    if (customers.length === 0) {
+      // Clean up file
+      try {
+        if (fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+        }
+      } catch (unlinkError) {
+        console.error("Error deleting file:", unlinkError);
+      }
+
+      return res.status(400).json({
+        success: false,
+        message: "No valid customer data found in the file",
+      });
+    }
+
+    // Use bulk operation for efficiency
+    const operations = customers.map((customer) => ({
+      updateOne: {
+        filter: { CardCode: customer.CardCode },
+        update: { $set: customer },
+        upsert: true,
+      },
+    }));
+
+    const result = await Customer.bulkWrite(operations);
+
+    // Clean up the uploaded file
+    try {
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error deleting file after processing:", unlinkError);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Processed ${customers.length} customers`,
+      result: {
+        matched: result.matchedCount,
+        modified: result.modifiedCount,
+        upserted: result.upsertedCount,
+      },
+    });
+  } catch (error) {
+    console.error("Upload error:", error);
+
+    // Clean up file if it exists
+    try {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error cleaning up file:", unlinkError);
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Error uploading customers",
+      error: error.message,
+    });
+  }
+};
+
+// Alternative CSV upload method
+exports.uploadCustomersCSV = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "Please upload a CSV file",
+      });
+    }
+
+    // Ensure uploads directory exists
+    const uploadsDir = path.join(process.cwd(), "uploads");
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+
+    const customers = [];
+
+    fs.createReadStream(req.file.path)
+      .pipe(csv())
+      .on("data", (row) => {
+        customers.push({
+          CardCode: row.CardCode || row["BP Code"],
+          CardName: row.CardName || row["BP Name"],
+          Email: row.Email || row["E-Mail"] || "",
+          status: "active",
+        });
+      })
+      .on("end", async () => {
+        // Process customers
+        const operations = customers.map((customer) => ({
+          updateOne: {
+            filter: { CardCode: customer.CardCode },
+            update: { $set: customer },
+            upsert: true,
+          },
+        }));
+
+        const result = await Customer.bulkWrite(operations);
+
+        // Clean up the uploaded file
+        try {
+          if (fs.existsSync(req.file.path)) {
+            fs.unlinkSync(req.file.path);
+          }
+        } catch (unlinkError) {
+          console.error("Error cleaning up CSV file:", unlinkError);
+        }
+
+        res.status(200).json({
+          success: true,
+          message: `Processed ${customers.length} customers from CSV`,
+          result: {
+            matched: result.matchedCount,
+            modified: result.modifiedCount,
+            upserted: result.upsertedCount,
+          },
+        });
+      })
+      .on("error", (error) => {
+        throw error;
+      });
+  } catch (error) {
+    console.error("CSV upload error:", error);
+
+    // Clean up file if it exists
+    try {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error cleaning up CSV file:", unlinkError);
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Error uploading customers from CSV",
+      error: error.message,
+    });
   }
 };

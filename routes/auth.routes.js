@@ -38,14 +38,13 @@ router.get(
 router.get("/users/:id", auth, authController.getUserById);
 
 // Update user (admin for any user, sales manager for their agents)
-router.put("/users/:id", auth, canManageUser, authController.updateUser);
+router.put("/users/:id", auth, authController.updateUser);
 
 // Reset user password (admin for any user, sales manager for their agents)
-router.put(
-  "/users/:id/reset-password",
-  auth,
-  canManageUser,
-  authController.resetPassword
-);
+router.put("/reset-password/:id", auth, authController.resetPassword);
+
+router.post("/importSalesAgents", auth, authController.importSalesAgents);
+
+router.put('/setTarget/:id', auth, authController.setTarget);
 
 module.exports = router;

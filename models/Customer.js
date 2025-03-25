@@ -14,7 +14,6 @@ const CustomerSchema = new Schema({
   },
   Email: {
     type: String,
-    required: true,
   },
   // Hubspot Data
   phoneNumber: {
