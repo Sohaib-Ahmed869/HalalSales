@@ -49,6 +49,66 @@ const UserSchema = new Schema({
     type: Number,
     default: 0,
   },
+  targetAchieved: {
+    type: Number,
+    default: 0,
+  },
+  salesHistory: [
+    {
+      month: {
+        type: String,
+        required: true,
+      },
+      year: {
+        type: Number,
+        required: true,
+      },
+      orderCount: {
+        type: Number,
+        default: 0,
+      },
+      totalValue: {
+        type: Number,
+        default: 0,
+      },
+      // Store individual order references
+      orders: [
+        {
+          type: Schema.Types.ObjectId,
+          ref: "SalesOrder",
+        },
+      ],
+    },
+  ],
+  targetHistory: [
+    {
+      month: {
+        type: String,
+        required: true,
+      },
+      year: {
+        type: Number,
+        required: true,
+      },
+      target: {
+        type: Number,
+        default: 0,
+      },
+      achieved: {
+        type: Number,
+        default: 0,
+      },
+      // Percentage of target achieved
+      achievementRate: {
+        type: Number,
+        default: 0,
+      },
+    },
+  ],
+  callsMade: {
+    type: Number,
+    default: 0,
+  },
   lastLogin: {
     type: Date,
     default: Date.now,

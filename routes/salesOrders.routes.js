@@ -2,11 +2,11 @@
 const express = require("express");
 const router = express.Router();
 const orderController = require("../controllers/order.controller");
-
+const { auth } = require("../middleware/auth");
 // @route   POST /api/orders
 // @desc    Create a new sales order in local DB
 // @access  Private
-router.post("/", orderController.createOrder);
+router.post("/", auth, orderController.createOrder);
 
 // @route   GET /api/orders
 // @desc    Get all orders with pagination and filtering

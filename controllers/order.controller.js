@@ -1,11 +1,94 @@
 // controllers/orderController.js
 const SalesOrder = require("../models/SalesOrder");
+const User = require("../models/User");
 const Item = require("../models/item");
 const {
   formatOrderForSAP,
   createSalesOrderInSAP,
   getSalesOrderFromSAP,
 } = require("../utils/sapB1Integration");
+// Add this helper function
+async function updateSalesAgentStats(salesAgentId, order) {
+  try {
+    const agent = await User.findById(salesAgentId);
+    if (!agent || agent.role !== "sales_agent") return;
+
+    // Get current month and year
+    const orderDate = order.DocDate;
+    const month = orderDate.toLocaleString("default", { month: "short" });
+    const year = orderDate.getFullYear();
+
+    // Calculate order value
+    const orderValue = order.DocTotal;
+
+    // Find or create entry for current month/year in salesHistory
+    let salesEntry = agent.salesHistory.find(
+      (entry) => entry.month === month && entry.year === year
+    );
+
+    if (!salesEntry) {
+      // Create new entry if it doesn't exist
+      agent.salesHistory.push({
+        month,
+        year,
+        orderCount: 1,
+        totalValue: orderValue,
+        orders: [order._id],
+      });
+    } else {
+      // Update existing entry
+      salesEntry.orderCount += 1;
+      salesEntry.totalValue += orderValue;
+      salesEntry.orders.push(order._id);
+    }
+
+    // Update target achievement
+    let targetEntry = agent.targetHistory.find(
+      (entry) => entry.month === month && entry.year === year
+    );
+
+    if (!targetEntry) {
+      // Create new target entry with current target
+      agent.targetHistory.push({
+        month,
+        year,
+        target: agent.target,
+        achieved: orderValue,
+        achievementRate:
+          agent.target > 0 ? (orderValue / agent.target) * 100 : 0,
+      });
+    } else {
+      // Update existing target entry
+      targetEntry.achieved += orderValue;
+      targetEntry.achievementRate =
+        targetEntry.target > 0
+          ? (targetEntry.achieved / targetEntry.target) * 100
+          : 0;
+    }
+
+    // Update overall targetAchieved
+    agent.targetAchieved += orderValue;
+
+    // Save changes
+    await agent.save();
+  } catch (error) {
+    console.error("Error updating sales agent stats:", error);
+  }
+}
+
+async function updateSalesAgentAchievement(salesAgentId, order) {
+  const agent = await User.findById(salesAgentId);
+  if (!agent) return;
+  
+  // You might want to add some logic here based on your business rules
+  // For example, maybe achievements only count when orders are pushed to SAP
+  
+  // Maybe increment a counter of successfully synced orders
+  agent.syncedOrderCount = (agent.syncedOrderCount || 0) + 1;
+  
+  await agent.save();
+}
+
 
 // Create a new sales order (save to local DB)
 exports.createOrder = async (req, res) => {
@@ -17,6 +100,8 @@ exports.createOrder = async (req, res) => {
         message: "Customer (CardCode) is required",
       });
     }
+
+    const salesAgentId = req.user._id;
 
     // Validate that at least one document line exists
     if (!req.body.DocumentLines || req.body.DocumentLines.length === 0) {
@@ -91,6 +176,7 @@ exports.createOrder = async (req, res) => {
       UpdateDate: new Date(),
       SyncedWithSAP: false,
       LocalStatus: "Created", // Custom field to track local status
+      salesAgent: salesAgentId,
     });
 
     // Calculate totals if not provided
@@ -107,12 +193,15 @@ exports.createOrder = async (req, res) => {
     // Save to local database
     await newOrder.save();
 
+    await updateSalesAgentStats(salesAgentId, newOrder);
+
     res.status(201).json({
       success: true,
       data: newOrder,
       message: "Order created successfully in local database",
     });
   } catch (error) {
+    console.error("Error creating order:", error);
     res.status(500).json({
       success: false,
       message: "Error creating order",
@@ -150,9 +239,6 @@ exports.getAllOrders = async (req, res) => {
     const orders = await SalesOrder.find(query)
       .skip(skip)
       .limit(limit)
-      .select(
-        "DocEntry DocNum CardCode CardName DocDate DocTotal DocumentStatus SyncedWithSAP SAPDocEntry DocumentLines2"
-      )
       .sort({ DocDate: -1 });
 
     const total = await SalesOrder.countDocuments(query);

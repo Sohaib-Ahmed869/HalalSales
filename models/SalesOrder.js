@@ -253,6 +253,10 @@ const OrderSchema = new Schema(
       type: Number,
       required: true,
     },
+    salesAgent: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+    },
     DocNum: Number,
     DocType: String,
     HandWritten: String,

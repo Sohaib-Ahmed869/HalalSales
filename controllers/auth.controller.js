@@ -5,7 +5,10 @@ const fs = require("fs");
 const jwt = require("jsonwebtoken");
 const XLSX = require("xlsx");
 
+const SalesOrder = require("../models/SalesOrder");
 const User = require("../models/User");
+
+const mongoose = require("mongoose");
 
 // Environment variables
 const JWT_SECRET = process.env.JWT_SECRET || "your_secret_key";
@@ -720,3 +723,485 @@ exports.setTarget = async (req, res) => {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
+
+exports.getSalesPerformance = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { month, year } = req.query;
+
+    // Permission checks...
+
+    const user = await User.findById(id).populate({
+      path: "salesHistory.orders",
+      select: "DocEntry DocNum DocTotal DocDate CardCode",
+    });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Filter by month/year if provided
+    let salesData = user.salesHistory;
+    if (month && year) {
+      salesData = salesData.filter(
+        (entry) => entry.month === month && entry.year === parseInt(year)
+      );
+    }
+
+    res.json({
+      user: {
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+      },
+      salesData,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+exports.getTargetHistory = async (req, res) => {
+  try {
+    const { id } = req.params;
+    // Similar to getSalesPerformance but for target history
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+exports.setMonthlyTarget = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { month, year, target } = req.body;
+
+    if (!month || !year || target === undefined) {
+      return res
+        .status(400)
+        .json({ message: "Month, year and target are required" });
+    }
+
+    // Permission checks...
+
+    const user = await User.findById(id);
+    if (!user || user.role !== "sales_agent") {
+      return res.status(404).json({ message: "Sales agent not found" });
+    }
+
+    // Set monthly target
+    let targetEntry = user.targetHistory.find(
+      (entry) => entry.month === month && entry.year === parseInt(year)
+    );
+
+    if (!targetEntry) {
+      // Create new entry
+      user.targetHistory.push({
+        month,
+        year: parseInt(year),
+        target,
+        achieved: 0,
+        achievementRate: 0,
+      });
+    } else {
+      // Update existing entry
+      targetEntry.target = target;
+      targetEntry.achievementRate =
+        targetEntry.achieved > 0 ? (targetEntry.achieved / target) * 100 : 0;
+    }
+
+    // Update overall target
+    user.target = target;
+
+    await user.save();
+
+    res.json({
+      message: "Monthly target set successfully",
+      target: {
+        month,
+        year,
+        target,
+        user: {
+          id: user._id,
+          name: `${user.firstName} ${user.lastName}`,
+        },
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+exports.getSalesDashboard = async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    // Permission checks based on user role
+    const query = { role: "sales_agent" };
+
+    // If sales manager, only show their agents
+    if (req.user.role === "sales_manager") {
+      query.manager = req.user._id;
+    }
+
+    const salesAgents = await User.find(query)
+      .select(
+        "firstName lastName email target targetAchieved salesHistory targetHistory"
+      )
+      .populate("manager", "firstName lastName email");
+
+    // Calculate aggregated statistics
+    const dashboardData = {
+      totalAgents: salesAgents.length,
+      totalSales: 0,
+      totalOrders: 0,
+      topPerformers: [],
+      monthlySummary: [],
+      agentPerformance: [],
+    };
+
+    // Process agent data to build dashboard statistics
+    // This can be complex depending on your exact requirements
+
+    res.json(dashboardData);
+  } catch (error) {
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+exports.getTargetHistory = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { year } = req.query;
+
+    // Permission checks
+    const currentUserRole = req.user.role;
+
+    if (currentUserRole === "sales_agent" && req.user._id.toString() !== id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    // Find the agent
+    const agent = await User.findById(id).select("-password");
+
+    if (!agent || agent.role !== "sales_agent") {
+      return res.status(404).json({ message: "Sales agent not found" });
+    }
+
+    // Filter targetHistory by year if provided
+    let targetHistory = agent.targetHistory || [];
+
+    if (year) {
+      targetHistory = targetHistory.filter(
+        (entry) => entry.year === parseInt(year)
+      );
+    }
+
+    res.json({
+      agent: {
+        _id: agent._id,
+        firstName: agent.firstName,
+        lastName: agent.lastName,
+        email: agent.email,
+        target: agent.target,
+        targetAchieved: agent.targetAchieved,
+      },
+      targetHistory: targetHistory,
+    });
+  } catch (error) {
+    console.error("Error fetching target history:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// Complete getSalesDashboard function
+exports.getSalesDashboard = async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    // Permission checks based on user role
+    const query = { role: "sales_agent" };
+
+    const salesAgents = await User.find(query)
+      .select(
+        "firstName lastName email target targetAchieved salesHistory targetHistory"
+      )
+      .populate("manager", "firstName lastName email");
+
+    // Calculate aggregated statistics
+    let totalSales = 0;
+    let totalOrders = 0;
+    let agentPerformance = [];
+
+    // Time period filter
+    const periodFilter = {};
+    if (startDate) periodFilter.$gte = new Date(startDate);
+    if (endDate) periodFilter.$lte = new Date(endDate);
+
+    // Get current month/year
+    const currentDate = new Date();
+    const currentMonth = currentDate.toLocaleString("default", {
+      month: "short",
+    });
+    const currentYear = currentDate.getFullYear();
+
+    // Calculate aggregated statistics for all agents
+    for (const agent of salesAgents) {
+      // Get total sales and orders for this agent
+      const agentTotalSales = agent.targetAchieved || 0;
+      const agentOrders = agent.salesHistory.reduce(
+        (sum, month) => sum + (month.orderCount || 0),
+        0
+      );
+
+      totalSales += agentTotalSales;
+      totalOrders += agentOrders;
+
+      // Get current month performance
+      const currentMonthData = agent.salesHistory.find(
+        (entry) => entry.month === currentMonth && entry.year === currentYear
+      ) || { totalValue: 0, orderCount: 0 };
+
+      // Get target data
+      const currentMonthTarget = agent.targetHistory.find(
+        (entry) => entry.month === currentMonth && entry.year === currentYear
+      ) || { target: agent.target || 0, achieved: 0, achievementRate: 0 };
+
+      // Calculate achievement rate
+      const achievementRate =
+        agent.target > 0 ? (agent.targetAchieved / agent.target) * 100 : 0;
+
+      // Add to agent performance array
+      agentPerformance.push({
+        _id: agent._id,
+        name: `${agent.firstName} ${agent.lastName}`,
+        email: agent.email,
+        totalSales: agentTotalSales,
+        totalOrders: agentOrders,
+        currentMonthSales: currentMonthData.totalValue || 0,
+        currentMonthOrders: currentMonthData.orderCount || 0,
+        target: agent.target || 0,
+        achieved: agent.targetAchieved || 0,
+        achievementRate: achievementRate,
+        manager: agent.manager
+          ? `${agent.manager.firstName} ${agent.manager.lastName}`
+          : "None",
+      });
+    }
+
+    // Sort agents by performance
+    agentPerformance.sort((a, b) => b.achievementRate - a.achievementRate);
+
+    // Top performers (top 5)
+    const topPerformers = agentPerformance.slice(0, 5).map((agent) => ({
+      name: agent.name,
+      achievementRate: agent.achievementRate,
+      sales: agent.totalSales,
+    }));
+
+    // Bottom performers (bottom 5) if there are enough agents
+    const bottomPerformers =
+      agentPerformance.length > 5
+        ? agentPerformance
+            .slice(-5)
+            .reverse()
+            .map((agent) => ({
+              name: agent.name,
+              achievementRate: agent.achievementRate,
+              sales: agent.totalSales,
+            }))
+        : [];
+
+    // Monthly summary for overall team performance
+    const monthlySummary = [];
+
+    // Group all sales by month
+    const allMonthsMap = new Map();
+
+    // Collect all months data from all agents
+    salesAgents.forEach((agent) => {
+      (agent.salesHistory || []).forEach((entry) => {
+        const key = `${entry.month}-${entry.year}`;
+        if (!allMonthsMap.has(key)) {
+          allMonthsMap.set(key, {
+            month: entry.month,
+            year: entry.year,
+            totalSales: 0,
+            totalOrders: 0,
+            agents: 0,
+          });
+        }
+
+        const monthData = allMonthsMap.get(key);
+        monthData.totalSales += entry.totalValue || 0;
+        monthData.totalOrders += entry.orderCount || 0;
+        monthData.agents++;
+      });
+    });
+
+    // Convert map to array and sort by date
+    const monthsArray = Array.from(allMonthsMap.values());
+    monthsArray.sort((a, b) => {
+      if (a.year !== b.year) return a.year - b.year;
+
+      const months = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+      ];
+      return months.indexOf(a.month) - months.indexOf(b.month);
+    });
+
+    // Calculate average achievement rate
+    const avgAchievementRate =
+      salesAgents.length > 0
+        ? agentPerformance.reduce(
+            (sum, agent) => sum + agent.achievementRate,
+            0
+          ) / salesAgents.length
+        : 0;
+
+    // Build response object
+    const dashboardData = {
+      summary: {
+        totalAgents: salesAgents.length,
+        totalSales,
+        totalOrders,
+        avgAchievementRate: parseFloat(avgAchievementRate.toFixed(2)),
+      },
+      topPerformers,
+      bottomPerformers,
+      monthlySummary: monthsArray,
+      agentPerformance,
+    };
+
+    res.json(dashboardData);
+  } catch (error) {
+    console.error("Error fetching sales dashboard:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// Get orders for a specific agent by month
+exports.getAgentOrdersByMonth = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { month, year } = req.query;
+
+    if (!month || !year) {
+      return res.status(400).json({ message: "Month and year are required" });
+    }
+
+    // Permission checks based on user role
+    const currentUserRole = req.user.role;
+
+    // Sales agents can only see their own data
+    if (currentUserRole === "sales_agent" && req.user._id.toString() !== id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    // Find the agent
+    const agent = await User.findById(id);
+
+    if (!agent || agent.role !== "sales_agent") {
+      return res.status(404).json({ message: "Sales agent not found" });
+    }
+
+    // Find orders created by this agent during the specified month/year
+    const startDate = new Date(`${month} 1, ${year}`);
+    const endMonth = startDate.getMonth() + 1;
+    const endYear =
+      startDate.getMonth() === 11 ? parseInt(year) + 1 : parseInt(year);
+    const endDate = new Date(`${endMonth}/1/${endYear}`);
+
+    const orders = await SalesOrder.find({
+      salesAgent: id,
+      
+    }).sort({ DocDate: -1 });
+
+    res.json({
+      count: orders.length,
+      data: orders,
+    });
+  } catch (error) {
+    console.error("Error fetching agent orders by month:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// Helper function to update sales agent stats when an order is created
+async function updateSalesAgentStats(salesAgentId, order) {
+  try {
+    const agent = await User.findById(salesAgentId);
+    if (!agent || agent.role !== "sales_agent") return;
+
+    // Get current month and year
+    const orderDate = order.DocDate;
+    const month = orderDate.toLocaleString("default", { month: "short" });
+    const year = orderDate.getFullYear();
+
+    // Calculate order value
+    const orderValue = order.DocTotal;
+
+    // Find or create entry for current month/year in salesHistory
+    let salesEntry = agent.salesHistory.find(
+      (entry) => entry.month === month && entry.year === year
+    );
+
+    if (!salesEntry) {
+      // Create new entry if it doesn't exist
+      agent.salesHistory.push({
+        month,
+        year,
+        orderCount: 1,
+        totalValue: orderValue,
+        orders: [order._id],
+      });
+    } else {
+      // Update existing entry
+      salesEntry.orderCount += 1;
+      salesEntry.totalValue += orderValue;
+      salesEntry.orders.push(order._id);
+    }
+
+    // Update target achievement
+    let targetEntry = agent.targetHistory.find(
+      (entry) => entry.month === month && entry.year === year
+    );
+
+    if (!targetEntry) {
+      // Create new target entry with current target
+      agent.targetHistory.push({
+        month,
+        year,
+        target: agent.target,
+        achieved: orderValue,
+        achievementRate:
+          agent.target > 0 ? (orderValue / agent.target) * 100 : 0,
+      });
+    } else {
+      // Update existing target entry
+      targetEntry.achieved += orderValue;
+      targetEntry.achievementRate =
+        targetEntry.target > 0
+          ? (targetEntry.achieved / targetEntry.target) * 100
+          : 0;
+    }
+
+    // Update overall targetAchieved
+    agent.targetAchieved += orderValue;
+
+    // Save changes
+    await agent.save();
+  } catch (error) {
+    console.error("Error updating sales agent stats:", error);
+  }
+}

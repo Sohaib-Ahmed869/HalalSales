@@ -11,7 +11,6 @@ exports.getAllItems = async (req, res) => {
     const items = await Item.find()
       .skip(skip)
       .limit(limit)
-      .select("ItemCode ItemName QuantityOnStock SalesItem ItemPrices");
 
     const total = await Item.countDocuments();
 
@@ -67,7 +66,7 @@ exports.getAvailableItems = async (req, res) => {
     const items = await Item.findAvailable()
       .skip(skip)
       .limit(limit)
-      .select("ItemCode ItemName QuantityOnStock MovingAveragePrice");
+
 
     const total = await Item.countDocuments({ QuantityOnStock: { $gt: 0 } });
 
@@ -102,7 +101,6 @@ exports.getItemsByWarehouse = async (req, res) => {
     })
       .skip(skip)
       .limit(limit)
-      .select("ItemCode ItemName ItemWarehouseInfoCollection");
 
     const total = await Item.countDocuments({
       "ItemWarehouseInfoCollection.WarehouseCode": warehouseCode,
@@ -151,7 +149,6 @@ exports.searchItems = async (req, res) => {
     })
       .skip(skip)
       .limit(limit)
-      .select("ItemCode ItemName QuantityOnStock MovingAveragePrice");
 
     const total = await Item.countDocuments({
       $or: [
@@ -199,7 +196,6 @@ exports.getItemsByPriceRange = async (req, res) => {
     })
       .skip(skip)
       .limit(limit)
-      .select("ItemCode ItemName ItemPrices");
 
     const total = await Item.countDocuments({
       ItemPrices: {

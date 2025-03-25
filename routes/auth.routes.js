@@ -45,6 +45,30 @@ router.put("/reset-password/:id", auth, authController.resetPassword);
 
 router.post("/importSalesAgents", auth, authController.importSalesAgents);
 
-router.put('/setTarget/:id', auth, authController.setTarget);
+router.put("/setTarget/:id", auth, authController.setTarget);
 
+// Routes
+router.get("/users/:id/salesperformance", authController.getSalesPerformance);
+router.get("/users/:id/targethistory",auth, authController.getTargetHistory);
+router.post("/users/:id/settarget", authController.setMonthlyTarget);
+router.get("/dashboard/sales", authController.getSalesDashboard);
+router.get(
+  "/users/:id/salesperformance",
+  auth,
+  authController.getSalesPerformance
+);
+router.get("/users/:id/targethistory", auth, authController.getTargetHistory);
+router.post(
+  "/users/:id/settarget",
+  auth,
+  checkRole(["admin", "sales_manager"]),
+  authController.setMonthlyTarget
+);
+router.get("/orders/agent/:id", auth, authController.getAgentOrdersByMonth);
+router.get(
+  "/dashboard/sales",
+  auth,
+  checkRole(["admin", "sales_manager"]),
+  authController.getSalesDashboard
+);
 module.exports = router;

@@ -14,7 +14,10 @@ const auth = async (req, res, next) => {
     }
 
     const decoded = jwt.verify(token, JWT_SECRET);
-    const user = await User.findOne({ _id: decoded.userId, deactivated: false });
+    const user = await User.findOne({
+      _id: decoded.userId,
+      deactivated: false,
+    });
 
     if (!user) {
       return res.status(401).json({ message: "User not found or deactivated" });
@@ -22,9 +25,13 @@ const auth = async (req, res, next) => {
 
     req.token = token;
     req.user = user;
+
+    console.log("User authenticated: ", user);
     next();
   } catch (error) {
-    res.status(401).json({ message: "Authentication failed", error: error.message });
+    res
+      .status(401)
+      .json({ message: "Authentication failed", error: error.message });
   }
 };
 
@@ -36,8 +43,9 @@ const checkRole = (roles) => {
     }
 
     if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ 
-        message: "Access denied. You don't have permission to perform this action" 
+      return res.status(403).json({
+        message:
+          "Access denied. You don't have permission to perform this action",
       });
     }
 
@@ -55,31 +63,38 @@ const canManageUser = async (req, res, next) => {
     }
 
     const targetUserId = req.params.id;
-    
+
     // Admin can manage all users
     if (req.user.role === "admin") {
       return next();
     }
-    
+
     // Sales manager can only manage sales agents they created
     if (req.user.role === "sales_manager") {
       const targetUser = await User.findById(targetUserId);
-      
+
       if (!targetUser) {
         return res.status(404).json({ message: "User not found" });
       }
-      
-      if (targetUser.role !== "sales_agent" || targetUser.createdBy.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "You can only manage sales agents you created" });
+
+      if (
+        targetUser.role !== "sales_agent" ||
+        targetUser.createdBy.toString() !== req.user._id.toString()
+      ) {
+        return res
+          .status(403)
+          .json({ message: "You can only manage sales agents you created" });
       }
-      
+
       return next();
     }
-    
+
     // Sales agents cannot manage other users
     return res.status(403).json({ message: "Access denied" });
   } catch (error) {
-    return res.status(500).json({ message: "Server error", error: error.message });
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
   }
 };
 
@@ -91,30 +106,37 @@ const canManageCustomer = async (req, res, next) => {
     }
 
     const customerId = req.params.id;
-    
+
     // Admin and sales manager can manage all customers
     if (["admin", "sales_manager"].includes(req.user.role)) {
       return next();
     }
-    
+
     // Sales agent can only manage assigned customers
     if (req.user.role === "sales_agent") {
       const customer = await require("../models/Customer").findById(customerId);
-      
+
       if (!customer) {
         return res.status(404).json({ message: "Customer not found" });
       }
-      
-      if (!customer.assignedTo || customer.assignedTo.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "You can only manage customers assigned to you" });
+
+      if (
+        !customer.assignedTo ||
+        customer.assignedTo.toString() !== req.user._id.toString()
+      ) {
+        return res
+          .status(403)
+          .json({ message: "You can only manage customers assigned to you" });
       }
-      
+
       return next();
     }
-    
+
     return res.status(403).json({ message: "Access denied" });
   } catch (error) {
-    return res.status(500).json({ message: "Server error", error: error.message });
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
   }
 };
 
@@ -136,5 +158,5 @@ module.exports = {
   checkRole,
   canManageUser,
   canManageCustomer,
-  updateLastLogin
+  updateLastLogin,
 };
