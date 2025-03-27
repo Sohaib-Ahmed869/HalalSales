@@ -3,6 +3,7 @@ const router = express.Router();
 const multer = require("multer");
 const path = require("path");
 const callDataController = require("../controllers/callData.controller");
+const { auth } = require("../middleware/auth");
 
 // Configure multer for file upload
 const storage = multer.diskStorage({
@@ -37,8 +38,26 @@ const upload = multer({
 
 // Routes
 router.post("/upload", upload.single("file"), callDataController.uploadCSV);
+router.get("/agent", auth, callDataController.getAgentCallData);
+
+// Get call statistics for the current authenticated agent
+router.get("/statistics", auth, callDataController.getAgentCallStatistics);
+// Get call data for all agents (manager view)
+router.get("/team", auth, callDataController.getTeamCallData);
+
+// Get call statistics for all agents (manager view)
+router.get("/team/statistics", auth, callDataController.getTeamCallStatistics);
+
+// Get agent performance comparison
+router.get(
+  "/performance/compare",
+  auth,
+  callDataController.getAgentPerformanceComparison
+);
 router.get("/", callDataController.getAllCallData);
 router.get("/:id", callDataController.getCallDataById);
 router.delete("/:id", callDataController.deleteCallDataById);
+
+// Get call data for the current authenticated agent
 
 module.exports = router;

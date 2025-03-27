@@ -1,32 +1,62 @@
 // utils/time-parser.js - Utility for parsing DeskTime time formats
+
 /**
- * Parse time string to hours
- * Handles formats like "2h 30m", "45m", "3h", etc.
+ * Parse a single time string to hours and minutes
+ * Handles formats like:
+ * - "9:00 AM" (12-hour format)
+ * - "14:30" (24-hour format)
+ * - "6:56:25" (hours:minutes:seconds format)
  *
  * @param {string} timeStr - Time string to parse
- * @returns {number} - Time in hours (decimal)
+ * @returns {Object|null} - Object with hours and minutes properties or null if invalid
  */
-function parseTimeToHours(timeStr) {
-  if (!timeStr) return 0;
+function parseSingleTime(timeStr) {
+  if (!timeStr) return null;
 
-  // Convert string to lowercase and trim whitespace
-  timeStr = timeStr.toLowerCase().trim();
+  // Trim whitespace and standardize
+  timeStr = timeStr.trim();
 
-  let hours = 0;
+  // Handle 12-hour format with AM/PM
+  const twelveHourMatch = timeStr.match(/(\d+):?(\d*)?\s*(am|pm)/i);
+  if (twelveHourMatch) {
+    let hours = parseInt(twelveHourMatch[1], 10);
+    const minutes = twelveHourMatch[2] ? parseInt(twelveHourMatch[2], 10) : 0;
+    const period = twelveHourMatch[3].toLowerCase();
 
-  // Match hours pattern (e.g., "2h" in "2h 30m")
-  const hoursMatch = timeStr.match(/(\d+)\s*h/);
-  if (hoursMatch && hoursMatch[1]) {
-    hours += parseInt(hoursMatch[1], 10);
+    // Adjust hours for PM
+    if (period === "pm" && hours < 12) {
+      hours += 12;
+    }
+    // Adjust 12 AM to 0 hours
+    if (period === "am" && hours === 12) {
+      hours = 0;
+    }
+
+    return { hours, minutes };
   }
 
-  // Match minutes pattern (e.g., "30m" in "2h 30m")
-  const minutesMatch = timeStr.match(/(\d+)\s*m/);
-  if (minutesMatch && minutesMatch[1]) {
-    hours += parseInt(minutesMatch[1], 10) / 60;
+  // Handle HH:MM:SS format (e.g., "6:56:25")
+  const timeWithSecondsMatch = timeStr.match(/(\d+):(\d+):(\d+)/);
+  if (timeWithSecondsMatch) {
+    const hours = parseInt(timeWithSecondsMatch[1], 10);
+    const minutes = parseInt(timeWithSecondsMatch[2], 10);
+    const seconds = parseInt(timeWithSecondsMatch[3], 10);
+
+    // Convert seconds to fractional minutes
+    const totalMinutes = minutes + seconds / 60;
+
+    return { hours, minutes: totalMinutes };
   }
 
-  return hours;
+  // Handle 24-hour format (HH:MM)
+  const twentyFourHourMatch = timeStr.match(/(\d+):(\d+)/);
+  if (twentyFourHourMatch) {
+    const hours = parseInt(twentyFourHourMatch[1], 10);
+    const minutes = parseInt(twentyFourHourMatch[2], 10);
+    return { hours, minutes };
+  }
+
+  return null;
 }
 
 /**
@@ -61,7 +91,7 @@ function parseTimeRange(timeRangeStr, baseDate = new Date()) {
     startDate.setSeconds(0);
     startDate.setMilliseconds(0);
   } else {
-    startDate = null;
+    return { start: null, end: null };
   }
 
   // Parse end time
@@ -72,47 +102,10 @@ function parseTimeRange(timeRangeStr, baseDate = new Date()) {
     endDate.setSeconds(0);
     endDate.setMilliseconds(0);
   } else {
-    endDate = null;
+    return { start: null, end: null };
   }
 
   return { start: startDate, end: endDate };
-}
-
-/**
- * Parse a single time string like "9:00 AM" to hours and minutes
- *
- * @param {string} timeStr - Time string to parse
- * @returns {Object|null} - Object with hours and minutes properties or null if invalid
- */
-function parseSingleTime(timeStr) {
-  // Handle 12-hour format with AM/PM
-  const twelveHourMatch = timeStr.match(/(\d+):?(\d*)?\s*(am|pm)/i);
-  if (twelveHourMatch) {
-    let hours = parseInt(twelveHourMatch[1], 10);
-    const minutes = twelveHourMatch[2] ? parseInt(twelveHourMatch[2], 10) : 0;
-    const period = twelveHourMatch[3].toLowerCase();
-
-    // Adjust hours for PM
-    if (period === "pm" && hours < 12) {
-      hours += 12;
-    }
-    // Adjust 12 AM to 0 hours
-    if (period === "am" && hours === 12) {
-      hours = 0;
-    }
-
-    return { hours, minutes };
-  }
-
-  // Handle 24-hour format
-  const twentyFourHourMatch = timeStr.match(/(\d+):(\d+)/);
-  if (twentyFourHourMatch) {
-    const hours = parseInt(twentyFourHourMatch[1], 10);
-    const minutes = parseInt(twentyFourHourMatch[2], 10);
-    return { hours, minutes };
-  }
-
-  return null;
 }
 
 /**
@@ -147,6 +140,59 @@ function calculateTimeDifference(
   // Calculate difference in milliseconds and convert to hours
   const diffMs = endDate - startDate;
   return diffMs / (1000 * 60 * 60);
+}
+
+/**
+ * Parse time string to hours
+ * Handles formats like:
+ * - "2h 30m", "45m", "3h", etc.
+ * - "6:56:25" (hours:minutes:seconds)
+ * - "9:00 AM - 5:30 PM" (time range)
+ *
+ * @param {string} timeStr - Time string to parse
+ * @returns {number} - Time in hours (decimal)
+ */
+function parseTimeToHours(timeStr) {
+  if (!timeStr) return 0;
+
+  // Convert string to lowercase and trim whitespace
+  timeStr = timeStr.toLowerCase().trim();
+
+  // Check if this is a time with hours, minutes, and seconds format (e.g., "6:56:25")
+  const timeWithSecondsMatch = timeStr.match(/(\d+):(\d+):(\d+)/);
+  if (timeWithSecondsMatch) {
+    const hours = parseInt(timeWithSecondsMatch[1], 10);
+    const minutes = parseInt(timeWithSecondsMatch[2], 10);
+    const seconds = parseInt(timeWithSecondsMatch[3], 10);
+
+    return hours + minutes / 60 + seconds / 3600;
+  }
+
+  // Check if this is a 24-hour format (e.g., "14:30")
+  const twentyFourHourMatch = timeStr.match(/^(\d+):(\d+)$/);
+  if (twentyFourHourMatch) {
+    const hours = parseInt(twentyFourHourMatch[1], 10);
+    const minutes = parseInt(twentyFourHourMatch[2], 10);
+
+    return hours + minutes / 60;
+  }
+
+  // Handle hours and minutes format (e.g., "2h 30m")
+  let hours = 0;
+
+  // Match hours pattern (e.g., "2h" in "2h 30m")
+  const hoursMatch = timeStr.match(/(\d+)\s*h/);
+  if (hoursMatch && hoursMatch[1]) {
+    hours += parseInt(hoursMatch[1], 10);
+  }
+
+  // Match minutes pattern (e.g., "30m" in "2h 30m")
+  const minutesMatch = timeStr.match(/(\d+)\s*m/);
+  if (minutesMatch && minutesMatch[1]) {
+    hours += parseInt(minutesMatch[1], 10) / 60;
+  }
+
+  return hours;
 }
 
 module.exports = {

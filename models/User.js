@@ -29,6 +29,10 @@ const UserSchema = new Schema({
     required: [true, "Last name is required"],
     trim: true,
   },
+  phone: {
+    type: String,
+    trim: true,
+  },
   createdAt: {
     type: Date,
     default: Date.now,

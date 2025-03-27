@@ -81,9 +81,13 @@ exports.getSalesAgentTimeRecords = async (req, res) => {
     }
 
     // Query DeskTime records for this user within the date range
-    const records = await DeskTime.findByDateRange(start, end, {
+    const records = await DeskTime.find({
+      date: { $gte: start, $lte: end },
+
       email: user.email,
     });
+
+    console.log(`Found ${records.length} records for ${user.email}`);
 
     // Calculate aggregated stats
     let totalProductiveTime = 0;
@@ -150,8 +154,7 @@ exports.getOverallPerformance = async (req, res) => {
     );
 
     // Add filter for sales agents only
-    query.userId = { $in: salesAgentIds };
-
+    query.email = { $in: salesAgents.map((agent) => agent.email) };
     // Fetch records
     const records = await DeskTime.find(query);
 
@@ -256,22 +259,83 @@ exports.getSalesAgentPerformance = async (req, res) => {
     }
 
     // Query DeskTime records
-    const records = await DeskTime.findByDateRange(start, end, {
+    const records = await DeskTime.find({
+      date: { $gte: start, $lte: end },
       email: user.email,
     });
 
     // Get sales data for the same period
     const salesData = await SalesOrder.find({
       DocDate: { $gte: start, $lte: end },
-      SalesAgent: user._id,
+      salesAgent: user._id,
     });
 
+    console.log(
+      `Found ${records.length} records and ${salesData.length} sales for ${user.email}`
+    );
+
     // Aggregate data by day, week, or month
-    const groupedData = {};
+    let groupedData = {};
     let totalProductiveHours = 0;
     let totalDeskHours = 0;
 
+    // If no DeskTime records found but sales exist, create timeline entries for sales dates
+    if (records.length === 0 && salesData.length > 0) {
+      console.log(
+        "No DeskTime records found, but sales exist. Creating timeline entries for sales dates."
+      );
+
+      // Create entries in groupedData for each sales date
+      salesData.forEach((sale) => {
+        const saleDate = new Date(sale.DocDate);
+        let key;
+
+        switch (groupBy) {
+          case "week":
+            const weekStartDate = new Date(saleDate);
+            weekStartDate.setDate(saleDate.getDate() - saleDate.getDay());
+            key = weekStartDate.toISOString().split("T")[0];
+            break;
+
+          case "month":
+            key = `${saleDate.getFullYear()}-${String(
+              saleDate.getMonth() + 1
+            ).padStart(2, "0")}`;
+            break;
+
+          case "day":
+          default:
+            key = saleDate.toISOString().split("T")[0];
+            break;
+        }
+
+        if (!groupedData[key]) {
+          groupedData[key] = {
+            period: key,
+            days: 0,
+            productiveHours: 0,
+            deskHours: 0,
+            productivity: 0,
+            salesAmount: 0.0,
+            orderCount: 0,
+          };
+        }
+
+        groupedData[key].salesAmount += sale.DocTotal || 0;
+        groupedData[key].orderCount += 1;
+      });
+    }
+
     records.forEach((record) => {
+      // Debug sample record
+      if (records.indexOf(record) === 0) {
+        console.log("Sample record:", {
+          date: record.date,
+          productiveTime: record.productiveTime,
+          totalDeskTime: record.totalDeskTime,
+        });
+      }
+
       const date = record.date;
       let key;
 
@@ -300,19 +364,24 @@ exports.getSalesAgentPerformance = async (req, res) => {
           productiveHours: 0,
           deskHours: 0,
           productivity: 0,
-          salesAmount: 0,
+          salesAmount: 0.0,
           orderCount: 0,
         };
       }
 
+      // Parse time strings directly instead of using virtual properties
+      const productiveHours =
+        timeParser.parseTimeToHours(record.productiveTime) || 0;
+      const deskHours = timeParser.parseTimeToHours(record.totalDeskTime) || 0;
+
       // Update group stats
       groupedData[key].days += 1;
-      groupedData[key].productiveHours += record.productiveTimeHours || 0;
-      groupedData[key].deskHours += record.totalDeskTimeHours || 0;
+      groupedData[key].productiveHours += productiveHours;
+      groupedData[key].deskHours += deskHours;
 
       // Update totals
-      totalProductiveHours += record.productiveTimeHours || 0;
-      totalDeskHours += record.totalDeskTimeHours || 0;
+      totalProductiveHours += productiveHours;
+      totalDeskHours += deskHours;
     });
 
     // Add sales data to grouped periods
