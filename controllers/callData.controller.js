@@ -304,7 +304,7 @@ const callDataController = {
       });
       const outboundCalls = await CallData.countDocuments({
         ...filter,
-        direction: "outbound",
+        direction: "out",
       });
       const missedCalls = await CallData.countDocuments({
         ...filter,
@@ -557,9 +557,7 @@ const callDataController = {
               $sum: { $cond: [{ $eq: ["$direction", "out"] }, 1, 0] },
             },
             missedCalls: {
-              $sum: { 
-                $cond: [{ $ne: ["$missed", "true"] }, 1, 0] 
-              },
+              $sum: { $cond: [{ $eq: ["$missed", "true"] }, 1, 0] },
             },
             totalDuration: { $sum: "$totalDuration" },
             inCallDuration: { $sum: "$inCallDuration" },
