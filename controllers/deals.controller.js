@@ -138,6 +138,9 @@ exports.getCustomerDeals = async (req, res) => {
       {
         $limit: parseInt(req.query.limit) || 20,
       },
+      {
+        allowDiskUse: true,
+      },
     ]);
 
     res.status(200).json({
