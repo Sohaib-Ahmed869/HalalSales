@@ -94,7 +94,7 @@ exports.getCustomerDeals = async (req, res) => {
           $group: {
             _id: "$customerEmail",
             customerName: { $first: "$customerName" },
-            deals: { $push: "$$ROOT" },
+            dealIds: { $push: "$_id" },
             totalSpent: {
               $sum: { $cond: [{ $eq: ["$isClosedWon", true] }, "$amount", 0] },
             },
