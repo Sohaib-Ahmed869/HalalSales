@@ -87,61 +87,63 @@ exports.updateDeal = async (req, res) => {
 exports.getCustomerDeals = async (req, res) => {
   try {
     // Get customers with their deals
-    const customers = await Deal.aggregate([
-      // Group by customer email
-      {
-        $group: {
-          _id: "$customerEmail",
-          customerName: { $first: "$customerName" },
-          deals: { $push: "$$ROOT" },
-          totalSpent: {
-            $sum: { $cond: [{ $eq: ["$isClosedWon", true] }, "$amount", 0] },
-          },
-          orderCount: {
-            $sum: {
-              $cond: [
-                {
-                  $and: [
-                    { $eq: ["$isClosedWon", true] },
-                    { $ne: ["$orderNumber", null] },
-                  ],
-                },
-                1,
-                0,
-              ],
+    const customers = await Deal.aggregate(
+      [
+        // Group by customer email
+        {
+          $group: {
+            _id: "$customerEmail",
+            customerName: { $first: "$customerName" },
+            deals: { $push: "$$ROOT" },
+            totalSpent: {
+              $sum: { $cond: [{ $eq: ["$isClosedWon", true] }, "$amount", 0] },
+            },
+            orderCount: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ["$isClosedWon", true] },
+                      { $ne: ["$orderNumber", null] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+            lastPurchaseDate: {
+              $max: {
+                $cond: [{ $eq: ["$isClosedWon", true] }, "$closeDate", null],
+              },
+            },
+            abandonedCartsCount: {
+              $sum: { $cond: [{ $eq: ["$orderNumber", null] }, 1, 0] },
             },
           },
-          lastPurchaseDate: {
-            $max: {
-              $cond: [{ $eq: ["$isClosedWon", true] }, "$closeDate", null],
-            },
-          },
-          abandonedCartsCount: {
-            $sum: { $cond: [{ $eq: ["$orderNumber", null] }, 1, 0] },
+        },
+        // Filter out null emails
+        {
+          $match: {
+            _id: { $ne: null, $ne: "" },
           },
         },
-      },
-      // Filter out null emails
-      {
-        $match: {
-          _id: { $ne: null, $ne: "" },
+        // Sort by total spent (highest first)
+        {
+          $sort: { totalSpent: -1 },
         },
-      },
-      // Sort by total spent (highest first)
-      {
-        $sort: { totalSpent: -1 },
-      },
-      // Add pagination
-      {
-        $skip: parseInt(req.query.skip) || 0,
-      },
-      {
-        $limit: parseInt(req.query.limit) || 20,
-      },
+        // Add pagination
+        {
+          $skip: parseInt(req.query.skip) || 0,
+        },
+        {
+          $limit: parseInt(req.query.limit) || 20,
+        },
+      ],
       {
         allowDiskUse: true,
-      },
-    ]);
+      }
+    );
 
     res.status(200).json({
       success: true,
