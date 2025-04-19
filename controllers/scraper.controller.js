@@ -10,7 +10,14 @@ const SCRAPER_API_URL =
  */
 exports.startJob = async (req, res) => {
   try {
-    const { region, scrolls = 10, getDetails = true, detailLimit } = req.body;
+    const {
+      region,
+      scrolls = 10,
+      getDetails = true,
+      detailLimit,
+      maxWorkers = 2,
+      exportCsv = false,
+    } = req.body;
 
     // Validate required fields
     if (!region) {
@@ -19,15 +26,17 @@ exports.startJob = async (req, res) => {
         .json({ success: false, message: "Region is required" });
     }
 
-    // Request payload for Python API
+    // Request payload for Python API (map to snake_case for Python)
     const payload = {
       region,
       scrolls,
       get_details: getDetails,
+      max_workers: maxWorkers,
+      export_csv: exportCsv,
     };
 
     // Add detail_limit if provided
-    if (detailLimit) {
+    if (detailLimit !== undefined) {
       payload.detail_limit = detailLimit;
     }
 
@@ -43,7 +52,10 @@ exports.startJob = async (req, res) => {
       scrolls,
       getDetails,
       detailLimit,
+      maxWorkers,
+      exportCsv,
       startTime: new Date(),
+      settings: jobData.settings || {},
     });
 
     await newJob.save();
@@ -56,6 +68,7 @@ exports.startJob = async (req, res) => {
         jobId: newJob.jobId,
         region: newJob.region,
         status: newJob.status,
+        settings: newJob.settings,
       },
     });
   } catch (error) {
@@ -98,6 +111,42 @@ exports.getJobs = async (req, res) => {
       .limit(options.limit);
 
     const total = await ScraperJob.countDocuments(query);
+
+    // Also check Python API for active jobs that might not be in our database
+    try {
+      const pythonJobsResponse = await axios.get(`${SCRAPER_API_URL}/jobs`);
+      const pythonJobs = pythonJobsResponse.data.jobs || {};
+
+      // Check if any Python jobs are missing from our database
+      const ourJobIds = jobs.map((job) => job.jobId);
+      const missingJobs = Object.keys(pythonJobs).filter(
+        (jobId) =>
+          !ourJobIds.includes(jobId) && pythonJobs[jobId].status === "running"
+      );
+
+      if (missingJobs.length > 0) {
+        // Just add a note in the response, we could sync these if needed
+        return res.status(200).json({
+          success: true,
+          data: {
+            jobs,
+            pagination: {
+              total,
+              page: options.page,
+              limit: options.limit,
+              pages: Math.ceil(total / options.limit),
+            },
+            note: `Found ${missingJobs.length} active jobs in Python API that are not in the database.`,
+          },
+        });
+      }
+    } catch (apiError) {
+      console.warn(
+        "Could not check Python API for missing jobs:",
+        apiError.message
+      );
+      // Continue with the regular response
+    }
 
     return res.status(200).json({
       success: true,
@@ -158,17 +207,48 @@ exports.getJobById = async (req, res) => {
         if (pythonStatus.status && pythonStatus.status !== job.status) {
           job.status = mapPythonStatus(pythonStatus.status);
 
+          // Update progress info if available
+          if (pythonStatus.progress) {
+            job.progress = pythonStatus.progress;
+          }
+
+          // Update restaurant count if available
+          if (pythonStatus.restaurants_count) {
+            job.restaurantCount = pythonStatus.restaurants_count;
+          }
+
+          // Check for file information
+          if (pythonStatus.result_file) {
+            job.resultFile = pythonStatus.result_file;
+          }
+
+          if (pythonStatus.csv_file) {
+            job.csvFile = pythonStatus.csv_file;
+          }
+
           // If completed, fetch the results
           if (job.status === "completed" && !excludeResults) {
+            // Include data parameter to control whether full data is included
             const resultsResponse = await axios.get(
-              `${SCRAPER_API_URL}/results/${job.jobId}`
+              `${SCRAPER_API_URL}/results/${
+                job.jobId
+              }?include_data=${!excludeResults}`
             );
             const resultsData = resultsResponse.data;
 
             // Update job with results data
-            job.completionTime = new Date(resultsData.completion_time * 1000);
-            job.restaurantCount = resultsData.count;
-            job.restaurants = resultsData.data;
+            if (resultsData.completion_time) {
+              job.completionTime = new Date(resultsData.completion_time * 1000);
+            }
+
+            job.restaurantCount =
+              resultsData.count || resultsData.data_size || 0;
+
+            // Only update restaurants if include_data was true
+            if (resultsData.data) {
+              job.restaurants = resultsData.data;
+            }
+
             job.rawData = resultsData;
           }
 
@@ -236,16 +316,34 @@ exports.syncJob = async (req, res) => {
     // Update status
     job.status = mapPythonStatus(pythonStatus.status);
 
+    // Update file information if available
+    if (pythonStatus.result_file) {
+      job.resultFile = pythonStatus.result_file;
+    }
+
+    if (pythonStatus.csv_file) {
+      job.csvFile = pythonStatus.csv_file;
+    }
+
     // If completed, get results
     if (job.status === "completed") {
+      // Get results with full data
       const resultsResponse = await axios.get(
         `${SCRAPER_API_URL}/results/${job.jobId}`
       );
       const resultsData = resultsResponse.data;
 
-      job.completionTime = new Date(resultsData.completion_time * 1000);
-      job.restaurantCount = resultsData.count;
-      job.restaurants = resultsData.data;
+      if (resultsData.completion_time) {
+        job.completionTime = new Date(resultsData.completion_time * 1000);
+      }
+
+      job.restaurantCount = resultsData.count || 0;
+
+      // Only update if we have data
+      if (resultsData.data) {
+        job.restaurants = resultsData.data;
+      }
+
       job.rawData = resultsData;
     } else if (job.status === "failed" || job.status === "error") {
       job.error = pythonStatus.error || "Unknown error occurred";
@@ -275,16 +373,33 @@ exports.deleteJob = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const result = await ScraperJob.findOneAndDelete({
+    // Find the job first to get the jobId
+    const job = await ScraperJob.findOne({
       $or: [{ _id: id }, { jobId: id }],
     });
 
-    if (!result) {
+    if (!job) {
       return res.status(404).json({
         success: false,
         message: "Scraping job not found",
       });
     }
+
+    // Try to clean up on Python API side first
+    try {
+      await axios.delete(`${SCRAPER_API_URL}/cleanup/${job.jobId}`);
+    } catch (apiError) {
+      console.warn(
+        `Could not clean up Python job ${job.jobId}:`,
+        apiError.message
+      );
+      // Continue with deletion even if Python API cleanup fails
+    }
+
+    // Now delete from our database
+    await ScraperJob.findOneAndDelete({
+      _id: job._id,
+    });
 
     return res.status(200).json({
       success: true,
@@ -319,10 +434,40 @@ exports.getRestaurants = async (req, res) => {
       });
     }
 
-    if (job.status !== "completed") {
+    // For completed jobs with no restaurants array but a result file in API
+    if (
+      job.status === "completed" &&
+      (!job.restaurants || job.restaurants.length === 0) &&
+      job.resultFile
+    ) {
+      try {
+        // Try to get the results from Python API
+        const resultsResponse = await axios.get(
+          `${SCRAPER_API_URL}/results/${job.jobId}`
+        );
+
+        if (resultsResponse.data.data) {
+          job.restaurants = resultsResponse.data.data;
+          job.restaurantCount = resultsResponse.data.count;
+          await job.save();
+        }
+      } catch (apiError) {
+        console.error(
+          "Failed to fetch restaurant data from Python API:",
+          apiError
+        );
+        // Continue with existing data
+      }
+    }
+
+    if (
+      job.status !== "completed" ||
+      !job.restaurants ||
+      job.restaurants.length === 0
+    ) {
       return res.status(400).json({
         success: false,
-        message: `Cannot get restaurants; job status is ${job.status}`,
+        message: `Cannot get restaurants; job status is ${job.status} or no restaurants available`,
       });
     }
 
@@ -330,29 +475,53 @@ exports.getRestaurants = async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
 
-    // Simple projection for restaurant list
-    const restaurants = job.restaurants
+    // Add filter options for restaurant name or cuisine
+    let filteredRestaurants = job.restaurants;
+
+    if (req.query.name) {
+      const nameRegex = new RegExp(req.query.name, "i");
+      filteredRestaurants = filteredRestaurants.filter(
+        (r) => r.name && nameRegex.test(r.name)
+      );
+    }
+
+    if (req.query.cuisine) {
+      const cuisineRegex = new RegExp(req.query.cuisine, "i");
+      filteredRestaurants = filteredRestaurants.filter(
+        (r) => r.cuisine && cuisineRegex.test(r.cuisine)
+      );
+    }
+
+    // Simple projection for restaurant list with pagination
+    const paginatedRestaurants = filteredRestaurants
       .slice((page - 1) * limit, page * limit)
       .map((r) => ({
         id: r.id,
         name: r.name,
         cuisine: r.cuisine,
         rating: r.rating,
-        delivery_time: r.delivery_time,
-        delivery_fee: r.delivery_fee,
+        address: r.address,
         url: r.url,
-        menuSize: r.menu ? r.menu.length : 0,
+        menuSections: r.menu ? r.menu.length : 0,
+        menuItems: r.menu
+          ? r.menu.reduce(
+              (count, section) =>
+                count + (section.items ? section.items.length : 0),
+              0
+            )
+          : 0,
+        popularItems: r.popular_items ? r.popular_items.length : 0,
       }));
 
     return res.status(200).json({
       success: true,
       data: {
-        restaurants,
+        restaurants: paginatedRestaurants,
         pagination: {
-          total: job.restaurants.length,
+          total: filteredRestaurants.length,
           page,
           limit,
-          pages: Math.ceil(job.restaurants.length / limit),
+          pages: Math.ceil(filteredRestaurants.length / limit),
         },
       },
     });
@@ -385,6 +554,32 @@ exports.getRestaurantById = async (req, res) => {
       });
     }
 
+    // For completed jobs with no restaurants array but a result file in API
+    if (
+      job.status === "completed" &&
+      (!job.restaurants || job.restaurants.length === 0) &&
+      job.resultFile
+    ) {
+      try {
+        // Try to get the results from Python API
+        const resultsResponse = await axios.get(
+          `${SCRAPER_API_URL}/results/${job.jobId}`
+        );
+
+        if (resultsResponse.data.data) {
+          job.restaurants = resultsResponse.data.data;
+          job.restaurantCount = resultsResponse.data.count;
+          await job.save();
+        }
+      } catch (apiError) {
+        console.error(
+          "Failed to fetch restaurant data from Python API:",
+          apiError
+        );
+        // Continue with existing data
+      }
+    }
+
     // Find restaurant in the job results
     const restaurant = job.restaurants.find((r) => r.id === restaurantId);
 
@@ -395,9 +590,27 @@ exports.getRestaurantById = async (req, res) => {
       });
     }
 
+    // Add stats to the restaurant data
+    const restaurantWithStats = {
+      ...restaurant,
+      _stats: {
+        menuSections: restaurant.menu ? restaurant.menu.length : 0,
+        totalMenuItems: restaurant.menu
+          ? restaurant.menu.reduce(
+              (count, section) =>
+                count + (section.items ? section.items.length : 0),
+              0
+            )
+          : 0,
+        popularItems: restaurant.popular_items
+          ? restaurant.popular_items.length
+          : 0,
+      },
+    };
+
     return res.status(200).json({
       success: true,
-      data: restaurant,
+      data: restaurantWithStats,
     });
   } catch (error) {
     console.error("Error fetching restaurant:", error);
@@ -443,3 +656,137 @@ function mapPythonStatus(pythonStatus) {
 
   return statusMap[pythonStatus] || pythonStatus;
 }
+
+/**
+ * Analyze restaurant menu ingredients and match with your products
+ * @param {string} jobId - Job ID
+ * @param {string} restaurantId - Restaurant ID
+ * @returns {Object} - Ingredient analysis and sales opportunities
+ */
+exports.analyzeRestaurantIngredients = async (req, res) => {
+  try {
+    const { jobId, restaurantId } = req.params;
+
+    // Find the job
+    const job = await ScraperJob.findOne({
+      $or: [{ _id: jobId }, { jobId: jobId }],
+    });
+
+    if (!job) {
+      return res.status(404).json({
+        success: false,
+        message: "Scraping job not found",
+      });
+    }
+
+    // Find restaurant in the job results
+    const encodedRestaurantId = encodeURIComponent(restaurantId);
+
+    // Try to find the restaurant
+    let restaurant;
+    try {
+      // First try direct access from database
+      if (job.restaurants && job.restaurants.length > 0) {
+        restaurant = job.restaurants.find((r) => r.id === restaurantId);
+      }
+
+      // If not found, try the API
+      if (!restaurant) {
+        const response = await api.get(
+          `/scraper/jobs/${jobId}/restaurants/${encodedRestaurantId}`
+        );
+
+        if (response.data.__parentArray) {
+          restaurant = response.data.__parentArray.find(
+            (r) => r.id === restaurantId
+          );
+        } else {
+          restaurant = response.data;
+        }
+      }
+
+      if (!restaurant) {
+        return res.status(404).json({
+          success: false,
+          message: "Restaurant not found in job results",
+        });
+      }
+    } catch (error) {
+      console.error("Error finding restaurant:", error);
+      return res.status(404).json({
+        success: false,
+        message: "Failed to retrieve restaurant data",
+      });
+    }
+
+    // Extract menu items to analyze
+    const menuItems = [];
+
+    // Add menu items from sections
+    if (restaurant.menu && restaurant.menu.length > 0) {
+      restaurant.menu.forEach((section) => {
+        if (section.items && section.items.length > 0) {
+          section.items.forEach((item) => {
+            menuItems.push({
+              name: item.name,
+              description: item.description || "",
+              price: item.price || "",
+            });
+          });
+        }
+      });
+    }
+
+    // Add popular items
+    if (restaurant.popular_items && restaurant.popular_items.length > 0) {
+      restaurant.popular_items.forEach((item) => {
+        // Avoid duplicates
+        if (!menuItems.some((m) => m.name === item.name)) {
+          menuItems.push({
+            name: item.name,
+            description: item.description || "",
+            price: item.price || "",
+          });
+        }
+      });
+    }
+
+    if (menuItems.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No menu items found for analysis",
+      });
+    }
+
+    const openaiService = require("../services/openaiService");
+
+    // Extract ingredients using OpenAI
+    const itemsWithIngredients = await openaiService.extractIngredientsFromMenu(
+      menuItems
+    );
+
+    // Match with your product catalog
+    const analysisResults = await openaiService.matchIngredientsWithItems(
+      itemsWithIngredients
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        restaurant: {
+          id: restaurant.id,
+          name: restaurant.name,
+          cuisine: restaurant.cuisine,
+        },
+        analysis: analysisResults,
+      },
+    });
+  } catch (error) {
+    console.error("Error analyzing restaurant ingredients:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to analyze restaurant ingredients",
+      error: error.message,
+    });
+  }
+};

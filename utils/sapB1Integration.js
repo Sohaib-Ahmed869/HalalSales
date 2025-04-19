@@ -1,151 +1,272 @@
-// utils/sapB1Integration.js
+// utils/sapB1Integration.js - Complete rewrite with minimal approach
 const axios = require("axios");
+const dotenv = require("dotenv");
 
-// SAP B1 Service Layer configuration
-const getSAPConfig = () => ({
-  baseURL: process.env.SAP_SERVICE_LAYER_URL,
-  headers: {
-    "Content-Type": "application/json",
-  },
-});
+// Load environment variables
+dotenv.config();
 
-// Login to SAP B1 Service Layer
-const loginToSAP = async () => {
-  const sapConfig = getSAPConfig();
+// SAP B1 Service Layer Configuration
+const SAP_CONFIG = {
+  serviceLayerUrl: process.env.SAP_SERVICE_LAYER_URL,
+  companyDB: process.env.COMPANY_DB,
+  username: process.env.USER_NAME,
+  password: process.env.PASSWORD,
+};
+
+// Set this to true to enable automatic SAP sync
+const ENABLE_SAP_SYNC = true;
+
+// Session management
+let sessionId = null;
+let sessionTimeout = null;
+
+// Login to SAP B1 Service Layer and get session ID
+async function loginToSAP() {
   try {
+    console.log("Logging in to SAP B1 Service Layer...");
+
+    // Clear any existing session timeout
+    if (sessionTimeout) {
+      clearTimeout(sessionTimeout);
+    }
+
+    const loginData = {
+      CompanyDB: SAP_CONFIG.companyDB,
+      UserName: SAP_CONFIG.username,
+      Password: SAP_CONFIG.password,
+    };
+
     const response = await axios.post(
-      `${sapConfig.baseURL}/Login`,
+      `${SAP_CONFIG.serviceLayerUrl}/Login`,
+      loginData,
       {
-        CompanyDB: process.env.COMPANY_DB,
-        UserName: process.env.USER_NAME,
-        Password: process.env.PASSWORD,
-      },
-      sapConfig
+        headers: {
+          "Content-Type": "application/json",
+        },
+      }
     );
 
     // Extract session ID from cookies
     const cookies = response.headers["set-cookie"];
     if (!cookies) {
-      throw new Error("Failed to authenticate with SAP B1");
+      throw new Error("No cookies returned from SAP B1 login");
     }
 
-    return cookies.join("; ");
+    // Parse session ID from cookies
+    const sessionCookie = cookies.find((cookie) =>
+      cookie.includes("B1SESSION=")
+    );
+    if (!sessionCookie) {
+      throw new Error("B1SESSION cookie not found");
+    }
+
+    sessionId = sessionCookie.split(";")[0].replace("B1SESSION=", "");
+
+    // Set session timeout (SAP B1 sessions typically expire after 30 minutes)
+    // We'll set it to refresh after 25 minutes to be safe
+    sessionTimeout = setTimeout(() => {
+      sessionId = null;
+    }, 25 * 60 * 1000);
+
+    console.log("Successfully logged in to SAP B1 Service Layer");
+    return sessionId;
   } catch (error) {
-    console.error("Error logging into SAP B1:", error.message);
-    throw new Error(`SAP B1 Login Failed: ${error.message}`);
+    console.error("Error logging in to SAP B1:", error.message);
+    if (error.response) {
+      console.error("SAP Error details:", error.response.data);
+    }
+    throw new Error(`SAP Login Error: ${error.message}`);
   }
-};
+}
 
-// Logout from SAP B1 Service Layer
-const logoutFromSAP = async (sessionCookie) => {
-  const sapConfig = getSAPConfig();
-  sapConfig.headers.Cookie = sessionCookie;
+// Get a valid session ID (login if necessary)
+async function getSessionId() {
+  if (!sessionId) {
+    return await loginToSAP();
+  }
+  return sessionId;
+}
 
+// Check if a business partner exists in SAP
+exports.checkBusinessPartnerExists = async (cardCode) => {
   try {
-    await axios.post(`${sapConfig.baseURL}/Logout`, {}, sapConfig);
+    const sessionId = await getSessionId();
+
+    console.log(`Checking if business partner ${cardCode} exists in SAP...`);
+
+    const response = await axios.get(
+      `${SAP_CONFIG.serviceLayerUrl}/BusinessPartners('${cardCode}')`,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `B1SESSION=${sessionId}`,
+        },
+      }
+    );
+
+    // If we get here, the business partner exists
+    console.log(`Business partner ${cardCode} exists in SAP`);
     return true;
   } catch (error) {
-    console.error("Error logging out from SAP B1:", error.message);
-    return false;
+    if (error.response && error.response.status === 404) {
+      console.log(`Business partner ${cardCode} does not exist in SAP`);
+      return false;
+    }
+
+    // If unauthorized, try to login again and retry once
+    if (error.response && error.response.status === 401) {
+      console.log("Session expired, attempting to login again...");
+      sessionId = null;
+      await getSessionId();
+      return exports.checkBusinessPartnerExists(cardCode);
+    }
+
+    console.error("Error checking business partner in SAP:", error.message);
+    throw new Error(`SAP Error: ${error.message}`);
   }
 };
 
-// Create a sales order in SAP B1
-const createSalesOrderInSAP = async (orderData) => {
-  const sessionCookie = await loginToSAP();
-  const sapConfig = getSAPConfig();
-  sapConfig.headers.Cookie = sessionCookie;
+// Format a local order for SAP B1 format - MINIMAL approach
+exports.formatOrderForSAP = async (order) => {
+  // Instead of removing fields, let's build a new object with only what SAP needs
+  const today = new Date();
 
-  try {
-    const response = await axios.post(
-      `${sapConfig.baseURL}/Orders`,
-      orderData,
-      sapConfig
-    );
-    await logoutFromSAP(sessionCookie);
-    return response.data;
-  } catch (error) {
-    await logoutFromSAP(sessionCookie);
-
-    // Extract detailed error information from SAP B1 response if available
-    const sapError =
-      error.response?.data?.error?.message?.value || error.message;
-    throw new Error(`SAP B1 Order Creation Failed: ${sapError}`);
-  }
-};
-
-// Format a MongoDB order document to SAP B1 format
-const formatOrderForSAP = (order) => {
-  // Base document
+  // Create minimal SAP order with only required fields
   const sapOrder = {
     CardCode: order.CardCode,
-    CardName: order.CardName,
-    DocDate: order.DocDate
-      ? new Date(order.DocDate).toISOString().split("T")[0]
-      : new Date().toISOString().split("T")[0],
-    DocDueDate: order.DocDueDate
-      ? new Date(order.DocDueDate).toISOString().split("T")[0]
-      : new Date().toISOString().split("T")[0],
+    DocDate: order.DocDate || today,
+    DocDueDate: order.DocDueDate || today,
     Comments: order.Comments || "",
-    SalesPersonCode: order.SalesPersonCode || 0,
     DocumentLines: [],
   };
 
-  // Optional fields if they exist
-  if (order.NumAtCard) sapOrder.NumAtCard = order.NumAtCard;
-  if (order.ShipToCode) sapOrder.ShipToCode = order.ShipToCode;
-  if (order.PaymentGroupCode)
-    sapOrder.PaymentGroupCode = order.PaymentGroupCode;
-  if (order.ContactPersonCode)
-    sapOrder.ContactPersonCode = order.ContactPersonCode;
-  if (order.U_Route) sapOrder.U_Route = order.U_Route;
-
-  // Format document lines
-  if (order.DocumentLines && order.DocumentLines.length > 0) {
+  // Only include the necessary fields for each line item
+  if (order.DocumentLines && Array.isArray(order.DocumentLines)) {
     sapOrder.DocumentLines = order.DocumentLines.map((line) => {
-      const sapLine = {
+      return {
         ItemCode: line.ItemCode,
-        Quantity: line.Quantity,
-        Price: line.Price,
-        DiscountPercent: line.DiscountPercent || 0,
+        Quantity: Number(line.Quantity || 0),
+        Price: Number(line.Price || 0),
+        // Include description if available
+        ItemDescription: line.ItemDescription || "",
       };
-
-      // Add optional line fields if they exist
-      if (line.WarehouseCode) sapLine.WarehouseCode = line.WarehouseCode;
-      if (line.TaxCode) sapLine.TaxCode = line.TaxCode;
-      if (line.ItemDescription) sapLine.ItemDescription = line.ItemDescription;
-      if (line.FreeText) sapLine.FreeText = line.FreeText;
-
-      return sapLine;
     });
   }
+
+  // Add custom field if salesAgent exists
+  if (order.salesAgent) {
+    sapOrder.U_SalesAgentId = order.salesAgent.toString();
+  }
+
+  // Log what we're sending
+  console.log(
+    "Minimal SAP order:",
+    JSON.stringify(
+      {
+        CardCode: sapOrder.CardCode,
+        DocDate: sapOrder.DocDate,
+        DocDueDate: sapOrder.DocDueDate,
+        LineCount: sapOrder.DocumentLines.length,
+        SampleLine: sapOrder.DocumentLines[0],
+      },
+      null,
+      2
+    )
+  );
 
   return sapOrder;
 };
 
-// Fetch a sales order from SAP B1
-const getSalesOrderFromSAP = async (docEntry) => {
-  const sessionCookie = await loginToSAP();
-  const sapConfig = getSAPConfig();
-  sapConfig.headers.Cookie = sessionCookie;
-
+// Create a sales order in SAP B1
+exports.createSalesOrderInSAP = async (orderData) => {
   try {
-    const response = await axios.get(
-      `${sapConfig.baseURL}/Orders(${docEntry})`,
-      sapConfig
+    // Skip SAP sync if disabled (for testing/debugging purposes)
+    if (!ENABLE_SAP_SYNC) {
+      console.log("SAP sync is disabled. Skipping order creation in SAP.");
+      return {
+        simulated: true,
+        message: "SAP sync is disabled",
+        DocEntry: Math.floor(Math.random() * 10000), // Simulate a DocEntry
+      };
+    }
+
+    const sessionId = await getSessionId();
+
+    console.log("Creating sales order in SAP B1...");
+
+    const response = await axios.post(
+      `${SAP_CONFIG.serviceLayerUrl}/Orders`,
+      orderData,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `B1SESSION=${sessionId}`,
+        },
+      }
     );
-    await logoutFromSAP(sessionCookie);
+
+    console.log("Sales order created successfully in SAP B1");
     return response.data;
   } catch (error) {
-    await logoutFromSAP(sessionCookie);
-    throw new Error(`Failed to fetch order from SAP B1: ${error.message}`);
+    console.error("Error creating sales order in SAP B1:", error.message);
+    if (error.response) {
+      console.error("SAP Error details:", error.response.data);
+
+      // For debugging, log the full error details
+      if (
+        error.response.data &&
+        error.response.data.error &&
+        error.response.data.error.message
+      ) {
+        console.error(
+          "Error field details:",
+          error.response.data.error.message.value
+        );
+      }
+    }
+
+    // If unauthorized, try to login again and retry once
+    if (error.response && error.response.status === 401) {
+      console.log("Session expired, attempting to login again...");
+      sessionId = null;
+      await getSessionId();
+      return exports.createSalesOrderInSAP(orderData);
+    }
+
+    throw new Error(`SAP Error: ${error.message}`);
   }
 };
 
-module.exports = {
-  loginToSAP,
-  logoutFromSAP,
-  createSalesOrderInSAP,
-  formatOrderForSAP,
-  getSalesOrderFromSAP,
+// Get a sales order from SAP B1 by DocEntry
+exports.getSalesOrderFromSAP = async (docEntry) => {
+  try {
+    const sessionId = await getSessionId();
+
+    console.log(`Fetching sales order ${docEntry} from SAP B1...`);
+
+    const response = await axios.get(
+      `${SAP_CONFIG.serviceLayerUrl}/Orders(${docEntry})`,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `B1SESSION=${sessionId}`,
+        },
+      }
+    );
+
+    console.log("Sales order fetched successfully from SAP B1");
+    return response.data;
+  } catch (error) {
+    console.error("Error fetching sales order from SAP B1:", error.message);
+
+    // If unauthorized, try to login again and retry once
+    if (error.response && error.response.status === 401) {
+      console.log("Session expired, attempting to login again...");
+      sessionId = null;
+      await getSessionId();
+      return exports.getSalesOrderFromSAP(docEntry);
+    }
+
+    throw new Error(`SAP Error: ${error.message}`);
+  }
 };

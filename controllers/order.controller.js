@@ -1,4 +1,4 @@
-// controllers/orderController.js
+// controllers/orderController.js - Update to remove warehouse/stock checks
 const SalesOrder = require("../models/SalesOrder");
 const User = require("../models/User");
 const Item = require("../models/item");
@@ -7,7 +7,9 @@ const {
   formatOrderForSAP,
   createSalesOrderInSAP,
   getSalesOrderFromSAP,
+  checkBusinessPartnerExists,
 } = require("../utils/sapB1Integration");
+
 // Add this helper function
 async function updateSalesAgentStats(salesAgentId, order) {
   try {
@@ -90,7 +92,101 @@ async function updateSalesAgentAchievement(salesAgentId, order) {
   await agent.save();
 }
 
-// Create a new sales order (save to local DB)
+// Helper function to push order to SAP
+async function pushOrderToSAPInternal(order) {
+  try {
+    // Format the order for SAP B1 - Note this is now async
+    const sapOrder = await formatOrderForSAP(order);
+
+    try {
+      // First check if business partner exists in SAP
+      const businessPartnerExists = await checkBusinessPartnerExists(
+        order.CardCode
+      );
+
+      if (!businessPartnerExists) {
+        // Update order to reflect BP doesn't exist in SAP
+        order.SyncErrors = `Business partner ${order.CardCode} does not exist in SAP B1`;
+        order.LastSyncAttempt = new Date();
+        order.LocalStatus = "SyncFailed";
+        order.SAPSyncDisabled = true; // Flag to indicate we shouldn't try to sync this order again
+        await order.save();
+
+        return {
+          success: false,
+          error: order.SyncErrors,
+          code: "BP_NOT_FOUND",
+        };
+      }
+    } catch (bpError) {
+      // If BP check itself fails, continue with the order creation attempt
+      console.warn(
+        `Could not verify business partner in SAP: ${bpError.message}`
+      );
+    }
+
+    // Push to SAP B1
+    const sapResponse = await createSalesOrderInSAP(sapOrder);
+
+    // Update local order with SAP DocEntry if successful
+    if (sapResponse && sapResponse.DocEntry) {
+      order.SAPDocEntry = sapResponse.DocEntry;
+      order.DocumentStatus = "bost_Closed"; // Or any appropriate status
+      order.UpdateDate = new Date();
+      order.SyncedWithSAP = true;
+      order.LocalStatus = "Synced";
+
+      await order.save();
+
+      // Update sales agent stats for synced order
+      if (order.salesAgent) {
+        await updateSalesAgentAchievement(order.salesAgent, order);
+      }
+
+      return {
+        success: true,
+        SAPDocEntry: sapResponse.DocEntry,
+        sapData: sapResponse,
+      };
+    } else {
+      throw new Error("Invalid response from SAP B1");
+    }
+  } catch (error) {
+    // Check for specific error types
+    let errorCode = "GENERAL_ERROR";
+
+    if (
+      error.message &&
+      error.message.includes("Business partner") &&
+      error.message.includes("does not exist")
+    ) {
+      errorCode = "BP_NOT_FOUND";
+    } else if (error.message && error.message.includes("Invalid BP code")) {
+      errorCode = "INVALID_BP_CODE";
+    }
+
+    // Update local order to mark sync failure
+    order.SyncErrors = error.message;
+    order.LastSyncAttempt = new Date();
+    order.LocalStatus = "SyncFailed";
+
+    // If BP doesn't exist, mark order to not attempt sync again
+    if (errorCode === "BP_NOT_FOUND" || errorCode === "INVALID_BP_CODE") {
+      order.SAPSyncDisabled = true;
+    }
+
+    await order.save();
+
+    console.error("Error pushing order to SAP:", error);
+    return {
+      success: false,
+      error: error.message || "Unknown error",
+      code: errorCode,
+    };
+  }
+}
+
+// Create a new sales order (save to local DB and push to SAP)
 exports.createOrder = async (req, res) => {
   try {
     // Validate required fields
@@ -111,7 +207,7 @@ exports.createOrder = async (req, res) => {
       });
     }
 
-    // Validate items and check stock availability
+    // Validate items but don't check stock availability
     const itemCodes = req.body.DocumentLines.map((line) => line.ItemCode);
     const items = await Item.find({ ItemCode: { $in: itemCodes } });
 
@@ -121,7 +217,7 @@ exports.createOrder = async (req, res) => {
       itemMap[item.ItemCode] = item;
     });
 
-    // Check if all items exist and have enough stock
+    // Check if all items exist but don't check stock
     const invalidItems = [];
     for (const line of req.body.DocumentLines) {
       const item = itemMap[line.ItemCode];
@@ -132,17 +228,6 @@ exports.createOrder = async (req, res) => {
           error: "Item not found",
         });
         continue;
-      }
-
-      // Find warehouse specific stock
-      let warehouseStock = 0;
-      if (line.WarehouseCode && item.ItemWarehouseInfoCollection) {
-        const warehouse = item.ItemWarehouseInfoCollection.find(
-          (wh) => wh.WarehouseCode === line.WarehouseCode
-        );
-        if (warehouse) {
-          warehouseStock = warehouse.InStock;
-        }
       }
 
       // Add item description if not provided
@@ -163,6 +248,9 @@ exports.createOrder = async (req, res) => {
     const lastOrder = await SalesOrder.findOne().sort({ DocEntry: -1 });
     const newDocEntry = lastOrder ? lastOrder.DocEntry + 1 : 1;
 
+    // Calculate today's date for DocDate and DocDueDate
+    const today = new Date();
+
     // Create the new order
     const newOrder = new SalesOrder({
       ...req.body,
@@ -170,10 +258,11 @@ exports.createOrder = async (req, res) => {
       DocNum: newDocEntry, // Consider separate numbering if needed
       DocType: req.body.DocType || "dDocument_Items",
       DocumentStatus: "bost_Open",
-      CreationDate: new Date(),
-      StartDeliveryDate: req.body.StartDeliveryDate || new Date(),
-      DocDate: req.body.DocDate || new Date(),
-      UpdateDate: new Date(),
+      CreationDate: today,
+      StartDeliveryDate: req.body.StartDeliveryDate || today,
+      DocDate: req.body.DocDate || today,
+      DocDueDate: req.body.DocDueDate || today, // Ensure DocDueDate is set
+      UpdateDate: today,
       SyncedWithSAP: false,
       LocalStatus: "Created", // Custom field to track local status
       salesAgent: salesAgentId,
@@ -193,18 +282,51 @@ exports.createOrder = async (req, res) => {
     // Save to local database
     await newOrder.save();
 
-    // ====== NEW CODE - Update customer target ======
-    // Instead of updating agent stats, update customer target
+    // Update customer target
     const updatedTarget =
       await customerTargetController.updateCustomerTargetProgress(newOrder);
-    // ==============================================
 
-    res.status(201).json({
-      success: true,
-      data: newOrder,
-      message: "Order created successfully in local database",
-      targetUpdated: updatedTarget ? true : false,
-    });
+    // NEW CODE: Push to SAP automatically
+    console.log("Automatically pushing new order to SAP...");
+    const sapResult = await pushOrderToSAPInternal(newOrder);
+
+    // Return response with both local creation and SAP push results
+    if (sapResult.success) {
+      res.status(201).json({
+        success: true,
+        data: newOrder,
+        message: "Order created successfully and synced with SAP",
+        targetUpdated: updatedTarget ? true : false,
+        sapSync: {
+          success: true,
+          SAPDocEntry: sapResult.SAPDocEntry,
+        },
+      });
+    } else {
+      // Customize message based on error code
+      let sapErrorMessage = "Failed to sync with SAP";
+
+      if (
+        sapResult.code === "BP_NOT_FOUND" ||
+        sapResult.code === "INVALID_BP_CODE"
+      ) {
+        sapErrorMessage = `Business partner ${newOrder.CardCode} does not exist in SAP B1`;
+      }
+
+      res.status(201).json({
+        success: true,
+        data: newOrder,
+        message:
+          "Order created successfully in local database but failed to sync with SAP",
+        targetUpdated: updatedTarget ? true : false,
+        sapSync: {
+          success: false,
+          error: sapResult.error,
+          message: sapErrorMessage,
+          code: sapResult.code,
+        },
+      });
+    }
   } catch (error) {
     console.error("Error creating order:", error);
     res.status(500).json({
@@ -214,7 +336,6 @@ exports.createOrder = async (req, res) => {
     });
   }
 };
-
 // Get all sales orders with pagination
 exports.getAllOrders = async (req, res) => {
   try {
@@ -276,31 +397,6 @@ exports.getAllOrders = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error fetching orders",
-      error: error.message,
-    });
-  }
-};
-
-// Get a single order by DocEntry
-exports.getOrderByDocEntry = async (req, res) => {
-  try {
-    const order = await SalesOrder.findOne({ DocEntry: req.params.docEntry });
-
-    if (!order) {
-      return res.status(404).json({
-        success: false,
-        message: `Order with DocEntry ${req.params.docEntry} not found`,
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      data: order,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Error fetching order",
       error: error.message,
     });
   }
@@ -409,7 +505,7 @@ exports.getOrderByDocEntry = async (req, res) => {
   }
 };
 
-// Push order to SAP B1
+// Manual push order to SAP B1 (kept for backup or retry purposes)
 exports.pushOrderToSAP = async (req, res) => {
   try {
     const order = await SalesOrder.findOne({ DocEntry: req.params.docEntry });
@@ -430,41 +526,48 @@ exports.pushOrderToSAP = async (req, res) => {
       });
     }
 
-    // Format the order for SAP B1
-    const sapOrder = formatOrderForSAP(order);
-
-    try {
-      // Push to SAP B1
-      const sapResponse = await createSalesOrderInSAP(sapOrder);
-
-      // Update local order with SAP DocEntry
-      if (sapResponse && sapResponse.DocEntry) {
-        order.SAPDocEntry = sapResponse.DocEntry;
-        order.DocumentStatus = "bost_Closed"; // Or any appropriate status
-        order.UpdateDate = new Date();
-        order.SyncedWithSAP = true;
-        order.LocalStatus = "Synced";
-
-        await order.save();
-
-        return res.status(200).json({
-          success: true,
-          message: "Order successfully pushed to SAP B1",
-          SAPDocEntry: sapResponse.DocEntry,
-          localDocEntry: order.DocEntry,
-          sapData: sapResponse,
+    // Check if sync was previously disabled due to BP not existing
+    if (order.SAPSyncDisabled) {
+      // Allow force sync if specifically requested
+      if (req.query.force !== "true") {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot sync order: ${order.SyncErrors}. Add ?force=true to override.`,
+          error: order.SyncErrors,
         });
-      } else {
-        throw new Error("Invalid response from SAP B1");
       }
-    } catch (error) {
-      // Update local order to mark sync failure
-      order.SyncErrors = error.message;
-      order.LastSyncAttempt = new Date();
-      order.LocalStatus = "SyncFailed";
+      // If force=true, continue with sync attempt and clear the flag
+      order.SAPSyncDisabled = false;
       await order.save();
+    }
 
-      throw error;
+    const sapResult = await pushOrderToSAPInternal(order);
+
+    if (sapResult.success) {
+      return res.status(200).json({
+        success: true,
+        message: "Order successfully pushed to SAP B1",
+        SAPDocEntry: sapResult.SAPDocEntry,
+        localDocEntry: order.DocEntry,
+        sapData: sapResult.sapData,
+      });
+    } else {
+      // Customize message based on error code
+      let errorMessage = "Error pushing order to SAP B1";
+
+      if (
+        sapResult.code === "BP_NOT_FOUND" ||
+        sapResult.code === "INVALID_BP_CODE"
+      ) {
+        errorMessage = `Business partner ${order.CardCode} does not exist in SAP B1`;
+      }
+
+      return res.status(400).json({
+        success: false,
+        message: errorMessage,
+        error: sapResult.error,
+        code: sapResult.code,
+      });
     }
   } catch (error) {
     res.status(500).json({

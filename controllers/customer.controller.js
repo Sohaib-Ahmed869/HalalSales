@@ -79,17 +79,17 @@ exports.getCustomers = async (req, res) => {
       ];
     }
 
-    // Filter by assigned agent
-    if (assignedTo) {
-      query.assignedTo = assignedTo;
-    }
+    // // Filter by assigned agent
+    // if (assignedTo) {
+    //   query.assignedTo = assignedTo;
+    // }
 
-    // Role-based queries
-    if (req.user && req.user.role === "sales_agent") {
-      // Sales agents can only see customers assigned to them
-      query.assignedTo = req.user._id;
-    }
-    // Admins can see all customers
+    // // Role-based queries
+    // if (req.user && req.user.role === "sales_agent") {
+    //   // Sales agents can only see customers assigned to them
+    //   query.assignedTo = req.user._id;
+    // }
+    // // Admins can see all customers
 
     const customers = await Customer.find(query).populate(
       "assignedTo",

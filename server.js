@@ -25,6 +25,7 @@ const customerTargetRoutes = require("./routes/customerTarget.routes");
 const salesManagerRoutes = require("./routes/salesManager.routes");
 const scraperRoutes = require("./routes/scraper.routes");
 const dealsRoutes = require("./routes/deals.routes");
+const menuRoutes = require('./routes/menu.routes');
 const config = require("./services/config");
 
 // Initialize express app
@@ -105,6 +106,7 @@ app.use("/api/customer-targets", customerTargetRoutes);
 app.use("/api/sales-manager", salesManagerRoutes);
 app.use("/api/scraper", scraperRoutes);
 app.use("/api/deals", dealsRoutes);
+app.use("/api/menu", menuRoutes); // Menu routes
 
 // Health check route
 app.get("/health", (req, res) => {

@@ -62,4 +62,14 @@ router.get(
  */
 router.get("/status", scraperController.getApiStatus);
 
+/**
+ * @route   GET /api/scraper/jobs/:jobId/restaurants/:restaurantId/ingredients
+ * @desc    Analyze restaurant ingredients and match with products
+ * @access  Private
+ */
+router.get(
+  "/jobs/:jobId/restaurants/:restaurantId/ingredients",
+  scraperController.analyzeRestaurantIngredients
+);
+
 module.exports = router;
