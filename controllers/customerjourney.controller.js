@@ -476,9 +476,34 @@ exports.getCustomerJourneySummary = async (req, res) => {
       search,
     } = req.query;
 
-    // Build base aggregation pipeline for invoice data
     const invoicePipeline = [
-      // Group by customer
+      // Add search filter FIRST - before any expensive operations
+      ...(search
+        ? [
+            {
+              $match: {
+                $or: [
+                  { CardCode: new RegExp(search, "i") },
+                  { CardName: new RegExp(search, "i") },
+                ],
+              },
+            },
+          ]
+        : []),
+
+      // Use $project to reduce fields before grouping
+      {
+        $project: {
+          CardCode: 1,
+          CardName: 1,
+          DocDate: 1,
+          DocTotal: 1,
+          PaidToDate: 1,
+          DocNum: 1,
+        },
+      },
+
+      // Then do the grouping with only necessary fields
       {
         $group: {
           _id: "$CardCode",
@@ -488,36 +513,35 @@ exports.getCustomerJourneySummary = async (req, res) => {
           invoiceCount: { $sum: 1 },
           totalSpent: { $sum: "$DocTotal" },
           totalPaid: { $sum: "$PaidToDate" },
-          invoices: {
-            $push: {
-              docNum: "$DocNum",
-              date: "$DocDate",
-              total: "$DocTotal",
-              paid: "$PaidToDate",
-            },
-          },
+          // Don't push entire invoices - just needed fields
+          invoiceNums: { $push: "$DocNum" },
         },
       },
-      // Add derived fields
+
+      // Add only essential derived fields
       {
         $addFields: {
           outstandingBalance: { $subtract: ["$totalSpent", "$totalPaid"] },
-          daysSinceFirstInvoice: {
-            $divide: [
-              { $subtract: [new Date(), "$firstInvoice"] },
-              1000 * 60 * 60 * 24,
-            ],
-          },
           daysSinceLastInvoice: {
-            $divide: [
-              { $subtract: [new Date(), "$lastInvoice"] },
-              1000 * 60 * 60 * 24,
-            ],
+            $divide: [{ $subtract: [new Date(), "$lastInvoice"] }, 86400000],
           },
           averageOrderValue: { $divide: ["$totalSpent", "$invoiceCount"] },
         },
       },
     ];
+
+    // Apply filters AFTER grouping
+    if (minInvoiceCount) {
+      invoicePipeline.push({
+        $match: { invoiceCount: { $gte: parseInt(minInvoiceCount) } },
+      });
+    }
+
+    if (minAmount) {
+      invoicePipeline.push({
+        $match: { totalSpent: { $gte: parseFloat(minAmount) } },
+      });
+    }
 
     // Add search filter if provided
     if (search) {
@@ -528,20 +552,6 @@ exports.getCustomerJourneySummary = async (req, res) => {
             { CardName: new RegExp(search, "i") },
           ],
         },
-      });
-    }
-
-    // Add min invoice count filter if provided
-    if (minInvoiceCount) {
-      invoicePipeline.push({
-        $match: { invoiceCount: { $gte: parseInt(minInvoiceCount) } },
-      });
-    }
-
-    // Add min amount filter if provided
-    if (minAmount) {
-      invoicePipeline.push({
-        $match: { totalSpent: { $gte: parseFloat(minAmount) } },
       });
     }
 
