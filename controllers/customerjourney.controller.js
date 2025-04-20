@@ -476,34 +476,9 @@ exports.getCustomerJourneySummary = async (req, res) => {
       search,
     } = req.query;
 
+    // Build base aggregation pipeline for invoice data
     const invoicePipeline = [
-      // Add search filter FIRST - before any expensive operations
-      ...(search
-        ? [
-            {
-              $match: {
-                $or: [
-                  { CardCode: new RegExp(search, "i") },
-                  { CardName: new RegExp(search, "i") },
-                ],
-              },
-            },
-          ]
-        : []),
-
-      // Use $project to reduce fields before grouping
-      {
-        $project: {
-          CardCode: 1,
-          CardName: 1,
-          DocDate: 1,
-          DocTotal: 1,
-          PaidToDate: 1,
-          DocNum: 1,
-        },
-      },
-
-      // Then do the grouping with only necessary fields
+      // Group by customer
       {
         $group: {
           _id: "$CardCode",
@@ -513,35 +488,36 @@ exports.getCustomerJourneySummary = async (req, res) => {
           invoiceCount: { $sum: 1 },
           totalSpent: { $sum: "$DocTotal" },
           totalPaid: { $sum: "$PaidToDate" },
-          // Don't push entire invoices - just needed fields
-          invoiceNums: { $push: "$DocNum" },
+          invoices: {
+            $push: {
+              docNum: "$DocNum",
+              date: "$DocDate",
+              total: "$DocTotal",
+              paid: "$PaidToDate",
+            },
+          },
         },
       },
-
-      // Add only essential derived fields
+      // Add derived fields
       {
         $addFields: {
           outstandingBalance: { $subtract: ["$totalSpent", "$totalPaid"] },
+          daysSinceFirstInvoice: {
+            $divide: [
+              { $subtract: [new Date(), "$firstInvoice"] },
+              1000 * 60 * 60 * 24,
+            ],
+          },
           daysSinceLastInvoice: {
-            $divide: [{ $subtract: [new Date(), "$lastInvoice"] }, 86400000],
+            $divide: [
+              { $subtract: [new Date(), "$lastInvoice"] },
+              1000 * 60 * 60 * 24,
+            ],
           },
           averageOrderValue: { $divide: ["$totalSpent", "$invoiceCount"] },
         },
       },
     ];
-
-    // Apply filters AFTER grouping
-    if (minInvoiceCount) {
-      invoicePipeline.push({
-        $match: { invoiceCount: { $gte: parseInt(minInvoiceCount) } },
-      });
-    }
-
-    if (minAmount) {
-      invoicePipeline.push({
-        $match: { totalSpent: { $gte: parseFloat(minAmount) } },
-      });
-    }
 
     // Add search filter if provided
     if (search) {
@@ -552,6 +528,20 @@ exports.getCustomerJourneySummary = async (req, res) => {
             { CardName: new RegExp(search, "i") },
           ],
         },
+      });
+    }
+
+    // Add min invoice count filter if provided
+    if (minInvoiceCount) {
+      invoicePipeline.push({
+        $match: { invoiceCount: { $gte: parseInt(minInvoiceCount) } },
+      });
+    }
+
+    // Add min amount filter if provided
+    if (minAmount) {
+      invoicePipeline.push({
+        $match: { totalSpent: { $gte: parseFloat(minAmount) } },
       });
     }
 
@@ -570,9 +560,10 @@ exports.getCustomerJourneySummary = async (req, res) => {
       { $limit: parseInt(limit) }
     );
 
+    // Execute queries
     const [customersData, countResult] = await Promise.all([
-      Invoice.aggregate(invoicePipeline).allowDiskUse(true),
-      Invoice.aggregate(countPipeline).allowDiskUse(true),
+      Invoice.aggregate(invoicePipeline),
+      Invoice.aggregate(countPipeline),
     ]);
 
     // Fetch payment data for each customer
@@ -869,17 +860,7 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
   try {
     // Build aggregation pipeline for customer journeys
     const pipeline = [
-      {
-        $project: {
-          CardCode: 1,
-          CardName: 1,
-          DocDate: 1,
-          DocTotal: 1,
-          PaidToDate: 1,
-        },
-      },
-
-      // Group with minimal fields
+      // Group invoices by customer
       {
         $group: {
           _id: "$CardCode",
@@ -891,18 +872,20 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
           totalPaid: { $sum: "$PaidToDate" },
         },
       },
-
-      // Add calculated fields with simpler operations
+      // Add calculated fields
       {
         $addFields: {
           outstandingBalance: { $subtract: ["$totalSpent", "$totalPaid"] },
           daysSinceLastInvoice: {
-            $divide: [{ $subtract: [new Date(), "$lastInvoice"] }, 86400000],
+            $divide: [
+              { $subtract: [new Date(), "$lastInvoice"] },
+              1000 * 60 * 60 * 24,
+            ],
           },
           relationshipDuration: {
             $divide: [
               { $subtract: ["$lastInvoice", "$firstInvoice"] },
-              86400000,
+              1000 * 60 * 60 * 24,
             ],
           },
           paymentRatio: {
@@ -914,9 +897,164 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
           },
         },
       },
+      // Define customer lifecycle based on activity
+      {
+        $addFields: {
+          lifecycle: {
+            $cond: [
+              { $lte: ["$daysSinceLastInvoice", 30] },
+              "Active",
+              {
+                $cond: [
+                  { $lte: ["$daysSinceLastInvoice", 90] },
+                  "Recent",
+                  {
+                    $cond: [
+                      { $lte: ["$daysSinceLastInvoice", 180] },
+                      "Lapsed",
+                      "Inactive",
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+          // Define payment pattern
+          paymentPattern: {
+            $cond: [
+              { $lte: ["$outstandingBalance", 0] },
+              "Fully Paid",
+              {
+                $cond: [
+                  { $gte: ["$paymentRatio", 0.8] },
+                  "Good Payer",
+                  {
+                    $cond: [
+                      { $gte: ["$paymentRatio", 0.5] },
+                      "Partial Payer",
+                      {
+                        $cond: [
+                          { $gt: ["$paymentRatio", 0] },
+                          "Slow Payer",
+                          "No Payments",
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+      // Facet to compute various stats
+      {
+        $facet: {
+          // Lifecycle distribution
+          lifecycleStats: [
+            {
+              $group: {
+                _id: "$lifecycle",
+                count: { $sum: 1 },
+                totalRevenue: { $sum: "$totalSpent" },
+                averageOrderValue: {
+                  $avg: { $divide: ["$totalSpent", "$invoiceCount"] },
+                },
+              },
+            },
+          ],
+
+          // Payment pattern distribution
+          paymentPatternStats: [
+            {
+              $group: {
+                _id: "$paymentPattern",
+                count: { $sum: 1 },
+                totalRevenue: { $sum: "$totalSpent" },
+                totalOutstanding: { $sum: "$outstandingBalance" },
+              },
+            },
+          ],
+
+          // Customer value segments
+          valueSegments: [
+            {
+              $bucket: {
+                groupBy: "$totalSpent",
+                boundaries: [
+                  0,
+                  1000,
+                  5000,
+                  10000,
+                  50000,
+                  100000,
+                  Number.MAX_VALUE,
+                ],
+                default: "Unknown",
+                output: {
+                  count: { $sum: 1 },
+                  totalRevenue: { $sum: "$totalSpent" },
+                  averageRevenue: { $avg: "$totalSpent" },
+                },
+              },
+            },
+          ],
+
+          // Relationship duration segments
+          durationSegments: [
+            {
+              $bucket: {
+                groupBy: "$relationshipDuration",
+                boundaries: [0, 30, 90, 180, 365, 730, Number.MAX_VALUE],
+                default: "Unknown",
+                output: {
+                  count: { $sum: 1 },
+                  totalRevenue: { $sum: "$totalSpent" },
+                  averageRevenue: { $avg: "$totalSpent" },
+                },
+              },
+            },
+          ],
+
+          // Overall customer stats
+          overallStats: [
+            {
+              $group: {
+                _id: null,
+                totalCustomers: { $sum: 1 },
+                totalRevenue: { $sum: "$totalSpent" },
+                totalOutstanding: { $sum: "$outstandingBalance" },
+                averageRelationshipDuration: { $avg: "$relationshipDuration" },
+                averageOrdersPerCustomer: { $avg: "$invoiceCount" },
+
+                averageSpendPerCustomer: { $avg: "$totalSpent" },
+
+        
+              },
+            },
+          ],
+
+          // Top customer insights
+          topCustomers: [
+            { $sort: { totalSpent: -1 } },
+            { $limit: 10 },
+            {
+              $project: {
+                _id: 1,
+                customerName: 1,
+                totalSpent: 1,
+                invoiceCount: 1,
+                paymentRatio: 1,
+                lifecycle: 1,
+                paymentPattern: 1,
+              },
+            },
+          ],
+        },
+      },
     ];
 
-    const results = await Invoice.aggregate(pipeline).allowDiskUse(true);
+    const results = await Invoice.aggregate(pipeline);
 
     // Format the results for the API response
     const formattedData = {
