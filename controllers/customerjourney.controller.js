@@ -560,10 +560,9 @@ exports.getCustomerJourneySummary = async (req, res) => {
       { $limit: parseInt(limit) }
     );
 
-    // Execute queries
     const [customersData, countResult] = await Promise.all([
-      Invoice.aggregate(invoicePipeline),
-      Invoice.aggregate(countPipeline),
+      Invoice.aggregate(invoicePipeline).allowDiskUse(true),
+      Invoice.aggregate(countPipeline).allowDiskUse(true),
     ]);
 
     // Fetch payment data for each customer
@@ -1028,8 +1027,6 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
                 averageOrdersPerCustomer: { $avg: "$invoiceCount" },
 
                 averageSpendPerCustomer: { $avg: "$totalSpent" },
-
-        
               },
             },
           ],
@@ -1054,7 +1051,7 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
       },
     ];
 
-    const results = await Invoice.aggregate(pipeline);
+    const results = await Invoice.aggregate(pipeline).allowDiskUse(true);
 
     // Format the results for the API response
     const formattedData = {
