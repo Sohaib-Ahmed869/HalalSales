@@ -242,8 +242,7 @@ const calculateCustomerKPIs = async (customerId) => {
       },
     ];
 
-    const results = await Invoice.aggregate(pipeline);
-
+    const results = await Invoice.aggregate(pipeline).allowDiskUse(true);
     // Format the results
     const kpiResult = {
       // Default values in case no data is found
@@ -473,10 +472,9 @@ exports.getCustomersSummary = async (req, res) => {
 
     // Execute both queries
     const [customers, countResult] = await Promise.all([
-      Invoice.aggregate(pipeline),
-      Invoice.aggregate(countPipeline),
+      Invoice.aggregate(pipeline).allowDiskUse(true),
+      Invoice.aggregate(countPipeline).allowDiskUse(true),
     ]);
-
     const totalCount = countResult.length > 0 ? countResult[0].total : 0;
 
     return res.status(200).json({
@@ -639,7 +637,8 @@ exports.getGlobalKPIs = async (req, res) => {
       },
     ];
 
-    const results = await Invoice.aggregate(pipeline);
+    const results = await Invoice.aggregate(pipeline).allowDiskUse(true);
+
 
     // Format the results
     const kpiResult = {
