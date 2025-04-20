@@ -869,7 +869,17 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
   try {
     // Build aggregation pipeline for customer journeys
     const pipeline = [
-      // Group invoices by customer
+      {
+        $project: {
+          CardCode: 1,
+          CardName: 1,
+          DocDate: 1,
+          DocTotal: 1,
+          PaidToDate: 1,
+        },
+      },
+
+      // Group with minimal fields
       {
         $group: {
           _id: "$CardCode",
@@ -881,20 +891,18 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
           totalPaid: { $sum: "$PaidToDate" },
         },
       },
-      // Add calculated fields
+
+      // Add calculated fields with simpler operations
       {
         $addFields: {
           outstandingBalance: { $subtract: ["$totalSpent", "$totalPaid"] },
           daysSinceLastInvoice: {
-            $divide: [
-              { $subtract: [new Date(), "$lastInvoice"] },
-              1000 * 60 * 60 * 24,
-            ],
+            $divide: [{ $subtract: [new Date(), "$lastInvoice"] }, 86400000],
           },
           relationshipDuration: {
             $divide: [
               { $subtract: ["$lastInvoice", "$firstInvoice"] },
-              1000 * 60 * 60 * 24,
+              86400000,
             ],
           },
           paymentRatio: {
@@ -904,159 +912,6 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
               { $divide: ["$totalPaid", "$totalSpent"] },
             ],
           },
-        },
-      },
-      // Define customer lifecycle based on activity
-      {
-        $addFields: {
-          lifecycle: {
-            $cond: [
-              { $lte: ["$daysSinceLastInvoice", 30] },
-              "Active",
-              {
-                $cond: [
-                  { $lte: ["$daysSinceLastInvoice", 90] },
-                  "Recent",
-                  {
-                    $cond: [
-                      { $lte: ["$daysSinceLastInvoice", 180] },
-                      "Lapsed",
-                      "Inactive",
-                    ],
-                  },
-                ],
-              },
-            ],
-          },
-          // Define payment pattern
-          paymentPattern: {
-            $cond: [
-              { $lte: ["$outstandingBalance", 0] },
-              "Fully Paid",
-              {
-                $cond: [
-                  { $gte: ["$paymentRatio", 0.8] },
-                  "Good Payer",
-                  {
-                    $cond: [
-                      { $gte: ["$paymentRatio", 0.5] },
-                      "Partial Payer",
-                      {
-                        $cond: [
-                          { $gt: ["$paymentRatio", 0] },
-                          "Slow Payer",
-                          "No Payments",
-                        ],
-                      },
-                    ],
-                  },
-                ],
-              },
-            ],
-          },
-        },
-      },
-      // Facet to compute various stats
-      {
-        $facet: {
-          // Lifecycle distribution
-          lifecycleStats: [
-            {
-              $group: {
-                _id: "$lifecycle",
-                count: { $sum: 1 },
-                totalRevenue: { $sum: "$totalSpent" },
-                averageOrderValue: {
-                  $avg: { $divide: ["$totalSpent", "$invoiceCount"] },
-                },
-              },
-            },
-          ],
-
-          // Payment pattern distribution
-          paymentPatternStats: [
-            {
-              $group: {
-                _id: "$paymentPattern",
-                count: { $sum: 1 },
-                totalRevenue: { $sum: "$totalSpent" },
-                totalOutstanding: { $sum: "$outstandingBalance" },
-              },
-            },
-          ],
-
-          // Customer value segments
-          valueSegments: [
-            {
-              $bucket: {
-                groupBy: "$totalSpent",
-                boundaries: [
-                  0,
-                  1000,
-                  5000,
-                  10000,
-                  50000,
-                  100000,
-                  Number.MAX_VALUE,
-                ],
-                default: "Unknown",
-                output: {
-                  count: { $sum: 1 },
-                  totalRevenue: { $sum: "$totalSpent" },
-                  averageRevenue: { $avg: "$totalSpent" },
-                },
-              },
-            },
-          ],
-
-          // Relationship duration segments
-          durationSegments: [
-            {
-              $bucket: {
-                groupBy: "$relationshipDuration",
-                boundaries: [0, 30, 90, 180, 365, 730, Number.MAX_VALUE],
-                default: "Unknown",
-                output: {
-                  count: { $sum: 1 },
-                  totalRevenue: { $sum: "$totalSpent" },
-                  averageRevenue: { $avg: "$totalSpent" },
-                },
-              },
-            },
-          ],
-
-          // Overall customer stats
-          overallStats: [
-            {
-              $group: {
-                _id: null,
-                totalCustomers: { $sum: 1 },
-                totalRevenue: { $sum: "$totalSpent" },
-                totalOutstanding: { $sum: "$outstandingBalance" },
-                averageRelationshipDuration: { $avg: "$relationshipDuration" },
-                averageOrdersPerCustomer: { $avg: "$invoiceCount" },
-
-                averageSpendPerCustomer: { $avg: "$totalSpent" },
-              },
-            },
-          ],
-
-          // Top customer insights
-          topCustomers: [
-            { $sort: { totalSpent: -1 } },
-            { $limit: 10 },
-            {
-              $project: {
-                _id: 1,
-                customerName: 1,
-                totalSpent: 1,
-                invoiceCount: 1,
-                paymentRatio: 1,
-                lifecycle: 1,
-                paymentPattern: 1,
-              },
-            },
-          ],
         },
       },
     ];
