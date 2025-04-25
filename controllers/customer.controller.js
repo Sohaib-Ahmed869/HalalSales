@@ -103,6 +103,52 @@ exports.getCustomers = async (req, res) => {
   }
 };
 
+// Get all customers
+exports.getSAPCustomers = async (req, res) => {
+  try {
+    const { status, search, assignedTo } = req.query;
+    const query = {};
+
+    // Apply filters if provided
+    if (status) query.status = status;
+
+    // Search by name, code or email
+    if (search) {
+      query.$or = [
+        { CardName: { $regex: search, $options: "i" } },
+        { CardCode: { $regex: search, $options: "i" } },
+        { Email: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    // // Filter by assigned agent
+    // if (assignedTo) {
+    //   query.assignedTo = assignedTo;
+    // }
+
+    // // Role-based queries
+    // if (req.user && req.user.role === "sales_agent") {
+    //   // Sales agents can only see customers assigned to them
+    //   query.assignedTo = req.user._id;
+    // }
+    // // Admins can see all customers
+
+    const customers = await Customer.find({
+      ...query,
+      status: "active",
+    }).populate("assignedTo", "firstName lastName email hubspotId");
+
+    //only get the customers with CardCode starting with C
+    const sapCustomers = customers.filter((customer) =>
+      customer.CardCode.startsWith("C")
+    );
+    res.json(sapCustomers);
+  } catch (error) {
+    console.error("Customer fetch error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
 // Get customer by ID
 exports.getCustomerById = async (req, res) => {
   try {
@@ -134,7 +180,6 @@ exports.getCustomerById = async (req, res) => {
       // Sales agent can only see assigned customers
       customer = await Customer.findOne({
         _id: customerId,
-        assignedTo: req.user._id,
       }).populate("assignedTo", "firstName lastName email hubspotId");
     }
 
@@ -669,7 +714,70 @@ exports.uploadCustomersCSV = async (req, res) => {
   }
 };
 
-// Add this function to your existing customer.controller.js file
+exports.getCustomersPaginated = async (req, res) => {
+  try {
+    // Extract pagination parameters
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50; // Larger default limit for better frontend performance
+    const skip = (page - 1) * limit;
+
+    // Extract filtering parameters
+    const { status, search, assignedTo, type } = req.query;
+    const query = {};
+
+    // Apply filters if provided
+    if (status) query.status = status;
+
+    // Filter by customer type (SAP or non-SAP)
+    if (type === "sap") {
+      query.CardCode = { $regex: "^C", $options: "i" }; // SAP customers start with C
+    } else if (type === "non-sap") {
+      query.CardCode = { $not: { $regex: "^C", $options: "i" } }; // Non-SAP customers don't start with C
+    }
+
+    // Search by name, code or email
+    if (search) {
+      query.$or = [
+        { CardName: { $regex: search, $options: "i" } },
+        { CardCode: { $regex: search, $options: "i" } },
+        { Email: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    // Count total matching documents (for pagination)
+    const totalCount = await Customer.countDocuments(query);
+
+    // Only select fields that are actually needed for the customer list
+    // This significantly reduces the response size and database load
+    const customers = await Customer.find({ ...query, status: "active" }) // Ensure status is "active"
+      .select(
+        "CardCode CardName Email phoneNumber status assignedTo TotalSales LastPurchaseDate"
+      )
+      .populate("assignedTo", "firstName lastName email")
+      .sort({ CardName: 1 }) // Sort by customer name
+      .skip(skip)
+      .limit(limit)
+      .lean(); // Use lean for better performance as we don't need mongoose document methods
+
+    res.json({
+      success: true,
+      customers,
+      pagination: {
+        total: totalCount,
+        page,
+        pages: Math.ceil(totalCount / limit),
+        limit,
+      },
+    });
+  } catch (error) {
+    console.error("Customer fetch error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
 
 // Process HubSpot export Excel file
 const processHubspotExport = (filePath) => {

@@ -55,6 +55,11 @@ const upload = multer({
 // Get all customers (with filtering and permissions)
 router.get("/", auth, updateLastLogin, customerController.getCustomers);
 
+// Get all customers (with filtering and permissions)
+router.get("/sap", auth, updateLastLogin, customerController.getSAPCustomers);
+
+router.get("/paginated", auth, updateLastLogin, customerController.getCustomersPaginated);
+
 // Get customer by ID
 router.get("/:id", auth, updateLastLogin, customerController.getCustomerById);
 

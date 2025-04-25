@@ -506,149 +506,15 @@ exports.getCustomersSummary = async (req, res) => {
  */
 exports.getGlobalKPIs = async (req, res) => {
   try {
-    // Aggregation pipeline to calculate global KPIs
-    const pipeline = [
-      {
-        $facet: {
-          // Total statistics
-          totalStats: [
-            {
-              $group: {
-                _id: null,
-                totalInvoices: { $sum: 1 },
-                totalAmount: { $sum: "$DocTotal" },
-                totalPaid: { $sum: "$PaidToDate" },
-                averageAmount: { $avg: "$DocTotal" },
-                uniqueCustomers: { $addToSet: "$CardCode" },
-              },
-            },
-            {
-              $addFields: {
-                uniqueCustomerCount: { $size: "$uniqueCustomers" },
-              },
-            },
-            {
-              $project: {
-                uniqueCustomers: 0, // Remove the array as we only need the count
-              },
-            },
-          ],
-
-          // Channel distribution
-          channelStats: [
-            {
-              $group: {
-                _id: {
-                  isPOS: "$isPOS",
-                  isDelivery: "$isDelivery",
-                },
-                count: { $sum: 1 },
-                amount: { $sum: "$DocTotal" },
-              },
-            },
-          ],
-
-          // Monthly trends (last 12 months)
-          monthlyTrends: [
-            {
-              $match: {
-                DocDate: {
-                  $gte: new Date(
-                    new Date().setMonth(new Date().getMonth() - 12)
-                  ),
-                },
-              },
-            },
-            {
-              $group: {
-                _id: {
-                  year: { $year: "$DocDate" },
-                  month: { $month: "$DocDate" },
-                },
-                invoiceCount: { $sum: 1 },
-                totalAmount: { $sum: "$DocTotal" },
-                uniqueCustomers: { $addToSet: "$CardCode" },
-              },
-            },
-            {
-              $addFields: {
-                uniqueCustomerCount: { $size: "$uniqueCustomers" },
-              },
-            },
-            {
-              $project: {
-                _id: 1,
-                invoiceCount: 1,
-                totalAmount: 1,
-                uniqueCustomerCount: 1,
-              },
-            },
-            { $sort: { "_id.year": 1, "_id.month": 1 } },
-          ],
-
-          // Payment method distribution
-          paymentMethods: [
-            {
-              $group: {
-                _id: "$paymentMethod",
-                count: { $sum: 1 },
-                amount: { $sum: "$DocTotal" },
-              },
-            },
-          ],
-
-          // Top customers by revenue
-          topCustomers: [
-            {
-              $group: {
-                _id: "$CardCode",
-                customerName: { $first: "$CardName" },
-                invoiceCount: { $sum: 1 },
-                totalAmount: { $sum: "$DocTotal" },
-              },
-            },
-            { $sort: { totalAmount: -1 } },
-            { $limit: 10 },
-          ],
-
-          // Top products by revenue
-          topProducts: [
-            { $unwind: "$DocumentLines" },
-            {
-              $group: {
-                _id: "$DocumentLines.ItemCode",
-                itemName: { $first: "$DocumentLines.ItemDescription" },
-                quantity: { $sum: "$DocumentLines.Quantity" },
-                revenue: {
-                  $sum: {
-                    $multiply: [
-                      "$DocumentLines.Price",
-                      "$DocumentLines.Quantity",
-                    ],
-                  },
-                },
-                occurrences: { $sum: 1 },
-              },
-            },
-            { $sort: { revenue: -1 } },
-            { $limit: 10 },
-          ],
-        },
-      },
-    ];
-
-    const results = await Invoice.aggregate(pipeline).allowDiskUse(true);
-
-
-    // Format the results
     const kpiResult = {
-      // Default values in case no data is found
       totalInvoices: 0,
       totalAmount: 0,
       totalPaid: 0,
       totalUnpaid: 0,
       averageInvoiceAmount: 0,
       uniqueCustomerCount: 0,
+      averageRevenuePerCustomer: 0,
+      collectionRate: 0,
       paymentMethodDistribution: [],
       channelDistribution: {
         pos: { count: 0, amount: 0 },
@@ -660,39 +526,166 @@ exports.getGlobalKPIs = async (req, res) => {
       topProducts: [],
     };
 
+    // Use separate smaller queries instead of one giant facet
+    
+    // 1. Total statistics - more efficient without $addToSet for all customers
+    const totalStatsPipeline = [
+      {
+        $group: {
+          _id: null,
+          totalInvoices: { $sum: 1 },
+          totalAmount: { $sum: "$DocTotal" },
+          totalPaid: { $sum: "$PaidToDate" },
+          averageAmount: { $avg: "$DocTotal" },
+        }
+      }
+    ];
+    
+    // 2. Count unique customers separately with a more efficient approach
+    const uniqueCustomersPipeline = [
+      { $group: { _id: "$CardCode" } },
+      { $count: "uniqueCustomerCount" }
+    ];
+
+    // 3. Channel distribution
+    const channelStatsPipeline = [
+      {
+        $group: {
+          _id: {
+            isPOS: "$isPOS",
+            isDelivery: "$isDelivery",
+          },
+          count: { $sum: 1 },
+          amount: { $sum: "$DocTotal" },
+        }
+      }
+    ];
+
+    // 4. Monthly trends (last 12 months)
+    const twelveMonthsAgo = new Date();
+    twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 12);
+    
+    const monthlyTrendsPipeline = [
+      {
+        $match: {
+          DocDate: { $gte: twelveMonthsAgo }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            year: { $year: "$DocDate" },
+            month: { $month: "$DocDate" },
+          },
+          invoiceCount: { $sum: 1 },
+          totalAmount: { $sum: "$DocTotal" },
+        }
+      },
+      { $sort: { "_id.year": 1, "_id.month": 1 } }
+    ];
+
+    // 5. Payment method distribution
+    const paymentMethodsPipeline = [
+      {
+        $group: {
+          _id: "$paymentMethod",
+          count: { $sum: 1 },
+          amount: { $sum: "$DocTotal" },
+        }
+      }
+    ];
+
+    // 6. Top customers by revenue
+    const topCustomersPipeline = [
+      {
+        $group: {
+          _id: "$CardCode",
+          customerName: { $first: "$CardName" },
+          invoiceCount: { $sum: 1 },
+          totalAmount: { $sum: "$DocTotal" },
+        }
+      },
+      { $sort: { totalAmount: -1 } },
+      { $limit: 10 }
+    ];
+
+    // 7. Top products by revenue - process in smaller chunks
+    const topProductsPipeline = [
+      { $unwind: "$DocumentLines" },
+      {
+        $group: {
+          _id: "$DocumentLines.ItemCode",
+          itemName: { $first: "$DocumentLines.ItemDescription" },
+          quantity: { $sum: "$DocumentLines.Quantity" },
+          revenue: {
+            $sum: {
+              $multiply: [
+                "$DocumentLines.Price",
+                "$DocumentLines.Quantity",
+              ],
+            }
+          },
+          occurrences: { $sum: 1 },
+        }
+      },
+      { $sort: { revenue: -1 } },
+      { $limit: 10 }
+    ];
+
+    // Execute all queries in parallel for better performance
+    const [
+      totalStatsResults,
+      uniqueCustomersResults,
+      channelStatsResults,
+      monthlyTrendsResults,
+      paymentMethodsResults,
+      topCustomersResults,
+      topProductsResults
+    ] = await Promise.all([
+      Invoice.aggregate(totalStatsPipeline),
+      Invoice.aggregate(uniqueCustomersPipeline),
+      Invoice.aggregate(channelStatsPipeline),
+      Invoice.aggregate(monthlyTrendsPipeline),
+      Invoice.aggregate(paymentMethodsPipeline),
+      Invoice.aggregate(topCustomersPipeline),
+      Invoice.aggregate(topProductsPipeline)
+    ]);
+
     // Extract and format total stats
-    if (results[0].totalStats.length > 0) {
-      const stats = results[0].totalStats[0];
+    if (totalStatsResults.length > 0) {
+      const stats = totalStatsResults[0];
       kpiResult.totalInvoices = stats.totalInvoices;
       kpiResult.totalAmount = stats.totalAmount;
       kpiResult.totalPaid = stats.totalPaid;
       kpiResult.totalUnpaid = stats.totalAmount - stats.totalPaid;
       kpiResult.averageInvoiceAmount = stats.averageAmount;
-      kpiResult.uniqueCustomerCount = stats.uniqueCustomerCount;
-      // Average revenue per customer
-      kpiResult.averageRevenuePerCustomer = stats.uniqueCustomerCount
-        ? stats.totalAmount / stats.uniqueCustomerCount
+      
+      // Get unique customer count
+      kpiResult.uniqueCustomerCount = 
+        uniqueCustomersResults.length > 0 ? uniqueCustomersResults[0].uniqueCustomerCount : 0;
+      
+      // Calculate derived metrics
+      kpiResult.averageRevenuePerCustomer = kpiResult.uniqueCustomerCount
+        ? kpiResult.totalAmount / kpiResult.uniqueCustomerCount
         : 0;
-      // Collection rate
-      kpiResult.collectionRate = stats.totalAmount
-        ? ((stats.totalPaid / stats.totalAmount) * 100).toFixed(2)
+        
+      kpiResult.collectionRate = kpiResult.totalAmount
+        ? ((kpiResult.totalPaid / kpiResult.totalAmount) * 100).toFixed(2)
         : 0;
     }
 
     // Format payment method distribution
-    kpiResult.paymentMethodDistribution = results[0].paymentMethods.map(
-      (item) => ({
-        method: item._id || "Unknown",
-        count: item.count,
-        amount: item.amount,
-        percentage: kpiResult.totalInvoices
-          ? ((item.count / kpiResult.totalInvoices) * 100).toFixed(2)
-          : 0,
-      })
-    );
+    kpiResult.paymentMethodDistribution = paymentMethodsResults.map(item => ({
+      method: item._id || "Unknown",
+      count: item.count,
+      amount: item.amount,
+      percentage: kpiResult.totalInvoices
+        ? ((item.count / kpiResult.totalInvoices) * 100).toFixed(2)
+        : 0,
+    }));
 
     // Format channel distribution
-    results[0].channelStats.forEach((item) => {
+    channelStatsResults.forEach(item => {
       if (item._id.isPOS) {
         kpiResult.channelDistribution.pos.count = item.count;
         kpiResult.channelDistribution.pos.amount = item.amount;
@@ -707,32 +700,51 @@ exports.getGlobalKPIs = async (req, res) => {
 
     // Format monthly trends
     const months = [
-      "Jan",
-      "Feb",
-      "Mar",
-      "Apr",
-      "May",
-      "Jun",
-      "Jul",
-      "Aug",
-      "Sep",
-      "Oct",
-      "Nov",
-      "Dec",
+      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
     ];
-    kpiResult.monthlyTrends = results[0].monthlyTrends.map((item) => ({
-      month: months[item._id.month - 1],
-      year: item._id.year,
-      count: item.invoiceCount,
-      amount: item.totalAmount,
-      customers: item.uniqueCustomerCount,
-      averageInvoiceValue: item.invoiceCount
-        ? (item.totalAmount / item.invoiceCount).toFixed(2)
-        : 0,
-    }));
+    
+    kpiResult.monthlyTrends = monthlyTrendsResults.map(item => {
+      // Calculate monthly unique customers separately if needed for high precision
+      return {
+        month: months[item._id.month - 1],
+        year: item._id.year,
+        count: item.invoiceCount,
+        amount: item.totalAmount,
+        customers: 0, // Will be updated below if necessary
+        averageInvoiceValue: item.invoiceCount
+          ? (item.totalAmount / item.invoiceCount).toFixed(2)
+          : 0,
+      };
+    });
+
+    // If monthly unique customers are critically important, fetch them separately
+    // This can be commented out if approximation is acceptable
+    if (monthlyTrendsResults.length > 0) {
+      for (let i = 0; i < monthlyTrendsResults.length; i++) {
+        const item = monthlyTrendsResults[i];
+        const startDate = new Date(item._id.year, item._id.month - 1, 1);
+        const endDate = new Date(item._id.year, item._id.month, 0, 23, 59, 59);
+        
+        const monthlyCustomersPipeline = [
+          {
+            $match: {
+              DocDate: { $gte: startDate, $lte: endDate }
+            }
+          },
+          { $group: { _id: "$CardCode" } },
+          { $count: "uniqueCustomerCount" }
+        ];
+        
+        const monthlyCustomersResults = await Invoice.aggregate(monthlyCustomersPipeline);
+        kpiResult.monthlyTrends[i].customers = monthlyCustomersResults.length > 0 
+          ? monthlyCustomersResults[0].uniqueCustomerCount 
+          : 0;
+      }
+    }
 
     // Format top customers
-    kpiResult.topCustomers = results[0].topCustomers.map((item) => ({
+    kpiResult.topCustomers = topCustomersResults.map(item => ({
       customerCode: item._id,
       customerName: item.customerName,
       invoiceCount: item.invoiceCount,
@@ -741,7 +753,7 @@ exports.getGlobalKPIs = async (req, res) => {
     }));
 
     // Format top products
-    kpiResult.topProducts = results[0].topProducts.map((item) => ({
+    kpiResult.topProducts = topProductsResults.map(item => ({
       itemCode: item._id,
       itemName: item.itemName,
       quantity: item.quantity,

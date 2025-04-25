@@ -476,109 +476,112 @@ exports.getCustomerJourneySummary = async (req, res) => {
       search,
     } = req.query;
 
-    // Build base aggregation pipeline for invoice data
-    const invoicePipeline = [
-      // Group by customer
-      {
-        $group: {
-          _id: "$CardCode",
-          customerName: { $first: "$CardName" },
-          firstInvoice: { $min: "$DocDate" },
-          lastInvoice: { $max: "$DocDate" },
-          invoiceCount: { $sum: 1 },
-          totalSpent: { $sum: "$DocTotal" },
-          totalPaid: { $sum: "$PaidToDate" },
-          invoices: {
-            $push: {
-              docNum: "$DocNum",
-              date: "$DocDate",
-              total: "$DocTotal",
-              paid: "$PaidToDate",
-            },
-          },
-        },
-      },
-      // Add derived fields
-      {
-        $addFields: {
-          outstandingBalance: { $subtract: ["$totalSpent", "$totalPaid"] },
-          daysSinceFirstInvoice: {
-            $divide: [
-              { $subtract: [new Date(), "$firstInvoice"] },
-              1000 * 60 * 60 * 24,
-            ],
-          },
-          daysSinceLastInvoice: {
-            $divide: [
-              { $subtract: [new Date(), "$lastInvoice"] },
-              1000 * 60 * 60 * 24,
-            ],
-          },
-          averageOrderValue: { $divide: ["$totalSpent", "$invoiceCount"] },
-        },
-      },
-    ];
+    const pageInt = parseInt(page);
+    const limitInt = parseInt(limit);
+    const skip = (pageInt - 1) * limitInt;
 
-    // Add search filter if provided
+    // Initial match stage - apply at beginning for better index usage
+    const matchStage = {};
+
     if (search) {
-      invoicePipeline.unshift({
-        $match: {
-          $or: [
-            { CardCode: new RegExp(search, "i") },
-            { CardName: new RegExp(search, "i") },
-          ],
-        },
-      });
+      matchStage.$or = [
+        { CardCode: new RegExp(search, "i") },
+        { CardName: new RegExp(search, "i") },
+      ];
     }
 
-    // Add min invoice count filter if provided
+    // Build main pipeline to get customer data
+    const pipeline = [];
+
+    // Add initial match stage if filters are provided
+    if (Object.keys(matchStage).length > 0) {
+      pipeline.push({ $match: matchStage });
+    }
+
+    // Group by customer - don't store entire invoice documents
+    pipeline.push({
+      $group: {
+        _id: "$CardCode",
+        customerName: { $first: "$CardName" },
+        firstInvoice: { $min: "$DocDate" },
+        lastInvoice: { $max: "$DocDate" },
+        invoiceCount: { $sum: 1 },
+        totalSpent: { $sum: "$DocTotal" },
+        totalPaid: { $sum: "$PaidToDate" },
+        // Removed the large invoices array
+      },
+    });
+
+    // Add filtering stages
     if (minInvoiceCount) {
-      invoicePipeline.push({
+      pipeline.push({
         $match: { invoiceCount: { $gte: parseInt(minInvoiceCount) } },
       });
     }
 
-    // Add min amount filter if provided
     if (minAmount) {
-      invoicePipeline.push({
+      pipeline.push({
         $match: { totalSpent: { $gte: parseFloat(minAmount) } },
       });
     }
 
-    // Count total results for pagination before applying skip and limit
-    const countPipeline = [...invoicePipeline];
-    countPipeline.push({ $count: "total" });
-
-    // Add sorting
-    invoicePipeline.push({
-      $sort: { [sortBy]: parseInt(sortOrder) },
+    // Add derived fields
+    pipeline.push({
+      $addFields: {
+        outstandingBalance: { $subtract: ["$totalSpent", "$totalPaid"] },
+        daysSinceFirstInvoice: {
+          $divide: [
+            { $subtract: [new Date(), "$firstInvoice"] },
+            1000 * 60 * 60 * 24,
+          ],
+        },
+        daysSinceLastInvoice: {
+          $divide: [
+            { $subtract: [new Date(), "$lastInvoice"] },
+            1000 * 60 * 60 * 24,
+          ],
+        },
+        averageOrderValue: { $divide: ["$totalSpent", "$invoiceCount"] },
+      },
     });
 
-    // Add pagination
-    invoicePipeline.push(
-      { $skip: (parseInt(page) - 1) * parseInt(limit) },
-      { $limit: parseInt(limit) }
-    );
-
-    // Execute queries
-    const [customersData, countResult] = await Promise.all([
-      Invoice.aggregate(invoicePipeline),
-      Invoice.aggregate(countPipeline),
-    ]);
-
-    // Fetch payment data for each customer
-    const cardCodes = customersData.map((c) => c._id);
-    const paymentData = await Payment.aggregate([
-      { $match: { CardCode: { $in: cardCodes } } },
-      {
-        $group: {
-          _id: "$CardCode",
-          paymentCount: { $sum: 1 },
-          firstPayment: { $min: "$DocDate" },
-          lastPayment: { $max: "$DocDate" },
-        },
+    // Use facet to handle count and pagination in a single query
+    pipeline.push({
+      $facet: {
+        totalCount: [{ $count: "count" }],
+        paginatedResults: [
+          { $sort: { [sortBy]: parseInt(sortOrder) } },
+          { $skip: skip },
+          { $limit: limitInt },
+        ],
       },
-    ]);
+    });
+
+    // Execute the single pipeline
+    const [result] = await Invoice.aggregate(pipeline);
+
+    const totalCount =
+      result.totalCount.length > 0 ? result.totalCount[0].count : 0;
+    const customersData = result.paginatedResults;
+
+    // Get unique customer IDs for payment data
+    const cardCodes = customersData.map((c) => c._id);
+
+    // Only fetch payment data if we have customers
+    const paymentData =
+      cardCodes.length > 0
+        ? await Payment.aggregate([
+            { $match: { CardCode: { $in: cardCodes } } },
+            {
+              $group: {
+                _id: "$CardCode",
+                paymentCount: { $sum: 1 },
+                firstPayment: { $min: "$DocDate" },
+                lastPayment: { $max: "$DocDate" },
+              },
+            },
+          ])
+        : [];
 
     // Convert payment data to a map for easier access
     const paymentDataMap = paymentData.reduce((map, item) => {
@@ -591,7 +594,6 @@ exports.getCustomerJourneySummary = async (req, res) => {
       const payments = paymentDataMap[customer._id] || { paymentCount: 0 };
 
       // Calculate customer journey metrics
-      let lifecycle = "Unknown";
       const daysSinceLastActivity = Math.min(
         customer.daysSinceLastInvoice,
         payments.lastPayment
@@ -603,6 +605,7 @@ exports.getCustomerJourneySummary = async (req, res) => {
       );
 
       // Define lifecycle based on activity
+      let lifecycle = "Unknown";
       if (daysSinceLastActivity <= 30) {
         lifecycle = "Active";
       } else if (daysSinceLastActivity <= 90) {
@@ -657,9 +660,7 @@ exports.getCustomerJourneySummary = async (req, res) => {
       };
     });
 
-    const totalCount = countResult.length > 0 ? countResult[0].total : 0;
-
-    // Calculate customer distribution by lifecycle
+    // Calculate distributions efficiently
     const lifecycleDistribution = {
       Active: 0,
       Recent: 0,
@@ -667,13 +668,6 @@ exports.getCustomerJourneySummary = async (req, res) => {
       Inactive: 0,
     };
 
-    enrichedCustomerData.forEach((customer) => {
-      if (customer.lifecycle in lifecycleDistribution) {
-        lifecycleDistribution[customer.lifecycle]++;
-      }
-    });
-
-    // Calculate customer distribution by payment pattern
     const paymentPatternDistribution = {
       "Fully Paid": 0,
       "Good Payer": 0,
@@ -683,6 +677,9 @@ exports.getCustomerJourneySummary = async (req, res) => {
     };
 
     enrichedCustomerData.forEach((customer) => {
+      if (customer.lifecycle in lifecycleDistribution) {
+        lifecycleDistribution[customer.lifecycle]++;
+      }
       if (customer.paymentPattern in paymentPatternDistribution) {
         paymentPatternDistribution[customer.paymentPattern]++;
       }
@@ -696,11 +693,11 @@ exports.getCustomerJourneySummary = async (req, res) => {
         paymentPatternDistribution,
         pagination: {
           totalCount,
-          totalPages: Math.ceil(totalCount / parseInt(limit)),
-          currentPage: parseInt(page),
-          pageSize: parseInt(limit),
-          hasNext: parseInt(page) < Math.ceil(totalCount / parseInt(limit)),
-          hasPrevious: parseInt(page) > 1,
+          totalPages: Math.ceil(totalCount / limitInt),
+          currentPage: pageInt,
+          pageSize: limitInt,
+          hasNext: pageInt < Math.ceil(totalCount / limitInt),
+          hasPrevious: pageInt > 1,
         },
       },
     });
@@ -1028,8 +1025,6 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
                 averageOrdersPerCustomer: { $avg: "$invoiceCount" },
 
                 averageSpendPerCustomer: { $avg: "$totalSpent" },
-
-        
               },
             },
           ],

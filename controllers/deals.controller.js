@@ -168,6 +168,8 @@ exports.getCustomerDetail = async (req, res) => {
       });
     }
 
+    console.log("Customer email:", customerEmail);
+
     // Find all deals for this customer
     const deals = await Deal.find({ customerEmail: customerEmail }).sort({
       createDate: -1,

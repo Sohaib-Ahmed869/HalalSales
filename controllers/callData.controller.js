@@ -3,6 +3,7 @@ const path = require("path");
 const axios = require("axios");
 const { parse } = require("csv-parse");
 const CallData = require("../models/CallData");
+const User = require("../models/User");
 
 // Helper function to parse CSV data
 const parseCSV = (filePath) => {
@@ -411,7 +412,15 @@ const callDataController = {
       const filter = {};
 
       if (req.query.agentId) {
-        filter.userID = req.query.agentId;
+        //find the agent by ID
+        const agent = await User.findById(req.query.agentId);
+
+        const agentName = agent ? agent.firstName + " " + agent.lastName : null;
+
+        if (agentName) {
+          //match the agent name with the call data UserName field
+          filter.userName = agentName;
+        }
       }
 
       if (req.query.startDate && req.query.endDate) {
@@ -419,10 +428,6 @@ const callDataController = {
           $gte: new Date(req.query.startDate),
           $lte: new Date(req.query.endDate),
         };
-      }
-
-      if (req.query.direction) {
-        filter.direction = req.query.direction;
       }
 
       if (req.query.type) {
@@ -447,12 +452,25 @@ const callDataController = {
         ];
       }
 
+      console.log("direction", req.query);
       // Execute query with pagination
-      const callData = await CallData.find(filter)
-        .sort({ startTime: -1 })
-        .skip(skip)
-        .limit(limit)
-        .lean();
+      let callData =
+        req.query.direction === "all"
+          ? await CallData.find({
+              ...filter,
+            })
+              .sort({ startTime: -1 })
+              .skip(skip)
+              .limit(limit)
+              .lean()
+          : await CallData.find({
+              ...filter,
+              direction: req.query.direction,
+            })
+              .sort({ startTime: -1 })
+              .skip(skip)
+              .limit(limit)
+              .lean();
 
       const total = await CallData.countDocuments(filter);
 
@@ -485,13 +503,39 @@ const callDataController = {
         ? new Date(startDate)
         : new Date(endDateTime.getTime() - 30 * 24 * 60 * 60 * 1000);
 
+      console.log(
+        "Fetching team call statistics direction:",
+        req.query.direction
+      );
+
       // Filter for date range
-      const filter = {
-        startTime: {
-          $gte: startDateTime,
-          $lte: endDateTime,
-        },
-      };
+      const filter =
+        req.query.direction !== "all"
+          ? {
+              direction: req.query.direction,
+              startTime: {
+                $gte: startDateTime,
+                $lte: endDateTime,
+              },
+            }
+          : {
+              startTime: {
+                $gte: startDateTime,
+                $lte: endDateTime,
+              },
+            };
+
+      if (req.query.agentId) {
+        //find the agent by ID
+        const agent = await User.findById(req.query.agentId);
+
+        const agentName = agent ? agent.firstName + " " + agent.lastName : null;
+
+        if (agentName) {
+          //match the agent name with the call data UserName field
+          filter.userName = agentName;
+        }
+      }
 
       // Overall statistics
       const totalCalls = await CallData.countDocuments(filter);
@@ -624,6 +668,7 @@ const callDataController = {
   },
 
   // Get agent performance comparison for managers
+  // Get agent performance comparison for managers
   getAgentPerformanceComparison: async (req, res) => {
     try {
       const { startDate, endDate } = req.query;
@@ -662,6 +707,11 @@ const callDataController = {
             outboundCalls: {
               $sum: { $cond: [{ $eq: ["$direction", "out"] }, 1, 0] },
             },
+            // Add average quality score calculation
+            totalQualityScore: { $sum: "$qualityScore" },
+            analyzedCalls: {
+              $sum: { $cond: [{ $gt: ["$qualityScore", 0] }, 1, 0] },
+            },
           },
         },
         {
@@ -684,6 +734,15 @@ const callDataController = {
             maxCallDuration: 1,
             inboundCalls: 1,
             outboundCalls: 1,
+            // Add quality score calculation with default value if no analyzed calls
+            qualityScore: {
+              $cond: [
+                { $gt: ["$analyzedCalls", 0] },
+                { $divide: ["$totalQualityScore", "$analyzedCalls"] },
+                null,
+              ],
+            },
+            analyzedCalls: 1,
           },
         },
         { $sort: { totalCalls: -1 } },
@@ -707,6 +766,7 @@ const callDataController = {
                 direction: 1,
                 missed: 1,
                 inCallDuration: 1,
+                qualityScore: 1,
               },
             },
             {
@@ -717,6 +777,8 @@ const callDataController = {
                   $sum: { $cond: [{ $eq: ["$missed", "true"] }, 0, 1] },
                 },
                 inCallDuration: { $sum: "$inCallDuration" },
+                // Add quality score average for daily trend
+                dailyQualityScore: { $avg: "$qualityScore" },
               },
             },
             { $sort: { "_id.date": 1 } },
@@ -730,10 +792,13 @@ const callDataController = {
               answeredCalls: day.answeredCalls,
               missedCalls: day.calls - day.answeredCalls,
               inCallDuration: day.inCallDuration,
+              qualityScore: day.dailyQualityScore || null,
             })),
           };
         })
       );
+
+      console.log("Agent daily trends:", agentDailyTrends);
 
       return res.status(200).json({
         agents: agentDailyTrends,
