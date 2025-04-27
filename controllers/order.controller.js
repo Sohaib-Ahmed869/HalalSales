@@ -405,7 +405,7 @@ exports.getAllOrders = async (req, res) => {
 // Get orders for a specific customer
 exports.getOrdersByCustomer = async (req, res) => {
   try {
-    console.log("User role:", req.user);
+    
 
     const { cardCode } = req.params;
     const page = parseInt(req.query.page) || 1;
@@ -415,18 +415,6 @@ exports.getOrdersByCustomer = async (req, res) => {
     // Base query
     const query = { CardCode: cardCode };
 
-    // Filter for current user if sales agent
-    if (req.user.role === "sales_agent") {
-      query.salesAgent = req.user._id;
-    }
-
-    // If sales manager, get all orders from their agents
-    if (req.user.role === "sales_manager") {
-      const agentIds = await User.find({ manager: req.user._id }).distinct(
-        "_id"
-      );
-      query.salesAgent = { $in: agentIds };
-    }
 
     const orders = await SalesOrder.find(query)
       .populate("salesAgent", "firstName lastName email")
@@ -435,6 +423,10 @@ exports.getOrdersByCustomer = async (req, res) => {
       .sort({ DocDate: -1 });
 
     const total = await SalesOrder.countDocuments(query);
+
+    console.log("Fetched orders for customer:", cardCode);
+
+    console.log("Total orders:", total);
 
     res.status(200).json({
       success: true,

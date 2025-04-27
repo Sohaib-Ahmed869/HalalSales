@@ -55,6 +55,7 @@ router.get(
   auth,
   callDataController.getAgentPerformanceComparison
 );
+
 router.post("/analyze", callDataController.analyzeCall);
 router.get("/", callDataController.getAllCallData);
 router.get("/:id", callDataController.getCallDataById);
@@ -63,7 +64,9 @@ router.delete("/:id", callDataController.deleteCallDataById);
 router.post("/process-all-calls", async (req, res) => {
   try {
     await processUnanalyzedCalls();
-    res.status(200).json({ message: "All unanalyzed calls have been processed." });
+    res
+      .status(200)
+      .json({ message: "All unanalyzed calls have been processed." });
   } catch (err) {
     res.status(500).json({ error: "Processing failed", details: err.message });
   }

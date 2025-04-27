@@ -5,6 +5,10 @@ const csv = require("csv-parser");
 const fs = require("fs");
 const path = require("path");
 const XLSX = require("xlsx");
+const CallData = require("../models/CallData");
+const SalesOrder = require("../models/SalesOrder");
+const Invoice = require("../models/Invoice");
+const Deal = require("../models/Deal");
 
 // Process customer data from text format
 const processCustomerData = (text) => {
@@ -718,22 +722,17 @@ exports.getCustomersPaginated = async (req, res) => {
   try {
     // Extract pagination parameters
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 50; // Larger default limit for better frontend performance
+    const limit = parseInt(req.query.limit) || 50;
     const skip = (page - 1) * limit;
 
     // Extract filtering parameters
-    const { status, search, assignedTo, type } = req.query;
+    const { status, search, assignedTo, type, sortBy, sortOrder } = req.query;
     const query = {};
 
     // Apply filters if provided
     if (status) query.status = status;
 
-    // Filter by customer type (SAP or non-SAP)
-    if (type === "sap") {
-      query.CardCode = { $regex: "^C", $options: "i" }; // SAP customers start with C
-    } else if (type === "non-sap") {
-      query.CardCode = { $not: { $regex: "^C", $options: "i" } }; // Non-SAP customers don't start with C
-    }
+    if (assignedTo) query.assignedTo = assignedTo;
 
     // Search by name, code or email
     if (search) {
@@ -747,21 +746,126 @@ exports.getCustomersPaginated = async (req, res) => {
     // Count total matching documents (for pagination)
     const totalCount = await Customer.countDocuments(query);
 
-    // Only select fields that are actually needed for the customer list
-    // This significantly reduces the response size and database load
-    const customers = await Customer.find({ ...query, status: "active" }) // Ensure status is "active"
+    // Get all matching customers without pagination for sorting by metrics
+    let customers = await Customer.find({ ...query })
       .select(
         "CardCode CardName Email phoneNumber status assignedTo TotalSales LastPurchaseDate"
       )
       .populate("assignedTo", "firstName lastName email")
-      .sort({ CardName: 1 }) // Sort by customer name
-      .skip(skip)
-      .limit(limit)
-      .lean(); // Use lean for better performance as we don't need mongoose document methods
+      .lean();
 
-    res.json({
+    // Extract customer codes and emails for efficient batch processing
+    const customerCodes = customers.map((c) => c.CardCode);
+    const customerEmails = customers.filter((c) => c.Email).map((c) => c.Email);
+
+
+    // Batch query for all metrics in parallel for better performance
+    const [invoiceCounts, orderCounts, abandonedCarts] = await Promise.all([
+      // Get invoice counts for all customers at once
+      Invoice.aggregate([
+        { $match: { CardCode: { $in: customerCodes } } },
+        { $group: { _id: "$CardCode", count: { $sum: 1 } } },
+      ]),
+
+      // Get order counts for all customers at once
+      SalesOrder.aggregate([
+        { $match: { CardCode: { $in: customerCodes } } },
+        { $group: { _id: "$CardCode", count: { $sum: 1 } } },
+      ]),
+
+      // Get abandoned cart counts for all customers at once
+      Deal.aggregate([
+        {
+          $match: {
+            $or: [
+              { customerEmail: { $in: customerEmails } },
+              { "contactInfo.email": { $in: customerEmails } },
+            ],
+            orderNumber: { $ne: null },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              $cond: [
+                { $ifNull: ["$customerEmail", false] },
+                "$customerEmail",
+                "$contactInfo.email",
+              ],
+            },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    // Create lookup maps for O(1) access
+    const invoiceMap = {};
+    invoiceCounts.forEach((item) => {
+      invoiceMap[item._id] = item.count;
+    });
+
+    const orderMap = {};
+    orderCounts.forEach((item) => {
+      orderMap[item._id] = item.count;
+    });
+
+    const cartMap = {};
+    abandonedCarts.forEach((item) => {
+      cartMap[item._id] = item.count;
+    });
+
+    // Enhance customers with metrics
+    const enhancedCustomers = customers.map((customer) => {
+      return {
+        ...customer,
+        metrics: {
+          invoiceCount: invoiceMap[customer.CardCode] || 0,
+          orderCount: orderMap[customer.CardCode] || 0,
+          abandonedCartCount: customer.Email ? cartMap[customer.Email] || 0 : 0,
+        },
+      };
+    });
+
+    // Apply sorting based on metrics
+    if (sortBy) {
+      const sortDirection = sortOrder === "desc" ? -1 : 1;
+
+      enhancedCustomers.sort((a, b) => {
+        let aValue, bValue;
+
+        switch (sortBy) {
+          case "invoiceCount":
+            aValue = a.metrics.invoiceCount;
+            bValue = b.metrics.invoiceCount;
+            break;
+          case "orderCount":
+            aValue = a.metrics.orderCount;
+            bValue = b.metrics.orderCount;
+            break;
+          case "abandonedCartCount":
+            aValue = a.metrics.abandonedCartCount;
+            bValue = b.metrics.abandonedCartCount;
+            break;
+          case "CardName":
+            return sortDirection * a.CardName.localeCompare(b.CardName);
+          default:
+            return 0;
+        }
+
+        return sortDirection * (aValue - bValue);
+      });
+    } else {
+      // Default sorting by CardName
+      enhancedCustomers.sort((a, b) => a.CardName.localeCompare(b.CardName));
+    }
+
+    // Apply pagination after sorting
+    const paginatedCustomers = enhancedCustomers.slice(skip, skip + limit);
+
+    return res.status(200).json({
       success: true,
-      customers,
+      customers: paginatedCustomers,
       pagination: {
         total: totalCount,
         page,
@@ -771,7 +875,7 @@ exports.getCustomersPaginated = async (req, res) => {
     });
   } catch (error) {
     console.error("Customer fetch error:", error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Server error",
       error: error.message,
@@ -1157,6 +1261,412 @@ exports.importHubspotContacts = async (req, res) => {
       success: false,
       message: "Error importing contacts",
       error: error.message,
+    });
+  }
+};
+
+exports.updateCustomerPhones = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "Please upload a file containing customer phone numbers",
+      });
+    }
+
+    // Ensure uploads directory exists
+    const uploadsDir = path.join(process.cwd(), "uploads");
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+
+    console.log("File upload path:", req.file.path);
+    console.log("File exists check:", fs.existsSync(req.file.path));
+
+    let phoneData = [];
+    const fileExt = path.extname(req.file.originalname).toLowerCase();
+
+    // Process file based on extension
+    if (fileExt === ".xlsx" || fileExt === ".xls") {
+      // Process Excel file
+      try {
+        const workbook = XLSX.readFile(req.file.path);
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+        const data = XLSX.utils.sheet_to_json(worksheet);
+
+        console.log(`Extracted ${data.length} rows from Excel file`);
+
+        // Map data to our phone format
+        phoneData = data.map((row) => {
+          // Extract phone numbers from different possible column names
+          let phone1 = row["Telephone 1"] || row["Phone"] || "";
+          let phone2 = row["Telephone 2"] || "";
+
+          // Convert to string if they're numbers
+          phone1 = phone1 !== undefined ? phone1.toString() : "";
+          phone2 = phone2 !== undefined ? phone2.toString() : "";
+
+          return {
+            CardCode: row["BP Code"] || row["CardCode"] || "",
+            phoneNumber: phone1.trim(),
+            alternativePhone: phone2.trim(),
+          };
+        });
+      } catch (error) {
+        console.error("Error processing Excel file:", error);
+        throw new Error(`Failed to process Excel file: ${error.message}`);
+      }
+    } else if (fileExt === ".csv") {
+      // Process CSV file
+      try {
+        phoneData = await new Promise((resolve, reject) => {
+          const results = [];
+          fs.createReadStream(req.file.path)
+            .pipe(csv())
+            .on("data", (row) => {
+              // Extract phone numbers from different possible column names
+              let phone1 = row["Telephone 1"] || row["Phone"] || "";
+              let phone2 = row["Telephone 2"] || "";
+
+              // Convert to string
+              phone1 = phone1 !== undefined ? phone1.toString() : "";
+              phone2 = phone2 !== undefined ? phone2.toString() : "";
+
+              results.push({
+                CardCode: row["BP Code"] || row["CardCode"] || "",
+                phoneNumber: phone1.trim(),
+                alternativePhone: phone2.trim(),
+              });
+            })
+            .on("end", () => {
+              console.log(`Processed ${results.length} rows from CSV`);
+              resolve(results);
+            })
+            .on("error", (error) => {
+              reject(error);
+            });
+        });
+      } catch (error) {
+        console.error("Error processing CSV file:", error);
+        throw new Error(`Failed to process CSV file: ${error.message}`);
+      }
+    } else {
+      // Process text file with specific format
+      try {
+        const fileContent = fs.readFileSync(req.file.path, "utf8");
+        const lines = fileContent.split("\n");
+
+        console.log(`Processing ${lines.length} lines from text file`);
+
+        // Process each line (skip header)
+        for (let i = 1; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+
+          // Extract line index, CardCode, and CardName first
+          // The pattern looks for: number C#### NAME/TEXT followed by possible phone numbers
+          const basicMatch = line.match(/^\s*(\d+)\s+(C\d+)\s+(.*)/);
+
+          if (basicMatch) {
+            const [fullMatch, lineIndex, cardCode, remaining] = basicMatch;
+
+            // Get all content after the CardCode
+            const afterCardCode = line.substring(
+              line.indexOf(cardCode) + cardCode.length
+            );
+
+            // Define various phone patterns with better pattern recognition
+            // We'll use capturing groups to preserve the formatting
+            const phonePattern =
+              /(\d{2}[\s\.]{1}\d{2}[\s\.]{1}\d{2}[\s\.]{1}\d{2}[\s\.]{1}\d{2}|\d{2}[\s\.]{1}\d{2}[\s\.]{1}\d{2}[\s\.]{1}\d{2}|\d{10}|\d{9}|\d{8})/g;
+
+            // Find all phone-like patterns in the text
+            const phoneMatches = [...afterCardCode.matchAll(phonePattern)];
+            const phones = phoneMatches.map((match) => match[0]);
+
+            // Add to results if phone numbers found
+            if (phones.length > 0) {
+              phoneData.push({
+                CardCode: cardCode.trim(),
+                phoneNumber: phones[0] || "",
+                alternativePhone: phones[1] || "",
+              });
+            }
+          }
+        }
+
+        console.log(
+          `Extracted ${phoneData.length} customer records with phones`
+        );
+      } catch (error) {
+        console.error("Error processing text file:", error);
+        throw new Error(`Failed to process text file: ${error.message}`);
+      }
+    }
+
+    // Filter out entries without CardCode or phone numbers
+    phoneData = phoneData.filter(
+      (item) => item.CardCode && (item.phoneNumber || item.alternativePhone)
+    );
+
+    // Clean and format phone numbers properly, preserving spaces and formatting
+    const cleanedPhoneData = phoneData.map((item) => {
+      let phoneNum = item.phoneNumber;
+      let altPhone = item.alternativePhone;
+
+      // Function to clean and format phone numbers
+      const formatPhoneNumber = (phone) => {
+        if (!phone) return "";
+
+        // Remove any non-phone content after the number (like "MILOUD" or "ancien")
+        // This regex captures the phone part and ignores trailing text
+        const phoneMatch = phone.match(
+          /^((?:\+?\d+[\s\.\-]?)+)(?:\s+[a-zA-Z].*)?$/
+        );
+        let formattedPhone = phoneMatch ? phoneMatch[1].trim() : phone.trim();
+
+        // If it's a plain 10-digit number, format it as XX XX XX XX XX
+        if (/^\d{10}$/.test(formattedPhone)) {
+          formattedPhone = formattedPhone.replace(
+            /(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/,
+            "$1 $2 $3 $4 $5"
+          );
+        }
+
+        return formattedPhone;
+      };
+
+      return {
+        CardCode: item.CardCode,
+        phoneNumber: formatPhoneNumber(phoneNum),
+        alternativePhone: formatPhoneNumber(altPhone),
+      };
+    });
+
+    console.log(`Prepared ${cleanedPhoneData.length} phone records for update`);
+
+    // Update database
+    const updateResults = {
+      total: cleanedPhoneData.length,
+      updated: 0,
+      notFound: 0,
+      errors: [],
+    };
+
+    for (const item of cleanedPhoneData) {
+      try {
+        // Find customer by CardCode
+        const customer = await Customer.findOne({ CardCode: item.CardCode });
+
+        if (customer) {
+          // Update primary phone number
+          if (item.phoneNumber) {
+            customer.phoneNumber = item.phoneNumber;
+          }
+
+          // Store alternative phone in additionalPhones array if it exists
+          if (item.alternativePhone) {
+            // Initialize additionalPhones if it doesn't exist
+            if (!customer.additionalPhones) {
+              customer.additionalPhones = [];
+            }
+
+            // Only add if not already present
+            if (!customer.additionalPhones.includes(item.alternativePhone)) {
+              customer.additionalPhones.push(item.alternativePhone);
+            }
+          }
+
+          await customer.save();
+          updateResults.updated++;
+        } else {
+          updateResults.notFound++;
+        }
+      } catch (error) {
+        console.error(`Error updating customer ${item.CardCode}:`, error);
+        updateResults.errors.push({
+          CardCode: item.CardCode,
+          error: error.message,
+        });
+      }
+    }
+
+    // Clean up the uploaded file
+    try {
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error deleting file after processing:", unlinkError);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Phone number update complete`,
+      results: updateResults,
+    });
+  } catch (error) {
+    console.error("Phone update error:", error);
+
+    // Clean up file if it exists
+    try {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error cleaning up file:", unlinkError);
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Error updating customer phone numbers",
+      error: error.message,
+    });
+  }
+};
+
+exports.getCustomerCallData = async (req, res) => {
+  try {
+    const customerId = req.params.id;
+
+    // First, find the customer to get their phone number
+    const customer = await Customer.findOne({ CardCode: customerId });
+
+    if (!customer) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+    console.log("Customer found:", customer);
+
+    // If customer doesn't have a phone number, return empty data
+    if (!customer.phoneNumber) {
+      return res.status(200).json({
+        success: true,
+        data: [],
+        pagination: {
+          total: 0,
+          page: 1,
+          limit: 10,
+          pages: 0,
+        },
+      });
+    }
+
+    console.log("Customer phone number:", customer.phoneNumber);
+
+    // Get pagination parameters
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    //if customer phone number begins with +, remove it if it has . or space remove them
+    let phoneNumber = customer.phoneNumber.replace(/[\s.]/g, "");
+    if (phoneNumber.startsWith("+")) {
+      phoneNumber = phoneNumber.substring(1);
+    }
+    //if customer phone number begins with 0, remove it
+    if (phoneNumber.startsWith("0")) {
+      phoneNumber = phoneNumber.substring(1);
+    }
+    //if customer phone number has . or space, remove them
+    phoneNumber = phoneNumber.replace(/[\s.]/g, "");
+
+    console.log("Customer phone number:", phoneNumber);
+    // Build filter object based on query params and customer phone number
+    const filter = {
+      $or: [{ fromNumber: phoneNumber }, { toNumber: phoneNumber }],
+    };
+
+    // Add date range filter if provided
+    if (req.query.startDate && req.query.endDate) {
+      filter.startTime = {
+        $gte: new Date(req.query.startDate),
+        $lte: new Date(req.query.endDate),
+      };
+    }
+
+    // Add direction filter if provided
+    if (req.query.direction && req.query.direction !== "all") {
+      filter.direction = req.query.direction;
+    }
+
+    // Add missed calls filter if provided
+    if (req.query.status === "missed") {
+      filter.missed = { $ne: "" };
+    } else if (req.query.status === "answered") {
+      filter.missed = "";
+    }
+
+    // Get call data with pagination
+    const callData = await CallData.find(filter)
+      .sort({ startTime: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    // Count total matching documents for pagination
+    const total = await CallData.countDocuments(filter);
+
+    // Get call statistics
+    const statistics = await CallData.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: null,
+          totalCalls: { $sum: 1 },
+          inboundCalls: {
+            $sum: { $cond: [{ $eq: ["$direction", "in"] }, 1, 0] },
+          },
+          outboundCalls: {
+            $sum: { $cond: [{ $eq: ["$direction", "out"] }, 1, 0] },
+          },
+          missedCalls: { $sum: { $cond: [{ $ne: ["$missed", ""] }, 1, 0] } },
+          totalDuration: { $sum: "$totalDuration" },
+          avgDuration: { $avg: "$inCallDuration" },
+          totalInCallDuration: { $sum: "$inCallDuration" },
+        },
+      },
+    ]);
+
+    // Prepare statistics response
+    const stats =
+      statistics.length > 0
+        ? statistics[0]
+        : {
+            totalCalls: 0,
+            inboundCalls: 0,
+            outboundCalls: 0,
+            missedCalls: 0,
+            totalDuration: 0,
+            avgDuration: 0,
+            totalInCallDuration: 0,
+          };
+
+    // Add answer rate calculation
+    stats.answerRate =
+      stats.totalCalls > 0
+        ? (
+            ((stats.totalCalls - stats.missedCalls) / stats.totalCalls) *
+            100
+          ).toFixed(1)
+        : 0;
+
+    return res.status(200).json({
+      success: true,
+      data: callData,
+      statistics: stats,
+      pagination: {
+        total,
+        page,
+        limit,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching customer call data:", error);
+    return res.status(500).json({
+      error: "Error fetching customer call data",
+      details: error.message,
     });
   }
 };

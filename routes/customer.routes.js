@@ -52,13 +52,24 @@ const upload = multer({
   },
 });
 
+router.post(
+  "/update-phones",
+  upload.single("file"),
+  customerController.updateCustomerPhones
+);
+
 // Get all customers (with filtering and permissions)
 router.get("/", auth, updateLastLogin, customerController.getCustomers);
 
 // Get all customers (with filtering and permissions)
 router.get("/sap", auth, updateLastLogin, customerController.getSAPCustomers);
 
-router.get("/paginated", auth, updateLastLogin, customerController.getCustomersPaginated);
+router.get(
+  "/paginated",
+  auth,
+  updateLastLogin,
+  customerController.getCustomersPaginated
+);
 
 // Get customer by ID
 router.get("/:id", auth, updateLastLogin, customerController.getCustomerById);
@@ -80,6 +91,13 @@ router.post(
   auth,
   checkRole(["admin"]),
   customerController.importCustomers
+);
+
+router.get(
+  "/:id/calls",
+  auth,
+  updateLastLogin,
+  customerController.getCustomerCallData
 );
 
 // Assign/reassign customer
