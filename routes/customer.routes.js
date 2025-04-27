@@ -71,6 +71,13 @@ router.get(
   customerController.getCustomersPaginated
 );
 
+router.get(
+  "/paginated2",
+  auth,
+  updateLastLogin,
+  customerController.getCustomersPaginated2
+);
+
 // Get customer by ID
 router.get("/:id", auth, updateLastLogin, customerController.getCustomerById);
 

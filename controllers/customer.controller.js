@@ -883,6 +883,171 @@ exports.getCustomersPaginated = async (req, res) => {
   }
 };
 
+exports.getCustomersPaginated2 = async (req, res) => {
+  try {
+    // Extract pagination parameters
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const skip = (page - 1) * limit;
+
+    // Extract filtering parameters
+    const { status, search, assignedTo, type, sortBy, sortOrder } = req.query;
+    const query = {};
+
+    // Apply filters if provided
+    if (status) query.status = status;
+
+    if (assignedTo) query.assignedTo = assignedTo;
+
+    // Search by name, code or email
+    if (search) {
+      query.$or = [
+        { CardName: { $regex: search, $options: "i" } },
+        { CardCode: { $regex: search, $options: "i" } },
+        { Email: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    // Count total matching documents (for pagination)
+    const totalCount = await Customer.countDocuments(query);
+
+    // Get all matching customers without pagination for sorting by metrics
+    let customers = await Customer.find({ ...query, status: "active" })
+      .select(
+        "CardCode CardName Email phoneNumber status assignedTo TotalSales LastPurchaseDate"
+      )
+      .populate("assignedTo", "firstName lastName email")
+      .lean();
+
+    // Extract customer codes and emails for efficient batch processing
+    const customerCodes = customers.map((c) => c.CardCode);
+    const customerEmails = customers.filter((c) => c.Email).map((c) => c.Email);
+
+
+    // Batch query for all metrics in parallel for better performance
+    const [invoiceCounts, orderCounts, abandonedCarts] = await Promise.all([
+      // Get invoice counts for all customers at once
+      Invoice.aggregate([
+        { $match: { CardCode: { $in: customerCodes } } },
+        { $group: { _id: "$CardCode", count: { $sum: 1 } } },
+      ]),
+
+      // Get order counts for all customers at once
+      SalesOrder.aggregate([
+        { $match: { CardCode: { $in: customerCodes } } },
+        { $group: { _id: "$CardCode", count: { $sum: 1 } } },
+      ]),
+
+      // Get abandoned cart counts for all customers at once
+      Deal.aggregate([
+        {
+          $match: {
+            $or: [
+              { customerEmail: { $in: customerEmails } },
+              { "contactInfo.email": { $in: customerEmails } },
+            ],
+            orderNumber: { $ne: null },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              $cond: [
+                { $ifNull: ["$customerEmail", false] },
+                "$customerEmail",
+                "$contactInfo.email",
+              ],
+            },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    // Create lookup maps for O(1) access
+    const invoiceMap = {};
+    invoiceCounts.forEach((item) => {
+      invoiceMap[item._id] = item.count;
+    });
+
+    const orderMap = {};
+    orderCounts.forEach((item) => {
+      orderMap[item._id] = item.count;
+    });
+
+    const cartMap = {};
+    abandonedCarts.forEach((item) => {
+      cartMap[item._id] = item.count;
+    });
+
+    // Enhance customers with metrics
+    const enhancedCustomers = customers.map((customer) => {
+      return {
+        ...customer,
+        metrics: {
+          invoiceCount: invoiceMap[customer.CardCode] || 0,
+          orderCount: orderMap[customer.CardCode] || 0,
+          abandonedCartCount: customer.Email ? cartMap[customer.Email] || 0 : 0,
+        },
+      };
+    });
+
+    // Apply sorting based on metrics
+    if (sortBy) {
+      const sortDirection = sortOrder === "desc" ? -1 : 1;
+
+      enhancedCustomers.sort((a, b) => {
+        let aValue, bValue;
+
+        switch (sortBy) {
+          case "invoiceCount":
+            aValue = a.metrics.invoiceCount;
+            bValue = b.metrics.invoiceCount;
+            break;
+          case "orderCount":
+            aValue = a.metrics.orderCount;
+            bValue = b.metrics.orderCount;
+            break;
+          case "abandonedCartCount":
+            aValue = a.metrics.abandonedCartCount;
+            bValue = b.metrics.abandonedCartCount;
+            break;
+          case "CardName":
+            return sortDirection * a.CardName.localeCompare(b.CardName);
+          default:
+            return 0;
+        }
+
+        return sortDirection * (aValue - bValue);
+      });
+    } else {
+      // Default sorting by CardName
+      enhancedCustomers.sort((a, b) => a.CardName.localeCompare(b.CardName));
+    }
+
+    // Apply pagination after sorting
+    const paginatedCustomers = enhancedCustomers.slice(skip, skip + limit);
+
+    return res.status(200).json({
+      success: true,
+      customers: paginatedCustomers,
+      pagination: {
+        total: totalCount,
+        page,
+        pages: Math.ceil(totalCount / limit),
+        limit,
+      },
+    });
+  } catch (error) {
+    console.error("Customer fetch error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
+
 // Process HubSpot export Excel file
 const processHubspotExport = (filePath) => {
   try {
@@ -1570,6 +1735,8 @@ exports.getCustomerCallData = async (req, res) => {
     }
     //if customer phone number has . or space, remove them
     phoneNumber = phoneNumber.replace(/[\s.]/g, "");
+
+
 
     console.log("Customer phone number:", phoneNumber);
     // Build filter object based on query params and customer phone number

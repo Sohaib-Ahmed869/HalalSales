@@ -409,8 +409,6 @@ exports.getOrdersByCustomer = async (req, res) => {
 
     const { cardCode } = req.params;
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
-    const skip = (page - 1) * limit;
 
     // Base query
     const query = { CardCode: cardCode };
@@ -418,8 +416,6 @@ exports.getOrdersByCustomer = async (req, res) => {
 
     const orders = await SalesOrder.find(query)
       .populate("salesAgent", "firstName lastName email")
-      .skip(skip)
-      .limit(limit)
       .sort({ DocDate: -1 });
 
     const total = await SalesOrder.countDocuments(query);
@@ -433,7 +429,6 @@ exports.getOrdersByCustomer = async (req, res) => {
       count: orders.length,
       total,
       page,
-      pages: Math.ceil(total / limit),
       customerCode: cardCode,
       data: orders,
     });
