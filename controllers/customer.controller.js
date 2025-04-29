@@ -734,6 +734,12 @@ exports.getCustomersPaginated = async (req, res) => {
 
     if (assignedTo) query.assignedTo = assignedTo;
 
+    if (assignedTo === "unassigned") {
+      query.assignedTo = null;
+    } else if (assignedTo) {
+      query.assignedTo = assignedTo;
+    }
+
     // Search by name, code or email
     if (search) {
       query.$or = [
@@ -758,9 +764,14 @@ exports.getCustomersPaginated = async (req, res) => {
     const customerCodes = customers.map((c) => c.CardCode);
     const customerEmails = customers.filter((c) => c.Email).map((c) => c.Email);
 
-
     // Batch query for all metrics in parallel for better performance
-    const [invoiceCounts, orderCounts, abandonedCarts] = await Promise.all([
+    const [
+      invoiceCounts,
+      orderCounts,
+      abandonedCarts,
+      totalTurnover,
+      latestInvoiceDates,
+    ] = await Promise.all([
       // Get invoice counts for all customers at once
       Invoice.aggregate([
         { $match: { CardCode: { $in: customerCodes } } },
@@ -797,6 +808,24 @@ exports.getCustomersPaginated = async (req, res) => {
           },
         },
       ]),
+
+      // Get total turnover (sum of invoice amounts) for all customers
+      Invoice.aggregate([
+        { $match: { CardCode: { $in: customerCodes } } },
+        { $group: { _id: "$CardCode", totalAmount: { $sum: "$DocTotal" } } },
+      ]),
+
+      // Get latest invoice date for each customer
+      Invoice.aggregate([
+        { $match: { CardCode: { $in: customerCodes } } },
+        { $sort: { DocDate: -1 } },
+        {
+          $group: {
+            _id: "$CardCode",
+            latestInvoiceDate: { $first: "$DocDate" },
+          },
+        },
+      ]),
     ]);
 
     // Create lookup maps for O(1) access
@@ -815,6 +844,18 @@ exports.getCustomersPaginated = async (req, res) => {
       cartMap[item._id] = item.count;
     });
 
+    // Create turnover map
+    const turnoverMap = {};
+    totalTurnover.forEach((item) => {
+      turnoverMap[item._id] = item.totalAmount;
+    });
+
+    // Create latest invoice date map
+    const latestInvoiceDateMap = {};
+    latestInvoiceDates.forEach((item) => {
+      latestInvoiceDateMap[item._id] = item.latestInvoiceDate;
+    });
+
     // Enhance customers with metrics
     const enhancedCustomers = customers.map((customer) => {
       return {
@@ -823,6 +864,8 @@ exports.getCustomersPaginated = async (req, res) => {
           invoiceCount: invoiceMap[customer.CardCode] || 0,
           orderCount: orderMap[customer.CardCode] || 0,
           abandonedCartCount: customer.Email ? cartMap[customer.Email] || 0 : 0,
+          sapTurnover: turnoverMap[customer.CardCode] || 0,
+          latestInvoiceDate: latestInvoiceDateMap[customer.CardCode] || null,
         },
       };
     });
@@ -846,6 +889,18 @@ exports.getCustomersPaginated = async (req, res) => {
           case "abandonedCartCount":
             aValue = a.metrics.abandonedCartCount;
             bValue = b.metrics.abandonedCartCount;
+            break;
+          case "sapTurnover":
+            aValue = a.metrics.sapTurnover;
+            bValue = b.metrics.sapTurnover;
+            break;
+          case "latestInvoiceDate":
+            aValue = a.metrics.latestInvoiceDate
+              ? new Date(a.metrics.latestInvoiceDate).getTime()
+              : 0;
+            bValue = b.metrics.latestInvoiceDate
+              ? new Date(b.metrics.latestInvoiceDate).getTime()
+              : 0;
             break;
           case "CardName":
             return sortDirection * a.CardName.localeCompare(b.CardName);
@@ -922,7 +977,6 @@ exports.getCustomersPaginated2 = async (req, res) => {
     // Extract customer codes and emails for efficient batch processing
     const customerCodes = customers.map((c) => c.CardCode);
     const customerEmails = customers.filter((c) => c.Email).map((c) => c.Email);
-
 
     // Batch query for all metrics in parallel for better performance
     const [invoiceCounts, orderCounts, abandonedCarts] = await Promise.all([
@@ -1691,6 +1745,480 @@ exports.updateCustomerPhones = async (req, res) => {
   }
 };
 
+exports.updateCustomerAddresses = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "Please upload a file containing customer addresses",
+      });
+    }
+
+    // Ensure uploads directory exists
+    const uploadsDir = path.join(process.cwd(), "uploads");
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+
+    console.log("File upload path:", req.file.path);
+    console.log("File exists check:", fs.existsSync(req.file.path));
+
+    let addressData = [];
+    const fileExt = path.extname(req.file.originalname).toLowerCase();
+
+    // Process file based on extension
+    if (fileExt === ".xlsx" || fileExt === ".xls") {
+      // Process Excel file
+      try {
+        const workbook = XLSX.readFile(req.file.path);
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+        const data = XLSX.utils.sheet_to_json(worksheet);
+
+        console.log(`Extracted ${data.length} rows from Excel file`);
+
+        // Map data to our address format
+        addressData = data.map((row) => {
+          return {
+            CardCode: row["BP Code"] || row["CardCode"] || "",
+            street: row["Bill-to Street"] || row["Street"] || "",
+            zipCode:
+              row["Bill-to Zip Code"] || row["Zip Code"] || row["ZIP"] || "",
+            city: row["City"] || "",
+            BP_Name: row["BP Name"] || row["CardName"] || "",
+          };
+        });
+      } catch (error) {
+        console.error("Error processing Excel file:", error);
+        throw new Error(`Failed to process Excel file: ${error.message}`);
+      }
+    } else if (fileExt === ".csv") {
+      // Process CSV file
+      try {
+        addressData = await new Promise((resolve, reject) => {
+          const results = [];
+          fs.createReadStream(req.file.path)
+            .pipe(csv())
+            .on("data", (row) => {
+              results.push({
+                CardCode: row["BP Code"] || row["CardCode"] || "",
+                street: row["Bill-to Street"] || row["Street"] || "",
+                zipCode:
+                  row["Bill-to Zip Code"] ||
+                  row["Zip Code"] ||
+                  row["ZIP"] ||
+                  "",
+                city: row["Bill-to City"] || "",
+                BP_Name: row["BP Name"] || row["CardName"] || "",
+              });
+            })
+            .on("end", () => {
+              console.log(`Processed ${results.length} rows from CSV`);
+              resolve(results);
+            })
+            .on("error", (error) => {
+              reject(error);
+            });
+        });
+      } catch (error) {
+        console.error("Error processing CSV file:", error);
+        throw new Error(`Failed to process CSV file: ${error.message}`);
+      }
+    } else {
+      // Process text file with specific format (like your example)
+      try {
+        const fileContent = fs.readFileSync(req.file.path, "utf8");
+        const lines = fileContent.split("\n");
+
+        console.log(`Processing ${lines.length} lines from text file`);
+
+        // Process each line (skip header if present)
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+
+          // Match text format: index BP_Code BP_Name Street ZipCode
+          // This regex captures the line structure with flexible spacing
+          const match = line.match(
+            /^\s*(\d+)\s+(C\d+)\s+(.+?)\s+(\d+.*?)(?:\s+(\d{5}))?\s*$/
+          );
+
+          if (match) {
+            // If there are 5 matches, then we have index, BP_Code, BP_Name, Street, ZipCode
+            const [, index, cardCode, name, street, zipCode] = match;
+
+            // Extract city from the address if available
+            const streetParts = street.split(",");
+            let addressStreet = street;
+            let city = "";
+
+            // If there's a comma, assume the part after the comma is the city
+            if (streetParts.length > 1) {
+              addressStreet = streetParts[0].trim();
+              city = streetParts[1].trim();
+            }
+
+            addressData.push({
+              CardCode: cardCode.trim(),
+              BP_Name: name.trim(),
+              street: addressStreet,
+              zipCode: zipCode || "",
+              city: city,
+            });
+          } else {
+            // Try alternative format without index at the beginning
+            const altMatch = line.match(
+              /^(C\d+)\s+(.+?)\s+(\d+.*?)(?:\s+(\d{5}))?\s*$/
+            );
+
+            if (altMatch) {
+              const [, cardCode, name, street, zipCode] = altMatch;
+
+              // Process same as above
+              const streetParts = street.split(",");
+              let addressStreet = street;
+              let city = "";
+
+              if (streetParts.length > 1) {
+                addressStreet = streetParts[0].trim();
+                city = streetParts[1].trim();
+              }
+
+              addressData.push({
+                CardCode: cardCode.trim(),
+                BP_Name: name.trim(),
+                street: addressStreet,
+                zipCode: zipCode || "",
+                city: city,
+              });
+            }
+          }
+        }
+
+        console.log(
+          `Extracted ${addressData.length} customer records with addresses`
+        );
+      } catch (error) {
+        console.error("Error processing text file:", error);
+        throw new Error(`Failed to process text file: ${error.message}`);
+      }
+    }
+
+    // Filter out entries without CardCode or address
+    addressData = addressData.filter((item) => item.CardCode && item.street);
+
+    // Clean and process address data
+    const cleanedAddressData = addressData.map((item) => {
+      // Extract city from zipCode if not already set
+      let city = item.city || "";
+      let zipCode = item.zipCode || "";
+
+      // French postal codes are typically 5 digits
+      if (!city && zipCode.length === 5) {
+        // You could add a lookup table here for French postal codes to cities
+        // For now, we'll just use the data as is
+      }
+
+      // Clean street address - remove any excess whitespace
+      let street = item.street ? item.street.trim() : "";
+
+      return {
+        CardCode: item.CardCode,
+        address: {
+          street: street,
+          zipCode: zipCode,
+          city: city,
+          country: "France", // Default for your dataset
+        },
+      };
+    });
+
+    console.log(
+      `Prepared ${cleanedAddressData.length} address records for update`
+    );
+
+    // Update database
+    const updateResults = {
+      total: cleanedAddressData.length,
+      updated: 0,
+      notFound: 0,
+      errors: [],
+    };
+
+    for (const item of cleanedAddressData) {
+      try {
+        // Find customer by CardCode
+        const customer = await Customer.findOne({ CardCode: item.CardCode });
+
+        if (customer) {
+          // Update address fields
+          customer.address = item.address;
+
+          await customer.save();
+          updateResults.updated++;
+        } else {
+          updateResults.notFound++;
+        }
+      } catch (error) {
+        console.error(`Error updating customer ${item.CardCode}:`, error);
+        updateResults.errors.push({
+          CardCode: item.CardCode,
+          error: error.message,
+        });
+      }
+    }
+
+    // Clean up the uploaded file
+    try {
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error deleting file after processing:", unlinkError);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Address update complete`,
+      results: updateResults,
+    });
+  } catch (error) {
+    console.error("Address update error:", error);
+
+    // Clean up file if it exists
+    try {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error cleaning up file:", unlinkError);
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Error updating customer addresses",
+      error: error.message,
+    });
+  }
+};
+
+exports.updateCustomerOutstandingBalance = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Please upload a file containing customer outstanding balances",
+      });
+    }
+
+    // Ensure uploads directory exists
+    const uploadsDir = path.join(process.cwd(), "uploads");
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+
+    console.log("File upload path:", req.file.path);
+    console.log("File exists check:", fs.existsSync(req.file.path));
+
+    let balanceData = [];
+    const fileExt = path.extname(req.file.originalname).toLowerCase();
+
+    // Process file based on extension
+    if (fileExt === ".xlsx" || fileExt === ".xls") {
+      // Process Excel file
+      try {
+        const workbook = XLSX.readFile(req.file.path);
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+        const data = XLSX.utils.sheet_to_json(worksheet);
+
+        console.log(`Extracted ${data.length} rows from Excel file`);
+
+        // Map data to our balance format
+        balanceData = data.map((row) => {
+          return {
+            CardCode: row["BP Code"] || row["CardCode"] || "",
+            outstandingBalance: parseFloat(
+              row["Account Balance"] || row["Balance"] || 0
+            ),
+            BP_Name: row["BP Name"] || row["CardName"] || "",
+          };
+        });
+      } catch (error) {
+        console.error("Error processing Excel file:", error);
+        throw new Error(`Failed to process Excel file: ${error.message}`);
+      }
+    } else if (fileExt === ".csv") {
+      // Process CSV file
+      try {
+        balanceData = await new Promise((resolve, reject) => {
+          const results = [];
+          fs.createReadStream(req.file.path)
+            .pipe(csv())
+            .on("data", (row) => {
+              results.push({
+                CardCode: row["BP Code"] || row["CardCode"] || "",
+                outstandingBalance: parseFloat(
+                  row["Account Balance"] || row["Balance"] || 0
+                ),
+                BP_Name: row["BP Name"] || row["CardName"] || "",
+              });
+            })
+            .on("end", () => {
+              console.log(`Processed ${results.length} rows from CSV`);
+              resolve(results);
+            })
+            .on("error", (error) => {
+              reject(error);
+            });
+        });
+      } catch (error) {
+        console.error("Error processing CSV file:", error);
+        throw new Error(`Failed to process CSV file: ${error.message}`);
+      }
+    } else {
+      // Process text file with specific format
+      try {
+        const fileContent = fs.readFileSync(req.file.path, "utf8");
+        const lines = fileContent.split("\n");
+
+        console.log(`Processing ${lines.length} lines from text file`);
+
+        // Process each line (skip header if present)
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+
+          // Skip header row if it contains column titles
+          if (
+            line.includes("BP Code") &&
+            line.includes("BP Name") &&
+            line.includes("Account Balance")
+          ) {
+            continue;
+          }
+
+          // Match text format: index BP_Code BP_Name Balance
+          // This regex captures the line structure with flexible spacing
+          const match = line.match(
+            /^\s*(\d+)\s+(C\d+)\s+(.+?)\s+(-?\d+(\.\d+)?)\s*$/
+          );
+
+          if (match) {
+            const [, index, cardCode, name, balance] = match;
+            balanceData.push({
+              CardCode: cardCode.trim(),
+              BP_Name: name.trim(),
+              outstandingBalance: parseFloat(balance),
+            });
+          } else {
+            // Try alternative format without index at the beginning
+            const altMatch = line.match(
+              /^(C\d+)\s+(.+?)\s+(-?\d+(\.\d+)?)\s*$/
+            );
+
+            if (altMatch) {
+              const [, cardCode, name, balance] = altMatch;
+              balanceData.push({
+                CardCode: cardCode.trim(),
+                BP_Name: name.trim(),
+                outstandingBalance: parseFloat(balance),
+              });
+            }
+          }
+        }
+
+        console.log(
+          `Extracted ${balanceData.length} customer records with balances`
+        );
+      } catch (error) {
+        console.error("Error processing text file:", error);
+        throw new Error(`Failed to process text file: ${error.message}`);
+      }
+    }
+
+    // Filter out entries without CardCode
+    balanceData = balanceData.filter((item) => item.CardCode);
+
+    // Ensure balance values are numbers and not NaN
+    const cleanedBalanceData = balanceData.map((item) => {
+      return {
+        CardCode: item.CardCode,
+        outstandingBalance: isNaN(item.outstandingBalance)
+          ? 0
+          : item.outstandingBalance,
+      };
+    });
+
+    console.log(
+      `Prepared ${cleanedBalanceData.length} balance records for update`
+    );
+
+    // Update database
+    const updateResults = {
+      total: cleanedBalanceData.length,
+      updated: 0,
+      notFound: 0,
+      errors: [],
+    };
+
+    for (const item of cleanedBalanceData) {
+      try {
+        // Find customer by CardCode
+        const customer = await Customer.findOne({ CardCode: item.CardCode });
+
+        if (customer) {
+          // Update balance field
+          customer.outstandingBalance = item.outstandingBalance;
+          await customer.save();
+          updateResults.updated++;
+        } else {
+          updateResults.notFound++;
+        }
+      } catch (error) {
+        console.error(`Error updating customer ${item.CardCode}:`, error);
+        updateResults.errors.push({
+          CardCode: item.CardCode,
+          error: error.message,
+        });
+      }
+    }
+
+    // Clean up the uploaded file
+    try {
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error deleting file after processing:", unlinkError);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Outstanding balance update complete`,
+      results: updateResults,
+    });
+  } catch (error) {
+    console.error("Balance update error:", error);
+
+    // Clean up file if it exists
+    try {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error cleaning up file:", unlinkError);
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Error updating customer outstanding balances",
+      error: error.message,
+    });
+  }
+};
+
 exports.getCustomerCallData = async (req, res) => {
   try {
     const customerId = req.params.id;
@@ -1735,8 +2263,6 @@ exports.getCustomerCallData = async (req, res) => {
     }
     //if customer phone number has . or space, remove them
     phoneNumber = phoneNumber.replace(/[\s.]/g, "");
-
-
 
     console.log("Customer phone number:", phoneNumber);
     // Build filter object based on query params and customer phone number
@@ -1834,6 +2360,213 @@ exports.getCustomerCallData = async (req, res) => {
     return res.status(500).json({
       error: "Error fetching customer call data",
       details: error.message,
+    });
+  }
+};
+
+// Merge customers with the same email address
+exports.mergeCustomersWithSameEmail = async (req, res) => {
+  try {
+    // Get all customers with non-empty emails
+    const customersWithEmail = await Customer.find({
+      Email: { $ne: null, $ne: "" },
+    }).sort({ createdAt: 1 });
+
+    // Group customers by email address
+    const emailGroups = {};
+    customersWithEmail.forEach((customer) => {
+      const email = customer.Email.toLowerCase().trim();
+      if (!emailGroups[email]) {
+        emailGroups[email] = [];
+      }
+      emailGroups[email].push(customer);
+    });
+
+    const mergeResults = {
+      totalEmailGroups: 0,
+      totalMerges: 0,
+      skippedSingleCustomers: 0,
+      skippedMoreThanTwoCustomers: 0,
+      mergedPairs: [],
+    };
+
+    // Process each email group
+    for (const [email, customers] of Object.entries(emailGroups)) {
+      mergeResults.totalEmailGroups++;
+
+      // Skip if only one customer with this email
+      if (customers.length === 1) {
+        mergeResults.skippedSingleCustomers++;
+        continue;
+      }
+
+      // Find SAP and non-SAP customers
+      const sapCustomers = customers.filter((c) => c.CardCode.startsWith("C"));
+      const nonSapCustomers = customers.filter((c) =>
+        c.CardCode.startsWith("NC")
+      );
+
+      // If we have both SAP and non-SAP customers, merge them
+      if (sapCustomers.length > 0 && nonSapCustomers.length > 0) {
+        // Take the first customer from each group for merging
+        const sapCustomer = sapCustomers[0];
+        const nonSapCustomer = nonSapCustomers[0];
+
+        // Merge the customers
+        const primaryCustomer = sapCustomer; // SAP customer is the primary
+        const secondaryCustomer = nonSapCustomer;
+
+        // Create a merged customer object
+        const mergedData = {
+          // Keep SAP data from the primary customer
+          CardName: primaryCustomer.CardName,
+          CardCode: primaryCustomer.CardCode,
+          Email: primaryCustomer.Email,
+
+          // Prefer data from the SAP customer but fall back to non-SAP data
+          firstName: primaryCustomer.firstName || secondaryCustomer.firstName,
+          lastName: primaryCustomer.lastName || secondaryCustomer.lastName,
+          phoneNumber:
+            primaryCustomer.phoneNumber || secondaryCustomer.phoneNumber,
+
+          // Keep external IDs
+          hubspotId: secondaryCustomer.hubspotId || primaryCustomer.hubspotId,
+
+          // Keep assignedTo from either customer
+          assignedTo:
+            primaryCustomer.assignedTo || secondaryCustomer.assignedTo,
+
+          // Keep additional data
+          notes: primaryCustomer.notes || secondaryCustomer.notes,
+
+          // Combine additional emails
+          additionalEmails: [
+            ...(primaryCustomer.additionalEmails || []),
+            ...(secondaryCustomer.additionalEmails || []),
+            // Add the secondary customer's email if different from primary
+            ...(primaryCustomer.Email !== secondaryCustomer.Email
+              ? [secondaryCustomer.Email]
+              : []),
+          ].filter((email, index, self) => self.indexOf(email) === index), // Remove duplicates
+
+          // Prefer SAP customer's address
+          address: primaryCustomer.address || secondaryCustomer.address,
+
+          // Use SAP customer's balance
+          outstandingBalance: primaryCustomer.outstandingBalance,
+
+          // Set the customer type to SAP
+          customerType: "sap",
+
+          // Keep the active status if either customer is active
+          status:
+            primaryCustomer.status === "active" ||
+            secondaryCustomer.status === "active"
+              ? "active"
+              : primaryCustomer.status,
+
+          // Update timestamp
+          updatedAt: new Date(),
+        };
+
+        // Update the primary customer with the merged data
+        await Customer.findByIdAndUpdate(primaryCustomer._id, mergedData);
+
+        // Optionally: Mark the secondary customer as merged or delete it
+        // Here we'll keep it but mark it as inactive and add a note
+        await Customer.findByIdAndUpdate(secondaryCustomer._id, {
+          status: "inactive",
+          notes: `Merged with ${primaryCustomer.CardCode} (${
+            primaryCustomer.CardName
+          }) on ${new Date().toISOString()}. ${secondaryCustomer.notes || ""}`,
+          mergedInto: primaryCustomer._id,
+        });
+
+        mergeResults.totalMerges++;
+        mergeResults.mergedPairs.push({
+          primaryCustomer: {
+            _id: primaryCustomer._id,
+            CardCode: primaryCustomer.CardCode,
+            CardName: primaryCustomer.CardName,
+            Email: primaryCustomer.Email,
+          },
+          secondaryCustomer: {
+            _id: secondaryCustomer._id,
+            CardCode: secondaryCustomer.CardCode,
+            CardName: secondaryCustomer.CardName,
+            Email: secondaryCustomer.Email,
+          },
+        });
+      } else if (customers.length > 2) {
+        // If we have more than 2 customers but not a SAP + non-SAP pair
+        mergeResults.skippedMoreThanTwoCustomers++;
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Customer merge operation completed",
+      results: mergeResults,
+    });
+  } catch (error) {
+    console.error("Error merging customers:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error merging customers",
+      error: error.message,
+    });
+  }
+};
+
+// Delete non-SAP customers that have been previously merged
+exports.deleteMergedNonSapCustomers = async (req, res) => {
+  try {
+    // Find all non-SAP customers (NC prefix) that have been marked as inactive due to merging
+    const mergedCustomers = await Customer.find({
+      CardCode: { $regex: "^NC" },
+      status: "inactive",
+      notes: { $regex: "Merged with C" }, // Look for the merge note pattern
+    });
+
+    if (mergedCustomers.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "No merged non-SAP customers found to delete",
+        count: 0,
+      });
+    }
+
+    // Get the IDs of customers to delete
+    const customerIdsToDelete = mergedCustomers.map((customer) => customer._id);
+
+    // Optional: Log which customers will be deleted
+    console.log(
+      `Deleting ${customerIdsToDelete.length} merged non-SAP customers`
+    );
+
+    // Delete all these customers in one operation
+    const deleteResult = await Customer.deleteMany({
+      _id: { $in: customerIdsToDelete },
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Successfully deleted merged non-SAP customers",
+      count: deleteResult.deletedCount,
+      details: mergedCustomers.map((c) => ({
+        _id: c._id,
+        CardCode: c.CardCode,
+        CardName: c.CardName,
+        Email: c.Email,
+        mergedWith: c.notes.match(/Merged with (C\d+)/)?.[1] || "Unknown",
+      })),
+    });
+  } catch (error) {
+    console.error("Error deleting merged customers:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error deleting merged customers",
+      error: error.message,
     });
   }
 };

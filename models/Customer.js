@@ -8,7 +8,7 @@ const CustomerSchema = new Schema({
     required: true,
   },
   CardCode: {
-    type: String, 
+    type: String,
     index: true, // Still index for performance
   },
   Email: {
@@ -82,6 +82,29 @@ const CustomerSchema = new Schema({
   },
   lastActivityDate: {
     type: Date,
+  },
+  address: {
+    street: {
+      type: String,
+      trim: true,
+    },
+    zipCode: {
+      type: String,
+      trim: true,
+    },
+    city: {
+      type: String,
+      trim: true,
+    },
+    country: {
+      type: String,
+      trim: true,
+      default: "France", // Default value since your examples seem to be in France
+    },
+  },
+  outstandingBalance: {
+    type: Number,
+    default: 0,
   },
 });
 

@@ -4,13 +4,99 @@ const Invoice = require("../models/Invoice");
 const Payment = require("../models/payment");
 const PaymentLink = require("../models/paymentLinks");
 const mongoose = require("mongoose");
+const calculateActivityByTimePeriod = (
+  invoices,
+  payments,
+  period = "quarterly"
+) => {
+  const timeframes = {};
 
+  // Define date formatter function based on period
+  const getTimeKey = (date) => {
+    const dateObj = new Date(date);
+    const year = dateObj.getFullYear();
+
+    switch (period) {
+      case "weekly":
+        // Get week number
+        const firstDayOfYear = new Date(year, 0, 1);
+        const pastDaysOfYear = (dateObj - firstDayOfYear) / 86400000;
+        const weekNum = Math.ceil(
+          (pastDaysOfYear + firstDayOfYear.getDay() + 1) / 7
+        );
+        return `${year}-W${weekNum}`;
+
+      case "monthly":
+        const month = dateObj.getMonth() + 1;
+        return `${year}-${month.toString().padStart(2, "0")}`;
+
+      case "quarterly":
+        const quarter = Math.floor(dateObj.getMonth() / 3) + 1;
+        return `${year}-Q${quarter}`;
+
+      case "yearly":
+      default:
+        return `${year}`;
+    }
+  };
+
+  // Process invoices by time period
+  invoices.forEach((invoice) => {
+    const key = getTimeKey(invoice.DocDate);
+
+    if (!timeframes[key]) {
+      timeframes[key] = {
+        period: key,
+        invoiceCount: 0,
+        invoiceAmount: 0,
+        paymentCount: 0,
+        paymentAmount: 0,
+      };
+    }
+
+    timeframes[key].invoiceCount++;
+    timeframes[key].invoiceAmount += invoice.DocTotal || 0;
+  });
+
+  // Process payments by time period
+  payments.forEach((payment) => {
+    const key = getTimeKey(payment.DocDate);
+    const paymentTotal =
+      (payment.CashSum || 0) +
+      (payment.TransferSum || 0) +
+      (payment.CheckSum || 0) +
+      (payment.CreditSum || 0);
+
+    if (!timeframes[key]) {
+      timeframes[key] = {
+        period: key,
+        invoiceCount: 0,
+        invoiceAmount: 0,
+        paymentCount: 0,
+        paymentAmount: 0,
+      };
+    }
+
+    timeframes[key].paymentCount++;
+    timeframes[key].paymentAmount += paymentTotal;
+  });
+
+  // Convert to array and sort chronologically
+  return Object.values(timeframes).sort((a, b) =>
+    a.period.localeCompare(b.period)
+  );
+};
 /**
  * Get customer journey overview for a specific customer
  */
 exports.getCustomerJourney = async (req, res) => {
   try {
     const { customerId } = req.params;
+    const { period = 'quarterly' } = req.query; 
+
+    const validPeriods = ['weekly', 'monthly', 'quarterly', 'yearly'];
+    const selectedPeriod = validPeriods.includes(period) ? period : 'quarterly';
+
 
     // Validate customer ID
     if (!customerId) {
@@ -96,7 +182,7 @@ exports.getCustomerJourney = async (req, res) => {
       ...payments.map((payment) => ({
         type: "payment",
         date: payment.DocDate,
-        amount: payment.CashSum + (payment.TransferSum || 0),
+        amount: payment.DocTotal,
         docNum: payment.DocNum,
         relatedInvoices:
           payment.PaymentInvoices?.map((pi) => ({
@@ -106,6 +192,12 @@ exports.getCustomerJourney = async (req, res) => {
         details: payment,
       })),
     ].sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    //print payment were DocNum is 202487 from the timeline
+    console.log(
+      "Payment with DocNum 202487 in timeline:",
+      timeline.filter((t) => t.docNum == 202487)
+    );
 
     // Calculate customer journey metrics
     const metrics = {
@@ -132,7 +224,8 @@ exports.getCustomerJourney = async (req, res) => {
     };
 
     // Calculate quarterly activity
-    const quarterlyActivity = calculateQuarterlyActivity(invoices, payments);
+    const activityData = calculateActivityByTimePeriod(invoices, payments, selectedPeriod);
+
 
     // Identify purchase patterns
     const purchasePatterns = identifyPurchasePatterns(invoices);
@@ -144,7 +237,7 @@ exports.getCustomerJourney = async (req, res) => {
         journey: {
           timeline,
           metrics,
-          quarterlyActivity,
+          activityData,
           purchasePatterns,
           linkedPayments,
         },
@@ -346,7 +439,11 @@ const calculateQuarterlyActivity = (invoices, payments) => {
     const year = date.getFullYear();
     const quarter = Math.floor(date.getMonth() / 3) + 1;
     const key = `${year}-Q${quarter}`;
-    const paymentTotal = (payment.CashSum || 0) + (payment.TransferSum || 0);
+    const paymentTotal =
+      (payment.CashSum || 0) +
+      (payment.TransferSum || 0) +
+      (payment.CheckSum || 0) +
+      (payment.CreditSum || 0);
 
     if (!quarters[key]) {
       quarters[key] = {
@@ -761,7 +858,7 @@ exports.getCustomerInteractionTimeline = async (req, res) => {
         type: "payment_made",
         date: payment.DocDate,
         docNum: payment.DocNum,
-        amount: payment.CashSum + (payment.TransferSum || 0),
+        amount: payment.DocTotal,
         details: {
           paymentNumber: payment.DocNum,
           paymentMethod:

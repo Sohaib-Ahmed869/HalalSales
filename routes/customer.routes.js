@@ -58,6 +58,17 @@ router.post(
   customerController.updateCustomerPhones
 );
 
+router.post(
+  "/update-addresses",
+  upload.single("file"),
+  customerController.updateCustomerAddresses
+);
+
+router.post(
+  "/update-balances",
+  upload.single("file"),
+  customerController.updateCustomerOutstandingBalance
+);
 // Get all customers (with filtering and permissions)
 router.get("/", auth, updateLastLogin, customerController.getCustomers);
 
@@ -145,5 +156,9 @@ router.post(
   upload.single("file"),
   customerController.importHubspotContacts
 );
+
+router.post("/merge-customers", customerController.mergeCustomersWithSameEmail);
+
+router.post("/delete-merged", customerController.deleteMergedNonSapCustomers)
 
 module.exports = router;

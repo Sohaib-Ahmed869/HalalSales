@@ -26,6 +26,8 @@ const salesManagerRoutes = require("./routes/salesManager.routes");
 const scraperRoutes = require("./routes/scraper.routes");
 const dealsRoutes = require("./routes/deals.routes");
 const menuRoutes = require('./routes/menu.routes');
+const leadRoutes = require('./routes/lead.routes');
+const taskRoutes = require('./routes/task.routes');
 const QuotationRoutes = require("./routes/quotation.routes");
 const config = require("./services/config");
 
@@ -111,6 +113,8 @@ app.use("/api/scraper", scraperRoutes);
 app.use("/api/deals", dealsRoutes);
 app.use("/api/menu", menuRoutes); // Menu routes
 app.use("/api/quotations", QuotationRoutes); // Quotation routes
+app.use("/api/leads", leadRoutes); // Lead routes
+app.use("/api/tasks", taskRoutes); // Task routes
 
 // Health check route
 app.get("/health", (req, res) => {
