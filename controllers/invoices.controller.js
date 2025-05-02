@@ -606,7 +606,7 @@ exports.getGlobalKPIs = async (req, res) => {
         }
       },
       { $sort: { totalAmount: -1 } },
-      { $limit: 10 }
+      { $limit: 50 }
     ];
 
     // 7. Top products by revenue - process in smaller chunks
@@ -629,7 +629,7 @@ exports.getGlobalKPIs = async (req, res) => {
         }
       },
       { $sort: { revenue: -1 } },
-      { $limit: 10 }
+      { $limit: 50 }
     ];
 
     // Execute all queries in parallel for better performance

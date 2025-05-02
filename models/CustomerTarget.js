@@ -1,128 +1,160 @@
+// models/CustomerTarget.js
 const mongoose = require("mongoose");
 const Schema = mongoose.Schema;
 
-const CustomerTargetSchema = new Schema({
-  // Customer code (maps to CardCode in SAP)
-  cardCode: {
-    type: String,
-    required: [true, "Customer code is required"],
-    trim: true,
-    index: true,
-  },
-
-  // Customer name for reference
-  cardName: {
-    type: String,
-    required: [true, "Customer name is required"],
-    trim: true,
-  },
-
-  // Target amount to be achieved
-  targetAmount: {
-    type: Number,
-    required: [true, "Target amount is required"],
-    default: 0,
-  },
-
-  // Actual amount achieved so far
-  achievedAmount: {
-    type: Number,
-    default: 0,
-  },
-
-  // Achievement rate (percentage)
-  achievementRate: {
-    type: Number,
-    default: 0,
-  },
-
-  // Target deadline
-  deadline: {
-    type: Date,
-    required: [true, "Target deadline is required"],
-  },
-
-  // Start date for this target
-  startDate: {
-    type: Date,
-    required: [true, "Start date is required"],
-    default: Date.now,
-  },
-
-  // Sales agent assigned to this customer
-  salesAgent: {
-    type: Schema.Types.ObjectId,
-    ref: "User",
-    required: [true, "Sales agent is required"],
-  },
-
-  // Created by (admin or sales manager)
-  createdBy: {
-    type: Schema.Types.ObjectId,
-    ref: "User",
-    required: [true, "Creator is required"],
-  },
-
-  // Creation date
-  createdAt: {
-    type: Date,
-    default: Date.now,
-  },
-
-  // Last update date
-  updatedAt: {
-    type: Date,
-    default: Date.now,
-  },
-
-  // Order history that contributes to this target
-  orders: [
-    {
-      orderId: {
-        type: Schema.Types.ObjectId,
-        ref: "SalesOrder",
-      },
-      docEntry: {
-        type: Number,
-      },
-      docTotal: {
-        type: Number,
-      },
-      docDate: {
-        type: Date,
+const CustomerTargetSchema = new Schema(
+  {
+    cardCode: {
+      type: String,
+      required: [true, "Customer code is required"],
+      trim: true,
+    },
+    cardName: {
+      type: String,
+      required: [true, "Customer name is required"],
+      trim: true,
+    },
+    targetAmount: {
+      type: Number,
+      required: [true, "Target amount is required"],
+      min: 0,
+    },
+    // Instead of a deadline, we'll use a recurring monthly target model
+    isRecurring: {
+      type: Boolean,
+      default: true,
+    },
+    // Period - monthly, quarterly, yearly
+    period: {
+      type: String,
+      enum: ["monthly", "quarterly", "yearly"],
+      default: "monthly",
+    },
+    // First day of the current period
+    currentPeriodStart: {
+      type: Date,
+      default: function () {
+        const now = new Date();
+        return new Date(now.getFullYear(), now.getMonth(), 1); // First day of current month
       },
     },
-  ],
-
-  // Status of the target
-  status: {
-    type: String,
-    enum: ["active", "completed", "expired"],
-    default: "active",
+    // Last day of the current period
+    currentPeriodEnd: {
+      type: Date,
+      default: function () {
+        const now = new Date();
+        return new Date(now.getFullYear(), now.getMonth() + 1, 0); // Last day of current month
+      },
+    },
+    // Keep the original deadline field for compatibility but it's not primary anymore
+    deadline: {
+      type: Date,
+      default: function () {
+        const now = new Date();
+        return new Date(now.getFullYear(), now.getMonth() + 1, 0); // Last day of current month
+      },
+    },
+    startDate: {
+      type: Date,
+      default: Date.now,
+    },
+    achievedAmount: {
+      type: Number,
+      default: 0,
+    },
+    achievementRate: {
+      type: Number,
+      default: 0,
+    },
+    status: {
+      type: String,
+      enum: ["active", "completed", "expired", "paused"],
+      default: "active",
+    },
+    salesAgent: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: [true, "Sales agent is required"],
+    },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    notes: {
+      type: String,
+      trim: true,
+    },
+    orders: [
+      {
+        orderId: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "SalesOrder",
+        },
+        docEntry: Number,
+        docTotal: Number,
+        docDate: Date,
+      },
+    ],
+    // New field to store historical performance data
+    historicalPerformance: [
+      {
+        period: String, // e.g., "2023-01" for January 2023
+        targetAmount: Number,
+        achievedAmount: Number,
+        achievementRate: Number,
+      },
+    ],
   },
+  { timestamps: true }
+);
 
-  // Notes or comments about this target
-  notes: {
-    type: String,
-    trim: true,
-  },
-});
+// Helper method to get the current ongoing target amount
+CustomerTargetSchema.methods.getCurrentTargetAmount = function () {
+  return this.targetAmount;
+};
 
-// Add methods or virtuals if needed
-CustomerTargetSchema.virtual("remainingAmount").get(function () {
-  return Math.max(0, this.targetAmount - this.achievedAmount);
-});
+// Helper method to reset target for a new period
+CustomerTargetSchema.methods.startNewPeriod = function () {
+  // Store the current period's performance in history
+  this.historicalPerformance.push({
+    period: `${this.currentPeriodStart.getFullYear()}-${String(
+      this.currentPeriodStart.getMonth() + 1
+    ).padStart(2, "0")}`,
+    targetAmount: this.targetAmount,
+    achievedAmount: this.achievedAmount,
+    achievementRate: this.achievementRate,
+  });
 
-CustomerTargetSchema.virtual("daysRemaining").get(function () {
-  const today = new Date();
-  const deadline = new Date(this.deadline);
-  const diffTime = deadline - today;
-  return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-});
+  // Calculate the new period dates
+  const now = new Date();
 
-// Update timestamp before save
+  if (this.period === "monthly") {
+    this.currentPeriodStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    this.currentPeriodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  } else if (this.period === "quarterly") {
+    const quarter = Math.floor(now.getMonth() / 3);
+    this.currentPeriodStart = new Date(now.getFullYear(), quarter * 3, 1);
+    this.currentPeriodEnd = new Date(now.getFullYear(), (quarter + 1) * 3, 0);
+  } else if (this.period === "yearly") {
+    this.currentPeriodStart = new Date(now.getFullYear(), 0, 1);
+    this.currentPeriodEnd = new Date(now.getFullYear(), 11, 31);
+  }
+
+  // Reset the current period's achievements
+  this.achievedAmount = 0;
+  this.achievementRate = 0;
+
+  // Update the deadline for compatibility with existing code
+  this.deadline = this.currentPeriodEnd;
+
+  return this;
+};
+
+// Pre-save middleware to calculate achievement rate
 CustomerTargetSchema.pre("save", function (next) {
-  this.updatedAt = Date.now();
+  if (this.targetAmount > 0) {
+    this.achievementRate = (this.achievedAmount / this.targetAmount) * 100;
+  }
   next();
 });
 

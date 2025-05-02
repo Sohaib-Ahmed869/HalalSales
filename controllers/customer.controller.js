@@ -735,9 +735,9 @@ exports.getCustomersPaginated = async (req, res) => {
     if (assignedTo) query.assignedTo = assignedTo;
 
     if (assignedTo === "unassigned") {
-      query.assignedTo = null;
-    } else if (assignedTo) {
-      query.assignedTo = assignedTo;
+      query.assignedTo = { $exists: false };  // This properly targets documents where assignedTo field doesn't exist
+    } else if (assignedTo !== "all" && assignedTo) {
+      query.assignedTo = assignedTo;  // Keep the existing filter for specific agents
     }
 
     // Search by name, code or email
@@ -2267,7 +2267,10 @@ exports.getCustomerCallData = async (req, res) => {
     console.log("Customer phone number:", phoneNumber);
     // Build filter object based on query params and customer phone number
     const filter = {
-      $or: [{ fromNumber: phoneNumber }, { toNumber: phoneNumber }],
+      $or: [
+        { fromNumber: { $regex: phoneNumber, $options: "i" } },
+        { toNumber: { $regex: phoneNumber, $options: "i" } },
+      ],
     };
 
     // Add date range filter if provided
