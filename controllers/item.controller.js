@@ -8,9 +8,9 @@ exports.getAllItems = async (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
     const skip = (page - 1) * limit;
 
-    const items = await Item.find()
-      .skip(skip)
-      .limit(limit)
+    //only get the items where Valid = tYes
+
+    const items = await Item.find({ Valid: "tYES" }).skip(skip).limit(limit);
 
     const total = await Item.countDocuments();
 
@@ -63,10 +63,7 @@ exports.getAvailableItems = async (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
     const skip = (page - 1) * limit;
 
-    const items = await Item.findAvailable()
-      .skip(skip)
-      .limit(limit)
-
+    const items = await Item.findAvailable().skip(skip).limit(limit);
 
     const total = await Item.countDocuments({ QuantityOnStock: { $gt: 0 } });
 
@@ -100,7 +97,7 @@ exports.getItemsByWarehouse = async (req, res) => {
       "ItemWarehouseInfoCollection.InStock": { $gt: 0 },
     })
       .skip(skip)
-      .limit(limit)
+      .limit(limit);
 
     const total = await Item.countDocuments({
       "ItemWarehouseInfoCollection.WarehouseCode": warehouseCode,
@@ -140,7 +137,10 @@ exports.searchItems = async (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
     const skip = (page - 1) * limit;
 
+    //only get the items where Valid = tYes
+
     const items = await Item.find({
+      Valid: "tYES",
       $or: [
         { ItemCode: { $regex: searchTerm, $options: "i" } },
         { ItemName: { $regex: searchTerm, $options: "i" } },
@@ -148,7 +148,7 @@ exports.searchItems = async (req, res) => {
       ],
     })
       .skip(skip)
-      .limit(limit)
+      .limit(limit);
 
     const total = await Item.countDocuments({
       $or: [
@@ -195,7 +195,7 @@ exports.getItemsByPriceRange = async (req, res) => {
       },
     })
       .skip(skip)
-      .limit(limit)
+      .limit(limit);
 
     const total = await Item.countDocuments({
       ItemPrices: {

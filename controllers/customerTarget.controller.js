@@ -122,15 +122,6 @@ exports.getAgentCustomerTargets = async (req, res) => {
       });
     }
 
-    if (
-      req.user.role === "sales_manager" &&
-      agent.manager.toString() !== req.user._id.toString()
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "Not authorized to view this agent's targets",
-      });
-    }
 
     // Filter options
     const query = { salesAgent: agentId };

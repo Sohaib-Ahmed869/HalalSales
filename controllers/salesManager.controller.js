@@ -11,11 +11,6 @@ exports.getTeamMembers = async (req, res) => {
     // Base query
     let query = { role: "sales_agent" };
 
-    // For sales manager, only get agents assigned to them
-    if (req.user.role === "sales_manager") {
-      query.manager = req.user._id;
-    }
-
     // Get team members
     const teamMembers = await User.find(query).select(
       "firstName lastName email avatar joinedAt status lastLogin"

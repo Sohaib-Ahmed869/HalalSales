@@ -7,7 +7,6 @@ const { auth, checkRole, updateLastLogin } = require("../middleware/auth");
 // Get team members (sales agents) for the current sales manager
 router.get(
   "/team",
-  auth,
   salesManagerController.getTeamMembers
 );
 

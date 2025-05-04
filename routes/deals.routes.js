@@ -25,6 +25,66 @@ router.post("/", dealController.createDeal);
 router.put("/:id", dealController.updateDeal);
 router.delete("/:id", dealController.deleteDeal);
 
+/**
+ * @route   GET /api/deals/analytics/abandoned-carts
+ * @desc    Get abandoned carts with enhanced filtering options
+ * @access  Private
+ * @query   {number} page - Page number
+ * @query   {number} limit - Number of results per page
+ * @query   {number} daysAgo - Only return carts from the last X days
+ * @query   {string} startDate - Start date for custom date range (ISO format)
+ * @query   {string} endDate - End date for custom date range (ISO format)
+ * @query   {string} category - Filter by product category
+ * @query   {string} productId - Filter by specific product
+ */
+router.get("/analytics/abandoned-carts", dealController.getAbandonedCarts);
+
+/**
+ * @route   GET /api/deals/analytics/abandoned-cart-time-analytics
+ * @desc    Get time-series data for abandoned carts
+ * @access  Private
+ * @query   {string} timeframe - Aggregation level: 'daily', 'weekly', 'monthly'
+ * @query   {string} startDate - Start date for the analysis period (ISO format)
+ * @query   {string} endDate - End date for the analysis period (ISO format)
+ */
+router.get(
+  "/analytics/abandoned-cart-time-analytics",
+  dealController.getAbandonedCartTimeAnalytics
+);
+
+/**
+ * @route   GET /api/deals/analytics/abandoned-cart-categories
+ * @desc    Get breakdown of abandoned carts by product category
+ * @access  Private
+ * @query   {string} startDate - Start date for filtering (ISO format)
+ * @query   {string} endDate - End date for filtering (ISO format)
+ * @query   {number} daysAgo - Alternative to date range, last X days
+ */
+router.get(
+  "/analytics/abandoned-cart-categories",
+  dealController.getAbandonedCartCategories
+);
+
+/**
+ * @route   GET /api/deals/analytics/product/:id
+ * @desc    Get detailed information about a specific product's abandonment patterns
+ * @access  Private
+ * @param   {string} id - Product ID
+ * @query   {string} startDate - Start date for filtering (ISO format)
+ * @query   {string} endDate - End date for filtering (ISO format)
+ */
+router.get("/analytics/product/:id", dealController.getProductDetails);
+
+/**
+ * @route   GET /api/deals/export/abandoned-carts
+ * @desc    Export abandoned cart data with enhanced filtering
+ * @access  Private
+ * @query   {number} daysAgo - Only export carts from the last X days
+ * @query   {string} startDate - Start date for custom date range (ISO format)
+ * @query   {string} endDate - End date for custom date range (ISO format)
+ * @query   {string} category - Filter by product category
+ */
+router.get("/export/abandoned-carts", dealController.exportAbandonedCarts);
 // Analytics routes
 
 /**

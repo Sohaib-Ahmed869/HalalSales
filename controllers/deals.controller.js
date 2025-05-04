@@ -241,15 +241,40 @@ exports.getAbandonedCarts = async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
-    const daysAgo = parseInt(req.query.daysAgo) || 30; // Default to last 30 days
 
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - daysAgo);
+    // Enhanced date filtering options
+    const startDate = req.query.startDate
+      ? new Date(req.query.startDate)
+      : null;
+    const endDate = req.query.endDate ? new Date(req.query.endDate) : null;
+    const daysAgo = parseInt(req.query.daysAgo) || null;
 
-    const query = {
-      orderNumber: null,
-      createDate: { $gte: startDate },
-    };
+    // Category filter for drill-down
+    const category = req.query.category || null;
+    const productId = req.query.productId || null;
+
+    // Build query
+    const query = { orderNumber: null };
+
+    // Apply date filters
+    if (startDate && endDate) {
+      // Use explicit date range if provided
+      query.createDate = { $gte: startDate, $lte: endDate };
+    } else if (daysAgo) {
+      // Use days ago as fallback
+      const fromDate = new Date();
+      fromDate.setDate(fromDate.getDate() - daysAgo);
+      query.createDate = { $gte: fromDate };
+    }
+
+    // Apply category/product filters for drill-down
+    if (category) {
+      query["products.category"] = category;
+    }
+
+    if (productId) {
+      query["products.id"] = productId;
+    }
 
     const abandonedCarts = await Deal.find(query)
       .sort({ createDate: -1 })
@@ -258,12 +283,325 @@ exports.getAbandonedCarts = async (req, res) => {
 
     const total = await Deal.countDocuments(query);
 
+    // Get aggregated data for drill-down navigation
+    const categories = await Deal.aggregate([
+      { $match: query },
+      { $unwind: "$products" },
+      {
+        $group: {
+          _id: "$products.category",
+          count: { $sum: 1 },
+          totalValue: { $sum: "$products.totalPrice" },
+        },
+      },
+      { $sort: { count: -1 } },
+    ]);
+
     res.status(200).json({
       success: true,
       count: abandonedCarts.length,
       totalPages: Math.ceil(total / limit),
       currentPage: page,
+      totalItems: total,
       data: abandonedCarts,
+      drillDown: {
+        categories: categories,
+      },
+    });
+  } catch (error) {
+    handleError(res, error);
+  }
+};
+
+// Get abandoned cart categories breakdown
+exports.getAbandonedCartCategories = async (req, res) => {
+  try {
+    // Date range parameters
+    const startDate = req.query.startDate
+      ? new Date(req.query.startDate)
+      : null;
+    const endDate = req.query.endDate ? new Date(req.query.endDate) : null;
+    const daysAgo = parseInt(req.query.daysAgo) || 30;
+
+    // Build the match query
+    const matchQuery = { orderNumber: null };
+
+    // Apply date filters
+    if (startDate && endDate) {
+      matchQuery.createDate = { $gte: startDate, $lte: endDate };
+    } else {
+      const fromDate = new Date();
+      fromDate.setDate(fromDate.getDate() - daysAgo);
+      matchQuery.createDate = { $gte: fromDate };
+    }
+
+    // Aggregate to get categories breakdown
+    const categoriesBreakdown = await Deal.aggregate([
+      { $match: matchQuery },
+      { $unwind: "$products" },
+      {
+        $group: {
+          _id: "$products.category",
+          count: { $sum: 1 },
+          totalValue: { $sum: "$products.totalPrice" },
+          totalCarts: { $addToSet: "$_id" },
+          avgCartValue: { $avg: "$amount" },
+        },
+      },
+      {
+        $addFields: {
+          cartCount: { $size: "$totalCarts" },
+        },
+      },
+      {
+        $project: {
+          totalCarts: 0, // Remove the large array of IDs
+        },
+      },
+      { $sort: { count: -1 } },
+    ]);
+
+    // Get product breakdown for each category
+    const categoriesWithProducts = await Promise.all(
+      categoriesBreakdown.map(async (category) => {
+        const products = await Deal.aggregate([
+          { $match: matchQuery },
+          { $unwind: "$products" },
+          { $match: { "products.category": category._id } },
+          {
+            $group: {
+              _id: "$products.name",
+              count: { $sum: 1 },
+              totalQuantity: { $sum: "$products.quantity" },
+              totalValue: { $sum: "$products.totalPrice" },
+              productId: { $first: "$products.id" },
+            },
+          },
+          { $sort: { count: -1 } },
+          { $limit: 10 },
+        ]);
+
+        return {
+          ...category,
+          products,
+        };
+      })
+    );
+
+    res.status(200).json({
+      success: true,
+      count: categoriesWithProducts.length,
+      dateRange: startDate && endDate ? { startDate, endDate } : { daysAgo },
+      data: categoriesWithProducts,
+    });
+  } catch (error) {
+    handleError(res, error);
+  }
+};
+
+// Get detailed product analytics for abandoned carts
+exports.getProductDetails = async (req, res) => {
+  try {
+    const productId = req.params.id;
+
+    // Date range parameters
+    const startDate = req.query.startDate
+      ? new Date(req.query.startDate)
+      : null;
+    const endDate = req.query.endDate ? new Date(req.query.endDate) : null;
+
+    // Build match query
+    const matchQuery = {
+      orderNumber: null,
+      "products.id": productId,
+    };
+
+    // Apply date filters
+    if (startDate && endDate) {
+      matchQuery.createDate = { $gte: startDate, $lte: endDate };
+    }
+
+    // Get detailed analytics for this product
+    const productDetails = await Deal.aggregate([
+      { $match: matchQuery },
+      { $unwind: "$products" },
+      { $match: { "products.id": productId } },
+      {
+        $group: {
+          _id: "$products.id",
+          name: { $first: "$products.name" },
+          category: { $first: "$products.category" },
+          count: { $sum: 1 },
+          totalQuantity: { $sum: "$products.quantity" },
+          totalValue: { $sum: "$products.totalPrice" },
+          avgPrice: { $avg: "$products.price" },
+          cartIds: { $addToSet: "$_id" },
+          lastAbandonedDate: { $max: "$createDate" },
+        },
+      },
+    ]);
+
+    if (!productDetails.length) {
+      return res.status(404).json({
+        success: false,
+        message: "Product not found in abandoned carts",
+      });
+    }
+
+    // Get time-series data for this product
+    const timeSeriesData = await Deal.aggregate([
+      { $match: matchQuery },
+      { $unwind: "$products" },
+      { $match: { "products.id": productId } },
+      {
+        $group: {
+          _id: { $dateToString: { format: "%Y-%m-%d", date: "$createDate" } },
+          count: { $sum: 1 },
+          totalQuantity: { $sum: "$products.quantity" },
+          totalValue: { $sum: "$products.totalPrice" },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]);
+
+    // Get frequently co-abandoned products
+    const coAbandonedProducts = await Deal.aggregate([
+      { $match: matchQuery },
+      { $unwind: "$products" },
+      { $match: { "products.id": { $ne: productId } } },
+      {
+        $group: {
+          _id: "$products.id",
+          name: { $first: "$products.name" },
+          category: { $first: "$products.category" },
+          count: { $sum: 1 },
+          percentage: { $sum: 1 }, // Will calculate percentage later
+        },
+      },
+      { $sort: { count: -1 } },
+      { $limit: 5 },
+    ]);
+
+    // Calculate percentage of co-abandonment
+    const totalCarts = productDetails[0].cartIds.length;
+    coAbandonedProducts.forEach((product) => {
+      product.percentage =
+        ((product.count / totalCarts) * 100).toFixed(1) + "%";
+    });
+
+    // Get customer segments that abandon this product
+    const customerSegments = await Deal.aggregate([
+      { $match: matchQuery },
+      {
+        $group: {
+          _id: "$customerSegment", // Assuming your schema has this field
+          count: { $sum: 1 },
+          percentage: { $sum: 1 }, // Will calculate percentage later
+        },
+      },
+      { $sort: { count: -1 } },
+    ]);
+
+    // Calculate percentage for customer segments
+    customerSegments.forEach((segment) => {
+      segment.percentage =
+        ((segment.count / totalCarts) * 100).toFixed(1) + "%";
+      segment.segmentName = segment._id || "Unknown";
+    });
+
+    // Format the response
+    const formattedResponse = {
+      ...productDetails[0],
+      cartCount: productDetails[0].cartIds.length,
+      timeSeries: timeSeriesData,
+      coAbandonedProducts,
+      customerSegments,
+    };
+
+    // Remove the large array of cart IDs
+    delete formattedResponse.cartIds;
+
+    res.status(200).json({
+      success: true,
+      data: formattedResponse,
+    });
+  } catch (error) {
+    handleError(res, error);
+  }
+};
+exports.getAbandonedCartTimeAnalytics = async (req, res) => {
+  try {
+    // Date range parameters
+    const startDate = req.query.startDate
+      ? new Date(req.query.startDate)
+      : null;
+    const endDate = req.query.endDate ? new Date(req.query.endDate) : null;
+    const timeframe = req.query.timeframe || "daily"; // daily, weekly, monthly
+
+    let matchQuery = { orderNumber: null };
+
+    // Apply date filters
+    if (startDate && endDate) {
+      matchQuery.createDate = { $gte: startDate, $lte: endDate };
+    }
+
+    // Define time grouping based on timeframe
+    let groupBy;
+    if (timeframe === "daily") {
+      groupBy = { $dateToString: { format: "%Y-%m-%d", date: "$createDate" } };
+    } else if (timeframe === "weekly") {
+      groupBy = {
+        year: { $year: "$createDate" },
+        week: { $week: "$createDate" },
+      };
+    } else if (timeframe === "monthly") {
+      groupBy = {
+        year: { $year: "$createDate" },
+        month: { $month: "$createDate" },
+      };
+    }
+
+    // Run aggregation pipeline
+    const abandonedCartTimeSeries = await Deal.aggregate([
+      { $match: matchQuery },
+      {
+        $group: {
+          _id: groupBy,
+          count: { $sum: 1 },
+          totalValue: { $sum: "$amount" },
+          avgValue: { $avg: "$amount" },
+          productCount: { $sum: { $size: { $ifNull: ["$products", []] } } },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]);
+
+    // Format results for charts
+    const formattedData = abandonedCartTimeSeries.map((item) => {
+      let dateLabel;
+      if (timeframe === "daily") {
+        dateLabel = item._id; // Already formatted as YYYY-MM-DD
+      } else if (timeframe === "weekly") {
+        dateLabel = `${item._id.year}-W${item._id.week}`;
+      } else if (timeframe === "monthly") {
+        dateLabel = `${item._id.year}-${item._id.month
+          .toString()
+          .padStart(2, "0")}`;
+      }
+
+      return {
+        date: dateLabel,
+        count: item.count,
+        totalValue: item.totalValue || 0,
+        avgValue: item.avgValue || 0,
+        productCount: item.productCount || 0,
+      };
+    });
+
+    res.status(200).json({
+      success: true,
+      timeframe: timeframe,
+      data: formattedData,
     });
   } catch (error) {
     handleError(res, error);
@@ -273,6 +611,7 @@ exports.getAbandonedCarts = async (req, res) => {
 // Get abandoned cart recovery opportunities (with contact info)
 exports.getAbandonedCartRecoveryOpportunities = async (req, res) => {
   try {
+    // Build query
     const query = {
       orderNumber: null,
       $or: [
@@ -282,6 +621,33 @@ exports.getAbandonedCartRecoveryOpportunities = async (req, res) => {
         { customerEmail: { $ne: null, $ne: "" } },
       ],
     };
+
+    // Add date filters
+    const startDate = req.query.startDate
+      ? new Date(req.query.startDate)
+      : null;
+    const endDate = req.query.endDate ? new Date(req.query.endDate) : null;
+    const daysAgo = parseInt(req.query.daysAgo) || null;
+
+    if (startDate && endDate) {
+      query.createDate = { $gte: startDate, $lte: endDate };
+    } else if (daysAgo) {
+      const fromDate = new Date();
+      fromDate.setDate(fromDate.getDate() - daysAgo);
+      query.createDate = { $gte: fromDate };
+    }
+
+    // Add category/product filters
+    const category = req.query.category || null;
+    const productId = req.query.productId || null;
+
+    if (category) {
+      query["products.category"] = category;
+    }
+
+    if (productId) {
+      query["products.id"] = productId;
+    }
 
     const abandonedCartsWithContact = await Deal.find(query)
       .sort({ amount: -1 }) // Sort by cart value (highest first)
@@ -407,12 +773,25 @@ exports.getProductPerformance = async (req, res) => {
 // Get conversion rate stats
 exports.getConversionStats = async (req, res) => {
   try {
-    const period = req.query.period || "all"; // all, month, quarter, year
+    const period = req.query.period || "all"; // all, month, quarter, year, custom
 
     let dateFilter = {};
     const now = new Date();
 
-    if (period === "month") {
+    // Handle date filters
+    const startDate = req.query.startDate
+      ? new Date(req.query.startDate)
+      : null;
+    const endDate = req.query.endDate ? new Date(req.query.endDate) : null;
+    const daysAgo = parseInt(req.query.daysAgo) || null;
+
+    if (period === "custom" && startDate && endDate) {
+      dateFilter = { createDate: { $gte: startDate, $lte: endDate } };
+    } else if (period === "custom" && daysAgo) {
+      const fromDate = new Date();
+      fromDate.setDate(fromDate.getDate() - daysAgo);
+      dateFilter = { createDate: { $gte: fromDate } };
+    } else if (period === "month") {
       const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
       dateFilter = { createDate: { $gte: startOfMonth } };
     } else if (period === "quarter") {
@@ -424,18 +803,39 @@ exports.getConversionStats = async (req, res) => {
       dateFilter = { createDate: { $gte: startOfYear } };
     }
 
+    // Add product/category filters
+    const category = req.query.category || null;
+    const productId = req.query.productId || null;
+
+    let productFilter = {};
+    if (category) {
+      productFilter["products.category"] = category;
+    }
+
+    if (productId) {
+      productFilter["products.id"] = productId;
+    }
+
+    const categoryProductFilter =
+      Object.keys(productFilter).length > 0 ? productFilter : {};
+
     // Total deals created in period
-    const totalDeals = await Deal.countDocuments(dateFilter);
+    const totalDeals = await Deal.countDocuments({
+      ...dateFilter,
+      ...categoryProductFilter,
+    });
 
     // Completed purchases
     const completedPurchases = await Deal.countDocuments({
       ...dateFilter,
+      ...categoryProductFilter,
       orderNumber: { $ne: null },
     });
 
     // Abandoned carts
     const abandonedCarts = await Deal.countDocuments({
       ...dateFilter,
+      ...categoryProductFilter,
       orderNumber: null,
     });
 
@@ -444,6 +844,7 @@ exports.getConversionStats = async (req, res) => {
       {
         $match: {
           ...dateFilter,
+          ...categoryProductFilter,
           orderNumber: null,
           amount: { $ne: null, $gt: 0 },
         },
@@ -463,6 +864,13 @@ exports.getConversionStats = async (req, res) => {
     res.status(200).json({
       success: true,
       period: period,
+      filters: {
+        dateRange:
+          startDate && endDate ? { start: startDate, end: endDate } : null,
+        daysAgo: daysAgo,
+        category: category,
+        productId: productId,
+      },
       data: {
         totalDeals,
         completedPurchases,
@@ -572,14 +980,39 @@ exports.getAbandonedCartAnalytics = async (req, res) => {
 // Get top abandoned products
 exports.getTopAbandonedProducts = async (req, res) => {
   try {
+    // Build match query
+    const matchQuery = {
+      orderNumber: null,
+      "products.0": { $exists: true },
+    };
+
+    // Add date filters
+    const startDate = req.query.startDate
+      ? new Date(req.query.startDate)
+      : null;
+    const endDate = req.query.endDate ? new Date(req.query.endDate) : null;
+    const daysAgo = parseInt(req.query.daysAgo) || null;
+
+    if (startDate && endDate) {
+      matchQuery.createDate = { $gte: startDate, $lte: endDate };
+    } else if (daysAgo) {
+      const fromDate = new Date();
+      fromDate.setDate(fromDate.getDate() - daysAgo);
+      matchQuery.createDate = { $gte: fromDate };
+    }
+
+    // Add category filter
+    const category = req.query.category || null;
+    if (category) {
+      matchQuery["products.category"] = category;
+    }
+
+    // Get aggregated data
     const abandonedProducts = await Deal.aggregate([
-      {
-        $match: {
-          orderNumber: null,
-          "products.0": { $exists: true },
-        },
-      },
+      { $match: matchQuery },
       { $unwind: "$products" },
+      // Apply category filter at the individual product level if needed
+      ...(category ? [{ $match: { "products.category": category } }] : []),
       {
         $group: {
           _id: "$products.name",
@@ -587,10 +1020,11 @@ exports.getTopAbandonedProducts = async (req, res) => {
           totalQuantity: { $sum: "$products.quantity" },
           totalValue: { $sum: "$products.totalPrice" },
           avgPrice: { $avg: "$products.price" },
+          category: { $first: "$products.category" }, // Include category for drill-down
         },
       },
       { $sort: { count: -1 } },
-      { $limit: 20 },
+      { $limit: 50 },
     ]);
 
     res.status(200).json({

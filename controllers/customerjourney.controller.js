@@ -18,13 +18,15 @@ const calculateActivityByTimePeriod = (
 
     switch (period) {
       case "weekly":
-        // Get week number
+        // Calculate ISO week number properly
         const firstDayOfYear = new Date(year, 0, 1);
-        const pastDaysOfYear = (dateObj - firstDayOfYear) / 86400000;
-        const weekNum = Math.ceil(
-          (pastDaysOfYear + firstDayOfYear.getDay() + 1) / 7
+        const daysSinceFirstDay = Math.floor(
+          (dateObj - firstDayOfYear) / (24 * 60 * 60 * 1000)
         );
-        return `${year}-W${weekNum}`;
+        const weekNum = Math.ceil(
+          (daysSinceFirstDay + firstDayOfYear.getDay() + 1) / 7
+        );
+        return `${year}-W${String(weekNum).padStart(2, "0")}`;
 
       case "monthly":
         const month = dateObj.getMonth() + 1;
@@ -92,11 +94,10 @@ const calculateActivityByTimePeriod = (
 exports.getCustomerJourney = async (req, res) => {
   try {
     const { customerId } = req.params;
-    const { period = 'quarterly' } = req.query; 
+    const { period = "quarterly", startDate, endDate } = req.query;
 
-    const validPeriods = ['weekly', 'monthly', 'quarterly', 'yearly'];
-    const selectedPeriod = validPeriods.includes(period) ? period : 'quarterly';
-
+    const validPeriods = ["weekly", "monthly", "quarterly", "yearly"];
+    const selectedPeriod = validPeriods.includes(period) ? period : "quarterly";
 
     // Validate customer ID
     if (!customerId) {
@@ -117,13 +118,38 @@ exports.getCustomerJourney = async (req, res) => {
       });
     }
 
-    // Get customer invoices ordered by date
-    const invoices = await Invoice.find({ CardCode: customerId })
+    // Build date filter for invoices if provided
+    const invoiceFilter = { CardCode: customerId };
+    if (startDate && endDate) {
+      invoiceFilter.DocDate = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate),
+      };
+    } else if (startDate) {
+      invoiceFilter.DocDate = { $gte: new Date(startDate) };
+    } else if (endDate) {
+      invoiceFilter.DocDate = { $lte: new Date(endDate) };
+    }
+
+    // Get customer invoices ordered by date with date filter
+    const invoices = await Invoice.find(invoiceFilter)
       .sort({ DocDate: 1 })
       .lean();
 
-    // Get customer payments ordered by date
-    const payments = await Payment.find({ CardCode: customerId })
+    // Apply the same date filter to payments
+    const paymentFilter = { CardCode: customerId };
+    if (startDate && endDate) {
+      paymentFilter.DocDate = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate),
+      };
+    } else if (startDate) {
+      paymentFilter.DocDate = { $gte: new Date(startDate) };
+    } else if (endDate) {
+      paymentFilter.DocDate = { $lte: new Date(endDate) };
+    }
+
+    const payments = await Payment.find(paymentFilter)
       .sort({ DocDate: 1 })
       .lean();
 
@@ -224,8 +250,11 @@ exports.getCustomerJourney = async (req, res) => {
     };
 
     // Calculate quarterly activity
-    const activityData = calculateActivityByTimePeriod(invoices, payments, selectedPeriod);
-
+    const activityData = calculateActivityByTimePeriod(
+      invoices,
+      payments,
+      selectedPeriod
+    );
 
     // Identify purchase patterns
     const purchasePatterns = identifyPurchasePatterns(invoices);
@@ -571,8 +600,11 @@ exports.getCustomerJourneySummary = async (req, res) => {
       minInvoiceCount,
       minAmount,
       search,
+      startDate,
+      endDate,
     } = req.query;
 
+    // Convert to integers/floats
     const pageInt = parseInt(page);
     const limitInt = parseInt(limit);
     const skip = (pageInt - 1) * limitInt;
@@ -585,6 +617,18 @@ exports.getCustomerJourneySummary = async (req, res) => {
         { CardCode: new RegExp(search, "i") },
         { CardName: new RegExp(search, "i") },
       ];
+    }
+
+    // Add date range filter if provided
+    if (startDate && endDate) {
+      matchStage.DocDate = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate),
+      };
+    } else if (startDate) {
+      matchStage.DocDate = { $gte: new Date(startDate) };
+    } else if (endDate) {
+      matchStage.DocDate = { $lte: new Date(endDate) };
     }
 
     // Build main pipeline to get customer data
@@ -952,8 +996,33 @@ exports.getCustomerInteractionTimeline = async (req, res) => {
  */
 exports.getCustomerJourneyAnalytics = async (req, res) => {
   try {
+    // Get date filters from request
+    const { startDate, endDate } = req.query;
+
+    // Build match stage for pipeline
+    const matchStage = {};
+
+    // Add date range filter if provided
+    if (startDate && endDate) {
+      matchStage.DocDate = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate),
+      };
+    } else if (startDate) {
+      matchStage.DocDate = { $gte: new Date(startDate) };
+    } else if (endDate) {
+      matchStage.DocDate = { $lte: new Date(endDate) };
+    }
+
     // Build aggregation pipeline for customer journeys
-    const pipeline = [
+    const pipeline = [];
+
+    // Add initial match stage if we have date filters
+    if (Object.keys(matchStage).length > 0) {
+      pipeline.push({ $match: matchStage });
+    }
+
+    pipeline.push(
       // Group invoices by customer
       {
         $group: {
@@ -1143,8 +1212,8 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
             },
           ],
         },
-      },
-    ];
+      }
+    );
 
     const results = await Invoice.aggregate(pipeline);
 

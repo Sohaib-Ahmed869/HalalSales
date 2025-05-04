@@ -29,6 +29,7 @@ const menuRoutes = require('./routes/menu.routes');
 const leadRoutes = require('./routes/lead.routes');
 const taskRoutes = require('./routes/task.routes');
 const QuotationRoutes = require("./routes/quotation.routes");
+const salesAgentJourneyRoutes = require("./routes/salesAgentJourney.routes");
 const config = require("./services/config");
 
 // Initialize express app
@@ -115,6 +116,7 @@ app.use("/api/menu", menuRoutes); // Menu routes
 app.use("/api/quotations", QuotationRoutes); // Quotation routes
 app.use("/api/leads", leadRoutes); // Lead routes
 app.use("/api/tasks", taskRoutes); // Task routes
+app.use("/api/sales-agent-journey", salesAgentJourneyRoutes); // Sales agent journey routes
 
 // Health check route
 app.get("/health", (req, res) => {

@@ -8,6 +8,7 @@ const XLSX = require("xlsx");
 const CallData = require("../models/CallData");
 const SalesOrder = require("../models/SalesOrder");
 const Invoice = require("../models/Invoice");
+const Quotation = require("../models/Quotation");
 const Deal = require("../models/Deal");
 
 // Process customer data from text format
@@ -725,6 +726,12 @@ exports.getCustomersPaginated = async (req, res) => {
     const limit = parseInt(req.query.limit) || 50;
     const skip = (page - 1) * limit;
 
+    //check user role
+    if (req.user && req.user.role === "sales_agent") {
+      // Sales agents can only see customers assigned to them
+      req.query.assignedTo = req.user._id;
+    }
+
     // Extract filtering parameters
     const { status, search, assignedTo, type, sortBy, sortOrder } = req.query;
     const query = {};
@@ -735,9 +742,9 @@ exports.getCustomersPaginated = async (req, res) => {
     if (assignedTo) query.assignedTo = assignedTo;
 
     if (assignedTo === "unassigned") {
-      query.assignedTo = { $exists: false };  // This properly targets documents where assignedTo field doesn't exist
+      query.assignedTo = { $exists: false }; // This properly targets documents where assignedTo field doesn't exist
     } else if (assignedTo !== "all" && assignedTo) {
-      query.assignedTo = assignedTo;  // Keep the existing filter for specific agents
+      query.assignedTo = assignedTo; // Keep the existing filter for specific agents
     }
 
     // Search by name, code or email
@@ -771,6 +778,7 @@ exports.getCustomersPaginated = async (req, res) => {
       abandonedCarts,
       totalTurnover,
       latestInvoiceDates,
+      quotationCounts,
     ] = await Promise.all([
       // Get invoice counts for all customers at once
       Invoice.aggregate([
@@ -826,6 +834,11 @@ exports.getCustomersPaginated = async (req, res) => {
           },
         },
       ]),
+
+      Quotation.aggregate([
+        { $match: { CardCode: { $in: customerCodes } } },
+        { $group: { _id: "$CardCode", count: { $sum: 1 } } },
+      ]),
     ]);
 
     // Create lookup maps for O(1) access
@@ -856,6 +869,11 @@ exports.getCustomersPaginated = async (req, res) => {
       latestInvoiceDateMap[item._id] = item.latestInvoiceDate;
     });
 
+    const quotationMap = {};
+    quotationCounts.forEach((item) => {
+      quotationMap[item._id] = item.count;
+    });
+
     // Enhance customers with metrics
     const enhancedCustomers = customers.map((customer) => {
       return {
@@ -866,6 +884,7 @@ exports.getCustomersPaginated = async (req, res) => {
           abandonedCartCount: customer.Email ? cartMap[customer.Email] || 0 : 0,
           sapTurnover: turnoverMap[customer.CardCode] || 0,
           latestInvoiceDate: latestInvoiceDateMap[customer.CardCode] || null,
+          quotationCount: quotationMap[customer.CardCode] || 0,
         },
       };
     });
@@ -901,6 +920,10 @@ exports.getCustomersPaginated = async (req, res) => {
             bValue = b.metrics.latestInvoiceDate
               ? new Date(b.metrics.latestInvoiceDate).getTime()
               : 0;
+            break;
+          case "quotationCount":
+            aValue = a.metrics.quotationCount;
+            bValue = b.metrics.quotationCount;
             break;
           case "CardName":
             return sortDirection * a.CardName.localeCompare(b.CardName);
