@@ -1,36 +1,37 @@
+// models/Task.js
 const mongoose = require("mongoose");
 const Schema = mongoose.Schema;
 
 const TaskSchema = new Schema({
-  // Task information
   title: {
     type: String,
     required: true,
+    trim: true,
   },
   description: {
     type: String,
+    trim: true,
   },
-
-  // Task categorization
-  type: {
+  leadId: {
+    type: Schema.Types.ObjectId,
+    ref: "Lead",
+    required: true,
+  },
+  status: {
     type: String,
-    enum: ["call", "email", "meeting", "follow-up", "other"],
-    default: "follow-up",
+    enum: ["pending", "pending_approval", "completed", "rejected"],
+    default: "pending",
   },
   priority: {
     type: String,
     enum: ["low", "medium", "high"],
     default: "medium",
   },
-
-  // Task status
-  status: {
+  type: {
     type: String,
-    enum: ["pending", "completed", "canceled"],
-    default: "pending",
+    enum: ["follow-up", "call", "email", "meeting", "other"],
+    default: "follow-up",
   },
-
-  // Scheduling
   dueDate: {
     type: Date,
     required: true,
@@ -38,20 +39,20 @@ const TaskSchema = new Schema({
   completedDate: {
     type: Date,
   },
-
-  // Associated entities
   assignedTo: {
     type: Schema.Types.ObjectId,
     ref: "User",
     required: true,
   },
-  leadId: {
+  createdBy: {
     type: Schema.Types.ObjectId,
-    ref: "Lead",
+    ref: "User",
     required: true,
   },
-
-  // Create/update tracking
+  comments: {
+    type: String,
+    trim: true,
+  },
   createdAt: {
     type: Date,
     default: Date.now,
@@ -62,25 +63,10 @@ const TaskSchema = new Schema({
   },
 });
 
-// Update timestamps before saving
+// Update the updatedAt timestamp on save
 TaskSchema.pre("save", function (next) {
   this.updatedAt = Date.now();
-
-  // If the task is being marked as completed, set the completedDate
-  if (
-    this.isModified("status") &&
-    this.status === "completed" &&
-    !this.completedDate
-  ) {
-    this.completedDate = Date.now();
-  }
-
   next();
 });
 
-// Create indexes for faster querying
-TaskSchema.index({ assignedTo: 1, status: 1, dueDate: 1 });
-TaskSchema.index({ leadId: 1 });
-
-const Task = mongoose.model("Task", TaskSchema);
-module.exports = Task;
+module.exports = mongoose.model("Task", TaskSchema);

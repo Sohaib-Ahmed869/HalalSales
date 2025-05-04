@@ -4,56 +4,65 @@ const Lead = require("../models/Lead");
 const User = require("../models/User");
 
 /**
- * Get all tasks for a lead
+ * Get all tasks with filtering options
  */
-exports.getLeadTasks = async (req, res) => {
+exports.getTasks = async (req, res) => {
   try {
-    const { leadId } = req.params;
-    const { status } = req.query;
+    const { status, priority, type, leadId, assignedTo, search } = req.query;
+    const query = {};
 
-    // Find lead
-    const lead = await Lead.findById(leadId);
+    // Apply filters
+    if (status) query.status = status;
+    if (priority) query.priority = priority;
+    if (type) query.type = type;
+    if (leadId) query.leadId = leadId;
 
-    if (!lead) {
-      return res.status(404).json({
-        success: false,
-        message: "Lead not found",
-      });
+    // Role-based access control
+    if (req.user.role === "sales_agent") {
+      // Sales agents can only see tasks assigned to them
+      query.assignedTo = req.user._id;
+    } else if (req.user.role === "sales_manager") {
+      // Sales managers can see their own tasks and tasks assigned to their team
+      if (assignedTo) {
+        query.assignedTo = assignedTo;
+      } else {
+        const salesAgents = await User.find({
+          role: "sales_agent",
+          manager: req.user._id,
+        }).select("_id");
+
+        const agentIds = salesAgents.map((agent) => agent._id);
+        agentIds.push(req.user._id); // Include the manager's own tasks
+        query.assignedTo = { $in: agentIds };
+      }
+    } else if (req.user.role === "admin") {
+      // Admin can filter by assignedTo if provided
+      if (assignedTo) query.assignedTo = assignedTo;
     }
 
-    // Check permissions
-    if (
-      req.user.role === "sales_agent" &&
-      lead.assignedTo.toString() !== req.user._id.toString()
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "You do not have permission to view tasks for this lead",
-      });
-    }
-
-    // Build query
-    const query = {
-      leadId: lead._id,
-    };
-
-    // Filter by status if provided
-    if (status) {
-      query.status = status;
+    // Search
+    if (search) {
+      query.$or = [
+        { title: { $regex: search, $options: "i" } },
+        { description: { $regex: search, $options: "i" } },
+      ];
     }
 
     // Get tasks
     const tasks = await Task.find(query)
-      .populate("assignedTo", "firstName lastName email")
-      .sort({ dueDate: 1 });
+      .populate("assignedTo", "firstName lastName email role")
+      .populate("createdBy", "firstName lastName email role")
+      .populate("leadId", "fullName email company")
+      .sort({ dueDate: 1, priority: -1 })
+      .lean();
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       data: tasks,
     });
   } catch (error) {
-    console.error(`Error fetching tasks for lead ${req.params.leadId}:`, error);
-    res.status(500).json({
+    console.error("Error fetching tasks:", error);
+    return res.status(500).json({
       success: false,
       message: "Error fetching tasks",
       error: error.message,
@@ -62,24 +71,54 @@ exports.getLeadTasks = async (req, res) => {
 };
 
 /**
- * Add a task to a lead
+ * Get task by ID
  */
-exports.addTask = async (req, res) => {
+exports.getTaskById = async (req, res) => {
   try {
-    const { leadId } = req.params;
-    const { title, description, type, priority, dueDate } = req.body;
+    const task = await Task.findById(req.params.id)
+      .populate("assignedTo", "firstName lastName email role")
+      .populate("createdBy", "firstName lastName email role")
+      .populate("leadId", "fullName email company")
+      .lean();
 
-    // Validate required fields
-    if (!title || !dueDate) {
-      return res.status(400).json({
+    if (!task) {
+      return res.status(404).json({
         success: false,
-        message: "Title and due date are required",
+        message: "Task not found",
       });
     }
 
-    // Find lead
-    const lead = await Lead.findById(leadId);
+    return res.status(200).json({
+      success: true,
+      data: task,
+    });
+  } catch (error) {
+    console.error(`Error fetching task ${req.params.id}:`, error);
+    return res.status(500).json({
+      success: false,
+      message: "Error fetching task",
+      error: error.message,
+    });
+  }
+};
 
+/**
+ * Create a new task
+ */
+exports.createTask = async (req, res) => {
+  try {
+    const { leadId, title, description, dueDate, priority, type } = req.body;
+
+    // Validate required fields
+    if (!title || !dueDate || !leadId) {
+      return res.status(400).json({
+        success: false,
+        message: "Title, due date, and lead ID are required",
+      });
+    }
+
+    // Check if lead exists
+    const lead = await Lead.findById(leadId);
     if (!lead) {
       return res.status(404).json({
         success: false,
@@ -87,57 +126,43 @@ exports.addTask = async (req, res) => {
       });
     }
 
-    // Check permissions
-    if (
-      req.user.role === "sales_agent" &&
-      lead.assignedTo.toString() !== req.user._id.toString()
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "You do not have permission to add tasks for this lead",
-      });
-    }
-
-    // Create the task
+    // Create new task
     const task = new Task({
+      leadId,
       title,
       description,
-      type: type || "follow-up",
+      dueDate,
       priority: priority || "medium",
-      dueDate: new Date(dueDate),
-      assignedTo: lead.assignedTo,
-      leadId: lead._id,
+      type: type || "follow-up",
+      status: "pending",
+      assignedTo: req.body.assignedTo || req.user._id,
+      createdBy: req.user._id,
     });
 
     await task.save();
 
-    // Add the task to the lead's tasks
-    lead.tasks.push(task._id);
+    // Add task to lead's tasks array
+    await Lead.findByIdAndUpdate(leadId, {
+      $push: { tasks: task._id },
+      $set: { nextFollowUp: dueDate },
+    });
 
-    // Update nextFollowUp if the new task is due before the current nextFollowUp
-    // or if nextFollowUp is not set
-    if (!lead.nextFollowUp || new Date(dueDate) < new Date(lead.nextFollowUp)) {
-      lead.nextFollowUp = new Date(dueDate);
-    }
+    // Return the created task with populated fields
+    const createdTask = await Task.findById(task._id)
+      .populate("assignedTo", "firstName lastName email role")
+      .populate("createdBy", "firstName lastName email role")
+      .populate("leadId", "fullName email company");
 
-    await lead.save();
-
-    // Return the task with populated fields
-    const createdTask = await Task.findById(task._id).populate(
-      "assignedTo",
-      "firstName lastName email"
-    );
-
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
-      message: "Task added successfully",
+      message: "Task created successfully",
       data: createdTask,
     });
   } catch (error) {
-    console.error(`Error adding task for lead ${req.params.leadId}:`, error);
-    res.status(500).json({
+    console.error("Error creating task:", error);
+    return res.status(500).json({
       success: false,
-      message: "Error adding task",
+      message: "Error creating task",
       error: error.message,
     });
   }
@@ -152,7 +177,7 @@ exports.updateTask = async (req, res) => {
     const updateFields = { ...req.body };
 
     // Find task
-    const task = await Task.findById(id).populate("leadId");
+    const task = await Task.findById(id);
 
     if (!task) {
       return res.status(404).json({
@@ -161,37 +186,40 @@ exports.updateTask = async (req, res) => {
       });
     }
 
-    // Check permissions - only assigned agent, their manager, or admin can update
-    if (
-      req.user.role === "sales_agent" &&
-      task.assignedTo.toString() !== req.user._id.toString()
-    ) {
+    // Check permissions - creator can update most fields
+    const isCreator = task.createdBy.toString() === req.user._id.toString();
+    const isAssignee = task.assignedTo.toString() === req.user._id.toString();
+
+    if (!isCreator && !isAssignee && req.user.role !== "admin") {
       return res.status(403).json({
         success: false,
         message: "You do not have permission to update this task",
       });
-    } else if (req.user.role === "sales_manager") {
-      const isOwnTask = task.assignedTo.toString() === req.user._id.toString();
-
-      if (!isOwnTask) {
-        const agent = await User.findById(task.assignedTo);
-        const isTeamMember =
-          agent &&
-          agent.manager &&
-          agent.manager.toString() === req.user._id.toString();
-
-        if (!isTeamMember) {
-          return res.status(403).json({
-            success: false,
-            message: "You do not have permission to update this task",
-          });
-        }
-      }
     }
 
-    // Handle status change
-    if (updateFields.status === "completed" && task.status !== "completed") {
-      updateFields.completedDate = Date.now();
+    // Assignee can only update status to "pending_approval" and add comments
+    if (isAssignee && !isCreator && req.user.role !== "admin") {
+      const allowedFields = ["status", "comments"];
+      const requestedFields = Object.keys(updateFields);
+
+      const hasDisallowedField = requestedFields.some(
+        (field) => !allowedFields.includes(field)
+      );
+
+      if (hasDisallowedField) {
+        return res.status(403).json({
+          success: false,
+          message: "You can only request approval or add comments to this task",
+        });
+      }
+
+      // Assignee can only set status to pending_approval
+      if (updateFields.status && updateFields.status !== "pending_approval") {
+        return res.status(403).json({
+          success: false,
+          message: "You can only set the status to pending_approval",
+        });
+      }
     }
 
     // Update task
@@ -200,37 +228,9 @@ exports.updateTask = async (req, res) => {
       { $set: updateFields },
       { new: true, runValidators: true }
     )
-      .populate("assignedTo", "firstName lastName email")
-      .populate("leadId", "fullName email");
-
-    // If dueDate is updated and this is the lead's next follow-up, update lead's nextFollowUp
-    if (updateFields.dueDate && task.leadId) {
-      const lead = await Lead.findById(task.leadId);
-
-      // If this was the next follow-up task for the lead
-      if (
-        lead.nextFollowUp &&
-        new Date(lead.nextFollowUp).getTime() ===
-          new Date(task.dueDate).getTime()
-      ) {
-        // Find next earliest pending task
-        const nextEarliestTask = await Task.findOne({
-          leadId: lead._id,
-          _id: { $ne: task._id }, // Exclude current task
-          status: "pending",
-          dueDate: { $gte: new Date() },
-        }).sort({ dueDate: 1 });
-
-        if (nextEarliestTask) {
-          lead.nextFollowUp = nextEarliestTask.dueDate;
-        } else {
-          // No other pending tasks
-          lead.nextFollowUp = null;
-        }
-
-        await lead.save();
-      }
-    }
+      .populate("assignedTo", "firstName lastName email role")
+      .populate("createdBy", "firstName lastName email role")
+      .populate("leadId", "fullName email company");
 
     res.json({
       success: true,
@@ -248,12 +248,19 @@ exports.updateTask = async (req, res) => {
 };
 
 /**
- * Complete a task
+ * Approve or reject a task
  */
-exports.completeTask = async (req, res) => {
+exports.approveOrRejectTask = async (req, res) => {
   try {
     const { id } = req.params;
-    const { notes } = req.body;
+    const { action, comments } = req.body;
+
+    if (!action || !["approve", "reject"].includes(action)) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid action (approve or reject) is required",
+      });
+    }
 
     // Find task
     const task = await Task.findById(id);
@@ -265,70 +272,66 @@ exports.completeTask = async (req, res) => {
       });
     }
 
-    // Check permissions
-    if (
-      req.user.role === "sales_agent" &&
-      task.assignedTo.toString() !== req.user._id.toString()
-    ) {
-      return res.status(403).json({
+    // Check that task is in pending_approval status
+    if (task.status !== "pending_approval") {
+      return res.status(400).json({
         success: false,
-        message: "You do not have permission to complete this task",
+        message:
+          "Only tasks in pending_approval status can be approved or rejected",
       });
     }
 
-    // Complete the task
-    task.status = "completed";
-    task.completedDate = Date.now();
+    // Check permissions - only creator or admin can approve/reject
+    const isCreator = task.createdBy.toString() === req.user._id.toString();
 
-    if (notes) {
-      task.description = task.description
-        ? `${task.description}\n\nCompletion Notes: ${notes}`
-        : `Completion Notes: ${notes}`;
+    if (!isCreator && req.user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Only the task creator or admin can approve or reject this task",
+      });
     }
 
-    await task.save();
+    // Update task status based on action
+    const newStatus = action === "approve" ? "completed" : "rejected";
+    const newComments = comments
+      ? `${task.comments ? task.comments + "\n\n" : ""}${req.user.firstName} ${
+          req.user.lastName
+        } (${action}): ${comments}`
+      : task.comments;
 
-    // If this was the lead's next follow-up task, update nextFollowUp
-    const lead = await Lead.findById(task.leadId);
+    // Set completion date if approved
+    const updateFields = {
+      status: newStatus,
+      comments: newComments,
+    };
 
-    if (
-      lead &&
-      lead.nextFollowUp &&
-      new Date(lead.nextFollowUp).getTime() === new Date(task.dueDate).getTime()
-    ) {
-      // Find next earliest pending task
-      const nextEarliestTask = await Task.findOne({
-        leadId: lead._id,
-        _id: { $ne: task._id }, // Exclude current task
-        status: "pending",
-      }).sort({ dueDate: 1 });
-
-      if (nextEarliestTask) {
-        lead.nextFollowUp = nextEarliestTask.dueDate;
-      } else {
-        // No other pending tasks
-        lead.nextFollowUp = null;
-      }
-
-      await lead.save();
+    if (action === "approve") {
+      updateFields.completedDate = new Date();
     }
 
-    // Return completed task
-    const completedTask = await Task.findById(id).populate(
-      "assignedTo",
-      "firstName lastName email"
-    );
+    // Update task
+    const updatedTask = await Task.findByIdAndUpdate(
+      id,
+      { $set: updateFields },
+      { new: true, runValidators: true }
+    )
+      .populate("assignedTo", "firstName lastName email role")
+      .populate("createdBy", "firstName lastName email role")
+      .populate("leadId", "fullName email company");
 
     res.json({
       success: true,
-      message: "Task completed successfully",
-      data: completedTask,
+      message: `Task ${
+        action === "approve" ? "approved" : "rejected"
+      } successfully`,
+      data: updatedTask,
     });
   } catch (error) {
-    console.error(`Error completing task ${req.params.id}:`, error);
+    console.error(`Error approving/rejecting task ${req.params.id}:`, error);
     res.status(500).json({
       success: false,
-      message: "Error completing task",
+      message: "Error processing task approval",
       error: error.message,
     });
   }
@@ -351,62 +354,20 @@ exports.deleteTask = async (req, res) => {
       });
     }
 
-    // Check permissions
-    if (req.user.role === "sales_agent") {
-      // Sales agents can only delete their own tasks
-      if (task.assignedTo.toString() !== req.user._id.toString()) {
-        return res.status(403).json({
-          success: false,
-          message: "You do not have permission to delete this task",
-        });
-      }
-    } else if (req.user.role === "sales_manager") {
-      // Managers can delete their own tasks or tasks assigned to their team
-      const isOwnTask = task.assignedTo.toString() === req.user._id.toString();
+    // Check permissions - only creator, assignee with admin role, or admin can delete
+    const isCreator = task.createdBy.toString() === req.user._id.toString();
 
-      if (!isOwnTask) {
-        const agent = await User.findById(task.assignedTo);
-        const isTeamMember =
-          agent &&
-          agent.manager &&
-          agent.manager.toString() === req.user._id.toString();
-
-        if (!isTeamMember) {
-          return res.status(403).json({
-            success: false,
-            message: "You do not have permission to delete this task",
-          });
-        }
-      }
+    if (!isCreator && req.user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "You do not have permission to delete this task",
+      });
     }
 
     // Remove task from lead's tasks array
-    await Lead.updateOne({ _id: task.leadId }, { $pull: { tasks: task._id } });
-
-    // If this was the lead's next follow-up task, update nextFollowUp
-    const lead = await Lead.findById(task.leadId);
-
-    if (
-      lead &&
-      lead.nextFollowUp &&
-      new Date(lead.nextFollowUp).getTime() === new Date(task.dueDate).getTime()
-    ) {
-      // Find next earliest pending task
-      const nextEarliestTask = await Task.findOne({
-        leadId: lead._id,
-        _id: { $ne: task._id }, // Exclude current task
-        status: "pending",
-      }).sort({ dueDate: 1 });
-
-      if (nextEarliestTask) {
-        lead.nextFollowUp = nextEarliestTask.dueDate;
-      } else {
-        // No other pending tasks
-        lead.nextFollowUp = null;
-      }
-
-      await lead.save();
-    }
+    await Lead.findByIdAndUpdate(task.leadId, {
+      $pull: { tasks: task._id },
+    });
 
     // Delete the task
     await Task.findByIdAndDelete(id);
@@ -425,353 +386,219 @@ exports.deleteTask = async (req, res) => {
   }
 };
 
-// Add these methods to your task.controller.js file
-
-/**
- * Get all tasks for the current agent
- */
 exports.getAgentTasks = async (req, res) => {
   try {
-    const agentId = req.user._id;
-    const { status, startDate, endDate, type } = req.query;
+    const { agentId } = req.params;
+    const { status, priority, type } = req.query;
+    const query = { assignedTo: agentId };
 
-    // Build query
-    const query = {
-      assignedTo: agentId,
-    };
-
-    // Filter by status if provided
-    if (status) {
-      query.status = status;
-    }
-
-    // Filter by type if provided
-    if (type) {
-      query.type = type;
-    }
-
-    // Filter by date range if provided
-    if (startDate && endDate) {
-      query.dueDate = {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate),
-      };
-    } else if (startDate) {
-      query.dueDate = { $gte: new Date(startDate) };
-    } else if (endDate) {
-      query.dueDate = { $lte: new Date(endDate) };
-    }
+    // Apply filters
+    if (status) query.status = status;
+    if (priority) query.priority = priority;
+    if (type) query.type = type;
 
     // Get tasks
     const tasks = await Task.find(query)
-      .populate("leadId", "fullName email phoneNumber company status tags")
-      .sort({ dueDate: 1 });
+      .populate("leadId", "fullName email company")
+      .populate("createdBy", "firstName lastName email role")
+      .sort({ dueDate: 1, priority: -1 })
+      .lean();
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       data: tasks,
     });
   } catch (error) {
-    console.error(`Error fetching tasks for agent ${req.user._id}:`, error);
-    res.status(500).json({
+    console.error("Error fetching agent tasks:", error);
+    return res.status(500).json({
       success: false,
-      message: "Error fetching tasks",
+      message: "Error fetching agent tasks",
+      error: error.message,
+    });
+  }
+}
+
+
+/**
+ * Get assigned tasks for the current user
+ */
+exports.getMyTasks = async (req, res) => {
+  try {
+    const { status, priority, type } = req.query;
+    const query = { assignedTo: req.user._id };
+
+    // Apply filters
+    if (status) query.status = status;
+    if (priority) query.priority = priority;
+    if (type) query.type = type;
+
+    // Get tasks
+    const tasks = await Task.find(query)
+      .populate("leadId", "fullName email company")
+      .populate("createdBy", "firstName lastName email role")
+      .sort({ dueDate: 1, priority: -1 })
+      .lean();
+
+    // Get task counts by status for statistics
+    const statusCounts = await Task.aggregate([
+      { $match: { assignedTo: req.user._id } },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]);
+
+    // Format status counts
+    const counts = {
+      total: tasks.length,
+      pending: 0,
+      pending_approval: 0,
+      completed: 0,
+      rejected: 0,
+    };
+
+    statusCounts.forEach((item) => {
+      counts[item._id] = item.count;
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: tasks,
+      counts,
+    });
+  } catch (error) {
+    console.error("Error fetching assigned tasks:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error fetching assigned tasks",
       error: error.message,
     });
   }
 };
 
 /**
- * Create a standalone task (not tied to a specific lead)
+ * Get tasks created by the current user
  */
-exports.createTask = async (req, res) => {
+exports.getCreatedTasks = async (req, res) => {
   try {
-    const { title, description, type, priority, dueDate, leadId } = req.body;
+    const { status, priority, type, assignedTo } = req.query;
+    const query = { createdBy: req.user._id };
 
-    // Validate required fields
-    if (!title || !dueDate) {
-      return res.status(400).json({
+    // Apply filters
+    if (status) query.status = status;
+    if (priority) query.priority = priority;
+    if (type) query.type = type;
+    if (assignedTo) query.assignedTo = assignedTo;
+
+    // Get tasks
+    const tasks = await Task.find(query)
+      .populate("assignedTo", "firstName lastName email role")
+      .populate("leadId", "fullName email company")
+      .sort({ dueDate: 1, priority: -1 })
+      .lean();
+
+    // Get task counts by status for statistics
+    const statusCounts = await Task.aggregate([
+      { $match: { createdBy: req.user._id } },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]);
+
+    // Format status counts
+    const counts = {
+      total: tasks.length,
+      pending: 0,
+      pending_approval: 0,
+      completed: 0,
+      rejected: 0,
+    };
+
+    statusCounts.forEach((item) => {
+      counts[item._id] = item.count;
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: tasks,
+      counts,
+    });
+  } catch (error) {
+    console.error("Error fetching created tasks:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error fetching created tasks",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Request task approval
+ */
+exports.requestApproval = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { comments } = req.body;
+
+    // Find task
+    const task = await Task.findById(id);
+
+    if (!task) {
+      return res.status(404).json({
         success: false,
-        message: "Title and due date are required",
+        message: "Task not found",
       });
     }
 
-    // Create task data
-    const taskData = {
-      title,
-      description,
-      type: type || "follow-up",
-      priority: priority || "medium",
-      dueDate: new Date(dueDate),
-      assignedTo: req.user._id,
-      status: "pending",
-    };
-
-    // If leadId is provided, validate and link to lead
-    if (leadId) {
-      const lead = await Lead.findById(leadId);
-
-      if (!lead) {
-        return res.status(404).json({
-          success: false,
-          message: "Lead not found",
-        });
-      }
-
-      // Check if agent is assigned to this lead
-      if (
-        req.user.role === "sales_agent" &&
-        lead.assignedTo.toString() !== req.user._id.toString()
-      ) {
-        return res.status(403).json({
-          success: false,
-          message: "You are not assigned to this lead",
-        });
-      }
-
-      taskData.leadId = lead._id;
-
-      // Add task to lead's tasks
-      lead.tasks.push(taskData._id);
-
-      // Update nextFollowUp if needed
-      if (
-        !lead.nextFollowUp ||
-        new Date(dueDate) < new Date(lead.nextFollowUp)
-      ) {
-        lead.nextFollowUp = new Date(dueDate);
-      }
-
-      await lead.save();
+    // Check that task is in pending status
+    if (task.status !== "pending") {
+      return res.status(400).json({
+        success: false,
+        message: "Only pending tasks can be submitted for approval",
+      });
     }
 
-    // Create and save the task
-    const task = new Task(taskData);
-    await task.save();
+    // Check permissions - only assignee can request approval
+    const isAssignee = task.assignedTo.toString() === req.user._id.toString();
 
-    // Return created task
-    const createdTask = await Task.findById(task._id)
-      .populate("assignedTo", "firstName lastName email")
-      .populate("leadId", "fullName email phoneNumber company status");
+    if (!isAssignee) {
+      return res.status(403).json({
+        success: false,
+        message: "Only the assigned user can request approval for this task",
+      });
+    }
 
-    res.status(201).json({
-      success: true,
-      message: "Task created successfully",
-      data: createdTask,
-    });
-  } catch (error) {
-    console.error(`Error creating task:`, error);
-    res.status(500).json({
-      success: false,
-      message: "Error creating task",
-      error: error.message,
-    });
-  }
-};
+    // Update task status and add comments
+    const newComments = comments
+      ? `${task.comments ? task.comments + "\n\n" : ""}${req.user.firstName} ${
+          req.user.lastName
+        } (requested approval): ${comments}`
+      : task.comments;
 
-/**
- * Get task statistics for the current agent
- */
-exports.getTaskStatistics = async (req, res) => {
-  try {
-    const agentId = req.user._id;
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-
-    const oneWeekLater = new Date(today);
-    oneWeekLater.setDate(oneWeekLater.getDate() + 7);
-
-    // Build aggregation for task counts
-    const stats = await Task.aggregate([
-      { $match: { assignedTo: agentId } },
+    // Update task
+    const updatedTask = await Task.findByIdAndUpdate(
+      id,
       {
-        $group: {
-          _id: null,
-          total: { $sum: 1 },
-          completed: {
-            $sum: {
-              $cond: [{ $eq: ["$status", "completed"] }, 1, 0],
-            },
-          },
-          pending: {
-            $sum: {
-              $cond: [{ $eq: ["$status", "pending"] }, 1, 0],
-            },
-          },
-          overdue: {
-            $sum: {
-              $cond: [
-                {
-                  $and: [
-                    { $eq: ["$status", "pending"] },
-                    { $lt: ["$dueDate", today] },
-                  ],
-                },
-                1,
-                0,
-              ],
-            },
-          },
-          dueToday: {
-            $sum: {
-              $cond: [
-                {
-                  $and: [
-                    { $eq: ["$status", "pending"] },
-                    { $gte: ["$dueDate", today] },
-                    { $lt: ["$dueDate", tomorrow] },
-                  ],
-                },
-                1,
-                0,
-              ],
-            },
-          },
-          dueThisWeek: {
-            $sum: {
-              $cond: [
-                {
-                  $and: [
-                    { $eq: ["$status", "pending"] },
-                    { $gte: ["$dueDate", today] },
-                    { $lt: ["$dueDate", oneWeekLater] },
-                  ],
-                },
-                1,
-                0,
-              ],
-            },
-          },
+        $set: {
+          status: "pending_approval",
+          comments: newComments,
         },
       },
-    ]);
+      { new: true, runValidators: true }
+    )
+      .populate("assignedTo", "firstName lastName email role")
+      .populate("createdBy", "firstName lastName email role")
+      .populate("leadId", "fullName email company");
 
-    // Get tasks by priority
-    const priorityStats = await Task.aggregate([
-      {
-        $match: {
-          assignedTo: agentId,
-          status: "pending",
-        },
-      },
-      {
-        $group: {
-          _id: "$priority",
-          count: { $sum: 1 },
-        },
-      },
-    ]);
-
-    // Format priority stats
-    const priorityCounts = {
-      high: 0,
-      medium: 0,
-      low: 0,
-    };
-
-    priorityStats.forEach((item) => {
-      priorityCounts[item._id] = item.count;
-    });
-
-    // Final statistics
-    const statistics = {
-      total: stats.length > 0 ? stats[0].total : 0,
-      completed: stats.length > 0 ? stats[0].completed : 0,
-      pending: stats.length > 0 ? stats[0].pending : 0,
-      overdue: stats.length > 0 ? stats[0].overdue : 0,
-      dueToday: stats.length > 0 ? stats[0].dueToday : 0,
-      dueThisWeek: stats.length > 0 ? stats[0].dueThisWeek : 0,
-      priority: priorityCounts,
-    };
-
-    res.status(200).json({
+    res.json({
       success: true,
-      data: statistics,
+      message: "Task submitted for approval",
+      data: updatedTask,
     });
   } catch (error) {
-    console.error(`Error fetching task statistics:`, error);
+    console.error(
+      `Error requesting approval for task ${req.params.id}:`,
+      error
+    );
     res.status(500).json({
       success: false,
-      message: "Error fetching task statistics",
-      error: error.message,
-    });
-  }
-};
-
-/**
- * Get all overdue tasks for the current agent
- */
-exports.getOverdueTasks = async (req, res) => {
-  try {
-    const agentId = req.user._id;
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    // Build query
-    const query = {
-      assignedTo: agentId,
-      status: "pending",
-      dueDate: { $lt: today },
-    };
-
-    // Get tasks
-    const tasks = await Task.find(query)
-      .populate("leadId", "fullName email phoneNumber company status tags")
-      .sort({ dueDate: 1 });
-
-    res.status(200).json({
-      success: true,
-      data: tasks,
-    });
-  } catch (error) {
-    console.error(`Error fetching overdue tasks:`, error);
-    res.status(500).json({
-      success: false,
-      message: "Error fetching overdue tasks",
-      error: error.message,
-    });
-  }
-};
-
-/**
- * Get all tasks due today for the current agent
- */
-exports.getTodaysTasks = async (req, res) => {
-  try {
-    const agentId = req.user._id;
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-
-    // Build query
-    const query = {
-      assignedTo: agentId,
-      status: "pending",
-      dueDate: {
-        $gte: today,
-        $lt: tomorrow,
-      },
-    };
-
-    // Get tasks
-    const tasks = await Task.find(query)
-      .populate("leadId", "fullName email phoneNumber company status tags")
-      .sort({ dueDate: 1 });
-
-    res.status(200).json({
-      success: true,
-      data: tasks,
-    });
-  } catch (error) {
-    console.error(`Error fetching today's tasks:`, error);
-    res.status(500).json({
-      success: false,
-      message: "Error fetching today's tasks",
+      message: "Error requesting task approval",
       error: error.message,
     });
   }

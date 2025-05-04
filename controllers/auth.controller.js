@@ -323,10 +323,7 @@ exports.getUsers = async (req, res) => {
       query.role = role;
     }
 
-    // Sales manager can only see their sales agents
-    if (req.user.role === "sales_manager") {
-      query.role = "sales_agent"; // Sales managers can only see sales agents
-    }
+    
 
     const users = await User.find(query)
       .select("-password")

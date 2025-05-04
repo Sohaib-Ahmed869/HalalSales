@@ -1,35 +1,34 @@
 // routes/task.routes.js
 const express = require("express");
 const router = express.Router();
-const { auth } = require("../middleware/auth");
+const { auth, checkRole } = require("../middleware/auth");
 const taskController = require("../controllers/task.controller");
 
-// Get all tasks for the current agent
-router.get("/agent", auth, taskController.getAgentTasks);
+// Get all tasks (filtered by role permissions)
+router.get("/", auth, taskController.getTasks);
 
-// Get task statistics for the current agent
-router.get("/statistics", auth, taskController.getTaskStatistics);
+router.get("/agent/:agentId", auth, taskController.getAgentTasks);
 
-// Get overdue tasks for the current agent
-router.get("/overdue", auth, taskController.getOverdueTasks);
+// Get tasks assigned to current user
+router.get("/assigned", auth, taskController.getMyTasks);
 
-// Get tasks due today for the current agent
-router.get("/today", auth, taskController.getTodaysTasks);
+// Get tasks created by current user
+router.get("/created", auth, taskController.getCreatedTasks);
 
-// Create a standalone task
+// Get task by ID
+router.get("/:id", auth, taskController.getTaskById);
+
+// Create a new task
 router.post("/", auth, taskController.createTask);
-
-// Get all tasks for a lead
-router.get("/lead/:leadId", auth, taskController.getLeadTasks);
-
-// Add a task to a lead
-router.post("/lead/:leadId", auth, taskController.addTask);
 
 // Update a task
 router.put("/:id", auth, taskController.updateTask);
 
-// Complete a task
-router.post("/:id/complete", auth, taskController.completeTask);
+// Request approval for a task
+router.post("/:id/request-approval", auth, taskController.requestApproval);
+
+// Approve or reject a task
+router.post("/:id/approve-reject", auth, taskController.approveOrRejectTask);
 
 // Delete a task
 router.delete("/:id", auth, taskController.deleteTask);

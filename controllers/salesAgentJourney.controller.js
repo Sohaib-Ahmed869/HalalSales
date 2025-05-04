@@ -52,6 +52,13 @@ const salesAgentJourneyController = {
         });
       }
 
+      console.log("Fetching dashboard for agent:", agentId);
+
+      console.log("Agent:", agent);
+      //start and end date
+      console.log("Start Date:", start);
+      console.log("End Date:", end);
+
       // Get all metrics in parallel for better performance
       const [customers, salesOrders, callData, desktimeData, targetProgress] =
         await Promise.all([
@@ -69,10 +76,17 @@ const salesAgentJourneyController = {
           // Get call data
           CallData.find({
             startTime: { $gte: start, $lte: end },
-            userName: `${agent.firstName} ${agent.lastName}`,
+            //by phone number of the agent fromNumber: agent.phone or toNumber: agent.phone,
+            $or: [
+              { fromNumber: agent.phone },
+              { toNumber: agent.phone },
+            ],
+
           })
             .sort({ startTime: -1 })
             .lean(),
+
+          
 
           // Get productivity data
           DeskTime.find({
@@ -86,6 +100,10 @@ const salesAgentJourneyController = {
           getAgentCurrentTargetProgress(agent),
         ]);
 
+        //print the callData
+      console.log("Call Data:", callData);
+
+      
       // Calculate summary metrics
       const summary = {
         // Customer metrics
@@ -302,7 +320,10 @@ const salesAgentJourneyController = {
       // Build query
       const query = {
         startTime: { $gte: start, $lte: end },
-        userName: `${agent.firstName} ${agent.lastName}`,
+        $or: [
+          { fromNumber: agent.phone },
+          { toNumber: agent.phone },
+        ],
       };
 
       // Add direction filter if provided
@@ -1171,7 +1192,7 @@ async function getTopCustomers(agentId, startDate, endDate) {
     const topByRevenue = await SalesOrder.aggregate([
       {
         $match: {
-          salesAgent: mongoose.Types.ObjectId(agentId),
+          salesAgent: new mongoose.Types.ObjectId(agentId),
           DocDate: { $gte: startDate, $lte: endDate },
         },
       },
@@ -1192,7 +1213,7 @@ async function getTopCustomers(agentId, startDate, endDate) {
     const topByFrequency = await SalesOrder.aggregate([
       {
         $match: {
-          salesAgent: mongoose.Types.ObjectId(agentId),
+          salesAgent: new mongoose.Types.ObjectId(agentId),
           DocDate: { $gte: startDate, $lte: endDate },
         },
       },
@@ -1213,7 +1234,7 @@ async function getTopCustomers(agentId, startDate, endDate) {
     const recentOrders = await SalesOrder.aggregate([
       {
         $match: {
-          salesAgent: mongoose.Types.ObjectId(agentId),
+          salesAgent: new mongoose.Types.ObjectId(agentId),
           DocDate: { $gte: startDate, $lte: endDate },
         },
       },

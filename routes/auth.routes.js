@@ -30,7 +30,6 @@ router.put("/change-password", auth, authController.changePassword);
 router.get(
   "/users",
   auth,
-  checkRole(["admin", "sales_manager"]),
   authController.getUsers
 );
 
