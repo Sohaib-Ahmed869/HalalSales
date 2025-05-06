@@ -251,6 +251,8 @@ exports.createOrder = async (req, res) => {
     // Calculate today's date for DocDate and DocDueDate
     const today = new Date();
 
+    const salesAgentName = req.user.firstName + " " + req.user.lastName;
+
     // Create the new order
     const newOrder = new SalesOrder({
       ...req.body,
@@ -266,6 +268,7 @@ exports.createOrder = async (req, res) => {
       SyncedWithSAP: false,
       LocalStatus: "Created", // Custom field to track local status
       salesAgent: salesAgentId,
+      U_Notes: salesAgentName,
     });
 
     // Calculate totals if not provided

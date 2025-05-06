@@ -137,6 +137,7 @@ exports.formatOrderForSAP = async (order) => {
     DocDate: order.DocDate || today,
     DocDueDate: order.DocDueDate || today,
     Comments: order.Comments || "",
+    U_Notes: order.U_Notes || "",
     DocumentLines: [],
   };
 

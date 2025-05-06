@@ -4,6 +4,124 @@ const Invoice = require("../models/Invoice");
 const Payment = require("../models/payment");
 const PaymentLink = require("../models/paymentLinks");
 const mongoose = require("mongoose");
+const weeklyDataFormatter = {
+  // Takes a week string in format "YYYY-WWW" and returns a Date object for the week's start
+  getWeekStartDate: (weekStr) => {
+    const match = weekStr.match(/^(\d{4})-W(\d{2})$/);
+    if (!match) return null;
+    
+    const [_, year, weekNum] = match;
+    
+    // Get the first day of the year
+    const firstDayOfYear = new Date(parseInt(year), 0, 1);
+    
+    // Calculate days to add to get to the start of the specified week
+    // Week 1 is the week containing January 1
+    const daysToAdd = (parseInt(weekNum) - 1) * 7;
+    
+    // Adjust for day of week of January 1
+    const firstDayWeekday = firstDayOfYear.getDay(); // 0 = Sunday, 1 = Monday, etc.
+    const adjustedDaysToAdd = daysToAdd - firstDayWeekday + 1; // +1 because we want to start from Monday
+    
+    // Create new date for the start of the week
+    const weekStart = new Date(firstDayOfYear);
+    weekStart.setDate(firstDayOfYear.getDate() + adjustedDaysToAdd);
+    
+    return weekStart;
+  },
+  
+  // Format week as a readable string (e.g., "Jan 1-7, 2025")
+  formatWeekDisplay: (weekStr) => {
+    const weekStart = weeklyDataFormatter.getWeekStartDate(weekStr);
+    if (!weekStart) return weekStr;
+    
+    // Calculate week end (6 days after start)
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekStart.getDate() + 6);
+    
+    // Format dates
+    const formatMonth = (date) => date.toLocaleString('default', { month: 'short' });
+    const formatDay = (date) => date.getDate();
+    const year = weekStart.getFullYear();
+    
+    // Check if week spans month boundaries
+    if (weekStart.getMonth() === weekEnd.getMonth()) {
+      // Same month (e.g., "Jan 1-7, 2025")
+      return `${formatMonth(weekStart)} ${formatDay(weekStart)}-${formatDay(weekEnd)}, ${year}`;
+    } else {
+      // Different months (e.g., "Dec 29-Jan 4, 2025")
+      return `${formatMonth(weekStart)} ${formatDay(weekStart)}-${formatMonth(weekEnd)} ${formatDay(weekEnd)}, ${year}`;
+    }
+  },
+  
+  // Generate week keys for a date range
+  generateWeekKeys: (startDate, endDate) => {
+    const weeks = [];
+    const currentDate = new Date(startDate);
+    const end = new Date(endDate);
+    
+    while (currentDate <= end) {
+      // Get year and week number
+      const year = currentDate.getFullYear();
+      const weekNum = Math.ceil(
+        ((currentDate - new Date(year, 0, 1)) / 86400000 + 
+        new Date(year, 0, 1).getDay() + 1) / 7
+      );
+      
+      // Create week key
+      const weekKey = `${year}-W${String(weekNum).padStart(2, "0")}`;
+      
+      // Add to list if not already present
+      if (!weeks.includes(weekKey)) {
+        weeks.push(weekKey);
+      }
+      
+      // Move to next week
+      currentDate.setDate(currentDate.getDate() + 7);
+    }
+    
+    return weeks;
+  },
+  
+  // Fill in missing weeks in data with zero values
+  fillMissingWeeks: (data, startDate, endDate) => {
+    // Get all week keys in the date range
+    const allWeekKeys = weeklyDataFormatter.generateWeekKeys(startDate, endDate);
+    
+    // Convert data to map for easy lookup
+    const dataMap = data.reduce((map, item) => {
+      map[item.period] = item;
+      return map;
+    }, {});
+    
+    // Create complete dataset with missing weeks filled in
+    const completedData = allWeekKeys.map(weekKey => {
+      if (dataMap[weekKey]) {
+        return {
+          ...dataMap[weekKey],
+          displayName: weekKey,
+          formattedDisplayName: weeklyDataFormatter.formatWeekDisplay(weekKey)
+        };
+      } else {
+        return {
+          period: weekKey,
+          displayName: weekKey,
+          formattedDisplayName: weeklyDataFormatter.formatWeekDisplay(weekKey),
+          total: 0,
+          average: 0,
+          count: 0,
+          invoiceCount: 0,
+          invoiceAmount: 0,
+          paymentCount: 0,
+          paymentAmount: 0
+        };
+      }
+    });
+    
+    return completedData;
+  }
+};
+// Updated calculateActivityByTimePeriod function for proper weekly display
 const calculateActivityByTimePeriod = (
   invoices,
   payments,
@@ -18,19 +136,22 @@ const calculateActivityByTimePeriod = (
 
     switch (period) {
       case "weekly":
-        // Calculate ISO week number properly
+        // Use a more intuitive approach for weeks
         const firstDayOfYear = new Date(year, 0, 1);
-        const daysSinceFirstDay = Math.floor(
-          (dateObj - firstDayOfYear) / (24 * 60 * 60 * 1000)
-        );
+        // Get the week number (1-52/53)
         const weekNum = Math.ceil(
-          (daysSinceFirstDay + firstDayOfYear.getDay() + 1) / 7
+          ((dateObj - new Date(year, 0, 1)) / 86400000 +
+            new Date(year, 0, 1).getDay() +
+            1) /
+            7
         );
+
+        // Format as YYYY-Www for sorting and display consistency
         return `${year}-W${String(weekNum).padStart(2, "0")}`;
 
       case "monthly":
         const month = dateObj.getMonth() + 1;
-        return `${year}-${month.toString().padStart(2, "0")}`;
+        return `${year}-${String(month).padStart(2, "0")}`;
 
       case "quarterly":
         const quarter = Math.floor(dateObj.getMonth() / 3) + 1;
