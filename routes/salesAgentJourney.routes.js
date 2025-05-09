@@ -94,6 +94,18 @@ router.get(
   checkRole(["admin", "sales_manager", "sales_agent"]),
   salesAgentJourneyController.getAgentCustomerJourneys
 );
+router.get(
+  "/:agentId/invoices",
+  auth,
+  salesAgentJourneyController.getAgentInvoices
+);
+
+// Get combined orders and invoices analytics
+router.get(
+  "/:agentId/orders-invoices-analytics",
+  auth,
+  salesAgentJourneyController.getOrdersInvoicesAnalytics
+);
 
 module.exports = router;
 

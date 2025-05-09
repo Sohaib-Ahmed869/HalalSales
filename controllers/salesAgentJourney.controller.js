@@ -3,6 +3,7 @@ const User = require("../models/User");
 const Customer = require("../models/Customer");
 const SalesOrder = require("../models/SalesOrder");
 const CallData = require("../models/CallData");
+const Invoice = require("../models/Invoice");
 const DeskTime = require("../models/desktime.model");
 const mongoose = require("mongoose");
 
@@ -52,13 +53,6 @@ const salesAgentJourneyController = {
         });
       }
 
-      console.log("Fetching dashboard for agent:", agentId);
-
-      console.log("Agent:", agent);
-      //start and end date
-      console.log("Start Date:", start);
-      console.log("End Date:", end);
-
       // Get all metrics in parallel for better performance
       const [customers, salesOrders, callData, desktimeData, targetProgress] =
         await Promise.all([
@@ -77,16 +71,10 @@ const salesAgentJourneyController = {
           CallData.find({
             startTime: { $gte: start, $lte: end },
             //by phone number of the agent fromNumber: agent.phone or toNumber: agent.phone,
-            $or: [
-              { fromNumber: agent.phone },
-              { toNumber: agent.phone },
-            ],
-
+            $or: [{ fromNumber: agent.phone }, { toNumber: agent.phone }],
           })
             .sort({ startTime: -1 })
             .lean(),
-
-          
 
           // Get productivity data
           DeskTime.find({
@@ -100,10 +88,6 @@ const salesAgentJourneyController = {
           getAgentCurrentTargetProgress(agent),
         ]);
 
-        //print the callData
-      console.log("Call Data:", callData);
-
-      
       // Calculate summary metrics
       const summary = {
         // Customer metrics
@@ -320,10 +304,7 @@ const salesAgentJourneyController = {
       // Build query
       const query = {
         startTime: { $gte: start, $lte: end },
-        $or: [
-          { fromNumber: agent.phone },
-          { toNumber: agent.phone },
-        ],
+        $or: [{ fromNumber: agent.phone }, { toNumber: agent.phone }],
       };
 
       // Add direction filter if provided
@@ -958,7 +939,515 @@ const salesAgentJourneyController = {
       });
     }
   },
+  /**
+   * Get all invoices for a sales agent
+   */
+  // Updated getAgentInvoices method with debugging and fixes
+
+  getAgentInvoices: async (req, res) => {
+    try {
+      const { agentId } = req.params;
+      const {
+        page = 1,
+        limit = 10,
+        startDate,
+        endDate,
+        status,
+        customerCode,
+        sortBy = "DocDate",
+        sortDirection = -1,
+      } = req.query;
+
+      // Validate sales agent
+      const agent = await User.findById(agentId);
+      if (!agent || agent.role !== "sales_agent") {
+        return res.status(404).json({
+          success: false,
+          message: "Sales agent not found",
+        });
+      }
+
+      // Set default date range if not provided (last 30 days)
+      const end = endDate ? new Date(endDate) : new Date();
+      const start = startDate
+        ? new Date(startDate)
+        : new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+      // Build query
+      const query = {
+        salesAgent: new mongoose.Types.ObjectId(agentId), // Ensure proper ObjectId format
+        DocDate: { $gte: start, $lte: end },
+      };
+
+      console.log("Invoice Query:", JSON.stringify(query));
+
+      // Add status filter if provided
+      if (status) {
+        query.DocumentStatus = status;
+      }
+
+      // Add customer filter if provided
+      if (customerCode) {
+        query.CardCode = customerCode;
+      }
+
+      // Pagination
+      const skip = (parseInt(page) - 1) * parseInt(limit);
+
+      // First check if there are any invoices matching the basic query
+      const totalInvoicesCheck = await Invoice.countDocuments({
+        salesAgent: new mongoose.Types.ObjectId(agentId),
+      });
+
+      console.log(`Total invoices for agent ${agentId}: ${totalInvoicesCheck}`);
+
+      if (totalInvoicesCheck === 0) {
+        // If no invoices exist for this agent at all, return early with empty data
+        return res.status(200).json({
+          success: true,
+          count: 0,
+          total: 0,
+          page: parseInt(page),
+          pages: 0,
+          stats: {
+            totalInvoices: 0,
+            totalAmount: 0,
+            averageInvoiceValue: 0,
+            verifiedInvoices: 0,
+            verificationRate: 0,
+            paymentMethods: [],
+          },
+          data: [],
+        });
+      }
+
+      // Execute main query
+      const invoices = await Invoice.find(query)
+        .skip(skip)
+        .limit(parseInt(limit))
+        .sort({ [sortBy]: parseInt(sortDirection) });
+
+      console.log(`Found ${invoices.length} invoices for the current page`);
+
+      // Get total count for pagination
+      const total = await Invoice.countDocuments(query);
+      console.log(`Total invoices matching query: ${total}`);
+
+      // Check if the invoice documents have the expected fields
+      if (invoices.length > 0) {
+        const sampleInvoice = invoices[0];
+        console.log(
+          "Sample invoice structure:",
+          Object.keys(sampleInvoice._doc || sampleInvoice)
+        );
+        console.log("Sample DocTotal value:", sampleInvoice.DocTotal);
+        console.log("Sample verified value:", sampleInvoice.verified);
+        console.log("Sample paymentMethod value:", sampleInvoice.paymentMethod);
+      }
+
+      // Calculate invoice statistics - use a simplified approach
+      let totalAmount = 0;
+      let totalAmountNoVat = 0;
+      let totalVerified = 0;
+
+      invoices.forEach((inv) => {
+        // Calculate with VAT
+        totalAmount += inv.DocTotal || 0;
+
+        // Calculate without VAT
+        totalAmountNoVat += inv.DocTotal - inv.VatSum
+
+        if (inv.verified) totalVerified++;
+      });
+
+      const avgAmount = invoices.length > 0 ? totalAmount / invoices.length : 0;
+      const avgAmountNoVat =
+        invoices.length > 0 ? totalAmountNoVat / invoices.length : 0;
+
+      // Group by payment method manually
+      const paymentMethods = {};
+      invoices.forEach((inv) => {
+        const method = inv.paymentMethod || "Unknown";
+        if (!paymentMethods[method]) {
+          paymentMethods[method] = { count: 0, total: 0 };
+        }
+        paymentMethods[method].count++;
+        paymentMethods[method].total += inv.DocTotal || 0;
+      });
+
+      // Convert to array format for the frontend
+      const paymentMethodStats = Object.keys(paymentMethods)
+        .map((method) => ({
+          _id: method,
+          count: paymentMethods[method].count,
+          total: paymentMethods[method].total,
+        }))
+        .sort((a, b) => b.count - a.count);
+
+      // Use the manually calculated stats if aggregation failed
+      const stats = {
+        totalInvoices: total,
+        totalAmount: totalAmount,
+        totalAmountNoVat: totalAmountNoVat,
+        averageInvoiceValue: avgAmount,
+        averageInvoiceValueNoVat: avgAmountNoVat,
+        verifiedInvoices: totalVerified,
+        verificationRate: total > 0 ? (totalVerified / total) * 100 : 0,
+        paymentMethods: paymentMethodStats,
+      };
+
+      console.log("Calculated stats:", JSON.stringify(stats));
+
+      // Try the aggregation as a fallback and for comparison
+      try {
+        const invoiceStats = await Invoice.aggregate([
+          { $match: query },
+          {
+            $group: {
+              _id: null,
+              totalAmount: { $sum: { $ifNull: ["$DocTotal", 0] } },
+              avgAmount: { $avg: { $ifNull: ["$DocTotal", 0] } },
+              totalVerified: {
+                $sum: {
+                  $cond: [{ $eq: ["$verified", true] }, 1, 0],
+                },
+              },
+            },
+          },
+        ]);
+
+        console.log("Aggregation result:", JSON.stringify(invoiceStats));
+
+        // Compare the results
+        if (invoiceStats.length > 0) {
+          console.log("Difference between manual and aggregation:");
+          console.log(
+            `Total: ${totalAmount} vs ${invoiceStats[0].totalAmount}`
+          );
+          console.log(`Avg: ${avgAmount} vs ${invoiceStats[0].avgAmount}`);
+          console.log(
+            `Verified: ${totalVerified} vs ${invoiceStats[0].totalVerified}`
+          );
+        }
+      } catch (aggError) {
+        console.error("Aggregation error (non-fatal):", aggError);
+      }
+
+      return res.status(200).json({
+        success: true,
+        count: invoices.length,
+        total,
+        page: parseInt(page),
+        pages: Math.ceil(total / parseInt(limit)),
+        stats: stats,
+        data: invoices,
+      });
+    } catch (error) {
+      console.error("Error fetching agent invoices:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Error fetching agent invoices",
+        error: error.message,
+      });
+    }
+  },
+
+  /**
+   * Get combined orders and invoices analytics
+   */
+  getOrdersInvoicesAnalytics: async (req, res) => {
+    try {
+      const { agentId } = req.params;
+      const { startDate, endDate } = req.query;
+
+      // Validate sales agent
+      const agent = await User.findById(agentId);
+      if (!agent || agent.role !== "sales_agent") {
+        return res.status(404).json({
+          success: false,
+          message: "Sales agent not found",
+        });
+      }
+
+      // Set default date range if not provided (last 30 days)
+      const end = endDate ? new Date(endDate) : new Date();
+      const start = startDate
+        ? new Date(startDate)
+        : new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+      // Query base
+      const ordersQuery = {
+        salesAgent: new mongoose.Types.ObjectId(agentId),
+        DocDate: { $gte: start, $lte: end },
+      };
+
+      const invoicesQuery = {
+        salesAgent: new mongoose.Types.ObjectId(agentId),
+        DocDate: { $gte: start, $lte: end },
+      };
+
+      // Execute analytics queries in parallel
+      const [
+        orderStats,
+        invoiceStats,
+        topCustomers,
+        monthlyOrders,
+        monthlyInvoices,
+        conversionStats,
+      ] = await Promise.all([
+        // Orders summary
+        SalesOrder.aggregate([
+          { $match: ordersQuery },
+          {
+            $group: {
+              _id: null,
+              count: { $sum: 1 },
+              total: { $sum: "$DocTotal" },
+              average: { $avg: "$DocTotal" },
+              min: { $min: "$DocTotal" },
+              max: { $max: "$DocTotal" },
+            },
+          },
+        ]),
+
+        // Invoices summary
+        Invoice.aggregate([
+          { $match: invoicesQuery },
+          {
+            $group: {
+              _id: null,
+              count: { $sum: 1 },
+              total: { $sum: "$DocTotal" },
+              totalNoVat: { $sum: { $subtract: ["$DocTotal", "$VatSum"] } },
+              average: { $avg: "$DocTotal" },
+              averageNoVat: { $avg: "$TotalBeforeVat" },
+              min: { $min: "$DocTotal" },
+              max: { $max: "$DocTotal" },
+            },
+          },
+        ]),
+
+        // Top customers by order and invoice value
+        SalesOrder.aggregate([
+          { $match: ordersQuery },
+          {
+            $group: {
+              _id: "$CardCode",
+              customerName: { $first: "$CardName" },
+              orderCount: { $sum: 1 },
+              orderTotal: { $sum: "$DocTotal" },
+              lastOrderDate: { $max: "$DocDate" },
+            },
+          },
+          { $sort: { orderTotal: -1 } },
+          { $limit: 5 },
+        ]),
+
+        // Monthly orders trend
+        SalesOrder.aggregate([
+          { $match: ordersQuery },
+          {
+            $group: {
+              _id: {
+                year: { $year: "$DocDate" },
+                month: { $month: "$DocDate" },
+              },
+              count: { $sum: 1 },
+              total: { $sum: "$DocTotal" },
+            },
+          },
+          { $sort: { "_id.year": 1, "_id.month": 1 } },
+        ]),
+
+        // Monthly invoices trend
+        Invoice.aggregate([
+          { $match: invoicesQuery },
+          {
+            $group: {
+              _id: {
+                year: { $year: "$DocDate" },
+                month: { $month: "$DocDate" },
+              },
+              count: { $sum: 1 },
+              total: { $sum: "$DocTotal" },
+            },
+          },
+          { $sort: { "_id.year": 1, "_id.month": 1 } },
+        ]),
+
+        // Order to Invoice conversion rate (placeholder - customize based on your data structure)
+        // This assumes each order would ideally be converted to an invoice
+        SalesOrder.aggregate([
+          { $match: ordersQuery },
+          {
+            $lookup: {
+              from: "invoices",
+              let: { orderDocEntry: "$DocEntry" },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $and: [
+                        { $eq: ["$BaseEntry", "$$orderDocEntry"] },
+                        { $eq: ["$BaseType", 17] }, // Assuming 17 is the code for Sales Orders
+                      ],
+                    },
+                  },
+                },
+              ],
+              as: "matchedInvoices",
+            },
+          },
+          {
+            $project: {
+              _id: 1,
+              DocEntry: 1,
+              DocNum: 1,
+              CardCode: 1,
+              CardName: 1,
+              DocDate: 1,
+              DocTotal: 1,
+              hasInvoice: {
+                $cond: [
+                  { $gt: [{ $size: "$matchedInvoices" }, 0] },
+                  true,
+                  false,
+                ],
+              },
+            },
+          },
+          {
+            $group: {
+              _id: null,
+              totalOrders: { $sum: 1 },
+              convertedOrders: { $sum: { $cond: ["$hasInvoice", 1, 0] } },
+            },
+          },
+        ]),
+      ]);
+
+      // Process monthly trends to fill gaps and format for charts
+      const monthlyData = processMonthlyData(
+        monthlyOrders,
+        monthlyInvoices,
+        start,
+        end
+      );
+
+      return res.status(200).json({
+        success: true,
+        summary: {
+          orders: {
+            count: orderStats.length > 0 ? orderStats[0].count : 0,
+            total: orderStats.length > 0 ? orderStats[0].total : 0,
+            average: orderStats.length > 0 ? orderStats[0].average : 0,
+            min: orderStats.length > 0 ? orderStats[0].min : 0,
+            max: orderStats.length > 0 ? orderStats[0].max : 0,
+          },
+          invoices: {
+            count: invoiceStats.length > 0 ? invoiceStats[0].count : 0,
+            total: invoiceStats.length > 0 ? invoiceStats[0].total : 0,
+            totalNoVat:
+              invoiceStats.length > 0 ? invoiceStats[0].totalNoVat : 0,
+            average: invoiceStats.length > 0 ? invoiceStats[0].average : 0,
+            averageNoVat:
+              invoiceStats.length > 0 ? invoiceStats[0].averageNoVat : 0,
+            min: invoiceStats.length > 0 ? invoiceStats[0].min : 0,
+            max: invoiceStats.length > 0 ? invoiceStats[0].max : 0,
+          },
+          conversion: {
+            rate:
+              conversionStats.length > 0 && conversionStats[0].totalOrders > 0
+                ? (conversionStats[0].convertedOrders /
+                    conversionStats[0].totalOrders) *
+                  100
+                : 0,
+            totalOrders:
+              conversionStats.length > 0 ? conversionStats[0].totalOrders : 0,
+            convertedOrders:
+              conversionStats.length > 0
+                ? conversionStats[0].convertedOrders
+                : 0,
+          },
+        },
+        topCustomers,
+        monthlyData,
+        dateRange: {
+          start,
+          end,
+        },
+      });
+    } catch (error) {
+      console.error("Error fetching orders and invoices analytics:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Error fetching orders and invoices analytics",
+        error: error.message,
+      });
+    }
+  },
 };
+
+function processMonthlyData(orderData, invoiceData, startDate, endDate) {
+  // Create a map of months
+  const monthlyMap = {};
+
+  // Fill in all months in the date range
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+
+  let current = new Date(start);
+  current.setDate(1); // Start at the beginning of the month
+
+  while (current <= end) {
+    const year = current.getFullYear();
+    const month = current.getMonth() + 1; // JavaScript months are 0-based
+
+    const key = `${year}-${month}`;
+    const monthName = current.toLocaleString("default", { month: "short" });
+
+    monthlyMap[key] = {
+      date: `${monthName} ${year}`,
+      year,
+      month,
+      orders: {
+        count: 0,
+        total: 0,
+      },
+      invoices: {
+        count: 0,
+        total: 0,
+      },
+    };
+
+    // Move to next month
+    current.setMonth(current.getMonth() + 1);
+  }
+
+  // Fill in order data
+  orderData.forEach((item) => {
+    const key = `${item._id.year}-${item._id.month}`;
+    if (monthlyMap[key]) {
+      monthlyMap[key].orders.count = item.count;
+      monthlyMap[key].orders.total = item.total;
+    }
+  });
+
+  // Fill in invoice data
+  invoiceData.forEach((item) => {
+    const key = `${item._id.year}-${item._id.month}`;
+    if (monthlyMap[key]) {
+      monthlyMap[key].invoices.count = item.count;
+      monthlyMap[key].invoices.total = item.total;
+    }
+  });
+
+  // Convert to array and sort by date
+  return Object.values(monthlyMap).sort((a, b) => {
+    if (a.year !== b.year) return a.year - b.year;
+    return a.month - b.month;
+  });
+}
 
 /**
  * Helper function to get agent's current period target progress

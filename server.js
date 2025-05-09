@@ -25,13 +25,15 @@ const customerTargetRoutes = require("./routes/customerTarget.routes");
 const salesManagerRoutes = require("./routes/salesManager.routes");
 const scraperRoutes = require("./routes/scraper.routes");
 const dealsRoutes = require("./routes/deals.routes");
-const menuRoutes = require('./routes/menu.routes');
-const leadRoutes = require('./routes/lead.routes');
-const taskRoutes = require('./routes/task.routes');
+const menuRoutes = require("./routes/menu.routes");
+const leadRoutes = require("./routes/lead.routes");
+const taskRoutes = require("./routes/task.routes");
 const QuotationRoutes = require("./routes/quotation.routes");
 const salesAgentJourneyRoutes = require("./routes/salesAgentJourney.routes");
+const applicationUsageRoutes = require("./routes/applicationUsage.routes");
 const config = require("./services/config");
 
+const {linkDocumentsToAgents} = require("./migrateAgentReferences");
 // Initialize express app
 const app = express();
 
@@ -52,9 +54,10 @@ app.use(
     ],
   })
 );
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 app.use(helmet());
+
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(process.cwd(), "uploads");
@@ -117,6 +120,7 @@ app.use("/api/quotations", QuotationRoutes); // Quotation routes
 app.use("/api/leads", leadRoutes); // Lead routes
 app.use("/api/tasks", taskRoutes); // Task routes
 app.use("/api/sales-agent-journey", salesAgentJourneyRoutes); // Sales agent journey routes
+app.use("/api/application-usage", applicationUsageRoutes); // Application usage routes
 
 // Health check route
 app.get("/health", (req, res) => {

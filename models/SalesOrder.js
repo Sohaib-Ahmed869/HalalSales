@@ -511,6 +511,10 @@ const OrderSchema = new Schema(
     U_U_ROUTEPAYMETHOD: String,
     U_U_ROUTEORDER: String,
     U_U_ROUTEPAYAMOUNT: String,
+    salesAgent: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
     Document_ApprovalRequests: [DocumentApprovalRequestSchema],
     DocumentLines: [DocumentLineSchema],
   },
