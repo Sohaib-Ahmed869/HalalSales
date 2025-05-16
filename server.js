@@ -40,7 +40,7 @@ const { syncFromFeb21 } = require("./jobs/hubspotJob");
 const app = express();
 
 // Schedule jobs/
-syncFromFeb21();
+//syncFromFeb21();
 
 // Environment variables
 const PORT = process.env.PORT || 5000;
