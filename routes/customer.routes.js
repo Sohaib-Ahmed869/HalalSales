@@ -53,6 +53,12 @@ const upload = multer({
 });
 
 router.post(
+  "/update-missing-emails",
+  upload.single("file"),
+  customerController.updateMissingEmails
+);
+
+router.post(
   "/update-phones",
   upload.single("file"),
   customerController.updateCustomerPhones
@@ -159,6 +165,6 @@ router.post(
 
 router.post("/merge-customers", customerController.mergeCustomersWithSameEmail);
 
-router.post("/delete-merged", customerController.deleteMergedNonSapCustomers)
+router.post("/delete-merged", customerController.deleteMergedNonSapCustomers);
 
 module.exports = router;

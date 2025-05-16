@@ -32,10 +32,15 @@ const QuotationRoutes = require("./routes/quotation.routes");
 const salesAgentJourneyRoutes = require("./routes/salesAgentJourney.routes");
 const applicationUsageRoutes = require("./routes/applicationUsage.routes");
 const config = require("./services/config");
-
+const ringoverJob = require("./jobs/ringoverJob");
+const desktimeJob = require("./jobs/desktimeJob");
 const {linkDocumentsToAgents} = require("./migrateAgentReferences");
+const { syncFromFeb21 } = require("./jobs/hubspotJob");
 // Initialize express app
 const app = express();
+
+// Schedule jobs/
+syncFromFeb21();
 
 // Environment variables
 const PORT = process.env.PORT || 5000;

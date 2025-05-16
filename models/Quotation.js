@@ -512,6 +512,25 @@ const OrderSchema = new Schema(
     U_U_ROUTEPAYMETHOD: String,
     U_U_ROUTEORDER: String,
     U_U_ROUTEPAYAMOUNT: String,
+    emailSentTo: [
+      {
+        email: {
+          type: String,
+          required: true,
+        },
+        sentBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+        },
+        sentDate: {
+          type: Date,
+          default: Date.now,
+        },
+        messageId: {
+          type: String,
+        },
+      },
+    ],
     Document_ApprovalRequests: [DocumentApprovalRequestSchema],
     DocumentLines: [DocumentLineSchema],
     IsActive: {

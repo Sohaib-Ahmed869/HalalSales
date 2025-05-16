@@ -777,6 +777,7 @@ exports.getCustomersPaginated = async (req, res) => {
       orderCounts,
       abandonedCarts,
       totalTurnover,
+      salesOrderTotal,
       latestInvoiceDates,
       quotationCounts,
     ] = await Promise.all([
@@ -823,6 +824,12 @@ exports.getCustomersPaginated = async (req, res) => {
         { $group: { _id: "$CardCode", totalAmount: { $sum: "$DocTotal" } } },
       ]),
 
+      // Get total sales order amount for all customers
+      SalesOrder.aggregate([
+        { $match: { CardCode: { $in: customerCodes } } },
+        { $group: { _id: "$CardCode", totalAmount: { $sum: "$DocTotal" } } },
+      ]),
+
       // Get latest invoice date for each customer
       Invoice.aggregate([
         { $match: { CardCode: { $in: customerCodes } } },
@@ -863,6 +870,12 @@ exports.getCustomersPaginated = async (req, res) => {
       turnoverMap[item._id] = item.totalAmount;
     });
 
+    // Create sales order total map
+    const salesOrderMap = {};
+    salesOrderTotal.forEach((item) => {
+      salesOrderMap[item._id] = item.totalAmount;
+    });
+
     // Create latest invoice date map
     const latestInvoiceDateMap = {};
     latestInvoiceDates.forEach((item) => {
@@ -883,6 +896,7 @@ exports.getCustomersPaginated = async (req, res) => {
           orderCount: orderMap[customer.CardCode] || 0,
           abandonedCartCount: customer.Email ? cartMap[customer.Email] || 0 : 0,
           sapTurnover: turnoverMap[customer.CardCode] || 0,
+          salesOrderTotal: salesOrderMap[customer.CardCode] || 0,
           latestInvoiceDate: latestInvoiceDateMap[customer.CardCode] || null,
           quotationCount: quotationMap[customer.CardCode] || 0,
         },
@@ -913,6 +927,11 @@ exports.getCustomersPaginated = async (req, res) => {
             aValue = a.metrics.sapTurnover;
             bValue = b.metrics.sapTurnover;
             break;
+          case "salesOrderTotal":
+            aValue = a.metrics.salesOrderTotal;
+            bValue = b.metrics.salesOrderTotal;
+            break;
+
           case "latestInvoiceDate":
             aValue = a.metrics.latestInvoiceDate
               ? new Date(a.metrics.latestInvoiceDate).getTime()
@@ -2592,6 +2611,198 @@ exports.deleteMergedNonSapCustomers = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Error deleting merged customers",
+      error: error.message,
+    });
+  }
+};
+exports.updateMissingEmails = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "Please upload a file containing customer email data",
+      });
+    }
+
+    // Ensure uploads directory exists
+    const uploadsDir = path.join(process.cwd(), "uploads");
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+
+    console.log("File upload path:", req.file.path);
+    console.log("File exists check:", fs.existsSync(req.file.path));
+
+    let emailData = [];
+    const fileExt = path.extname(req.file.originalname).toLowerCase();
+
+    // Process file based on extension
+    if (fileExt === ".xlsx" || fileExt === ".xls") {
+      // Process Excel file
+      try {
+        const workbook = XLSX.readFile(req.file.path);
+        const sheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[sheetName];
+        const data = XLSX.utils.sheet_to_json(worksheet);
+
+        console.log(`Extracted ${data.length} rows from Excel file`);
+
+        // Map data to our email format
+        emailData = data.map((row) => {
+          return {
+            CardCode: row["BP Code"] || row["CardCode"] || "",
+            Email: row["E-Mail"] || row["Email"] || "",
+            BP_Name: row["BP Name"] || row["CardName"] || "",
+          };
+        });
+      } catch (error) {
+        console.error("Error processing Excel file:", error);
+        throw new Error(`Failed to process Excel file: ${error.message}`);
+      }
+    } else if (fileExt === ".csv") {
+      // Process CSV file
+      try {
+        emailData = await new Promise((resolve, reject) => {
+          const results = [];
+          fs.createReadStream(req.file.path)
+            .pipe(csv())
+            .on("data", (row) => {
+              results.push({
+                CardCode: row["BP Code"] || row["CardCode"] || "",
+                Email: row["E-Mail"] || row["Email"] || "",
+                BP_Name: row["BP Name"] || row["CardName"] || "",
+              });
+            })
+            .on("end", () => {
+              console.log(`Processed ${results.length} rows from CSV`);
+              resolve(results);
+            })
+            .on("error", (error) => {
+              reject(error);
+            });
+        });
+      } catch (error) {
+        console.error("Error processing CSV file:", error);
+        throw new Error(`Failed to process CSV file: ${error.message}`);
+      }
+    } else {
+      // Process text file with specific format
+      try {
+        const fileContent = fs.readFileSync(req.file.path, "utf8");
+        const lines = fileContent.split("\n");
+
+        console.log(`Processing ${lines.length} lines from text file`);
+
+        // Skip header row if it exists
+        let startLine = 0;
+        if (
+          lines[0].includes("BP Code") ||
+          lines[0].includes("BP Name") ||
+          lines[0].includes("E-Mail")
+        ) {
+          startLine = 1;
+        }
+
+        // Process each line
+        for (let i = startLine; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+
+          // Match pattern for text: [index] BP_Code BP_Name Email
+          const match = line.match(
+            /^(?:\d+\s+)?(C\d+)\s+(.*?)(?:\s+(\S+@\S+\.\S+))?$/
+          );
+
+          if (match) {
+            const [, CardCode, BP_Name, Email] = match;
+
+            emailData.push({
+              CardCode: CardCode.trim(),
+              BP_Name: BP_Name.trim(),
+              Email: Email || "",
+            });
+          }
+        }
+
+        console.log(
+          `Extracted ${emailData.length} customer records with emails`
+        );
+      } catch (error) {
+        console.error("Error processing text file:", error);
+        throw new Error(`Failed to process text file: ${error.message}`);
+      }
+    }
+
+    // Filter out entries without CardCode or Email
+    emailData = emailData.filter((item) => item.CardCode && item.Email);
+
+    console.log(`Prepared ${emailData.length} email records for update`);
+
+    // Update database - only for customers with missing emails
+    const updateResults = {
+      total: emailData.length,
+      updated: 0,
+      skipped: 0,
+      notFound: 0,
+      errors: [],
+    };
+
+    for (const item of emailData) {
+      try {
+        // Find customer by CardCode
+        const customer = await Customer.findOne({ CardCode: item.CardCode });
+
+        if (customer) {
+          // Only update if the customer doesn't have an email
+          if (!customer.Email || customer.Email.trim() === "") {
+            customer.Email = item.Email;
+            await customer.save();
+            updateResults.updated++;
+          } else {
+            // Skip update if customer already has an email
+            updateResults.skipped++;
+          }
+        } else {
+          updateResults.notFound++;
+        }
+      } catch (error) {
+        console.error(`Error updating customer ${item.CardCode}:`, error);
+        updateResults.errors.push({
+          CardCode: item.CardCode,
+          error: error.message,
+        });
+      }
+    }
+
+    // Clean up the uploaded file
+    try {
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error deleting file after processing:", unlinkError);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Email update complete`,
+      results: updateResults,
+    });
+  } catch (error) {
+    console.error("Email update error:", error);
+
+    // Clean up file if it exists
+    try {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error cleaning up file:", unlinkError);
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Error updating customer emails",
       error: error.message,
     });
   }

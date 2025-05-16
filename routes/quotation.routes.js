@@ -12,7 +12,11 @@ router.post("/", auth, quotationController.createQuotation);
 // @route   GET /api/quotations
 // @desc    Get all quotations with pagination and filtering
 // @access  Private
-router.get("/cardCode/:cardCode", auth, quotationController.getQuotationsByCustomer);
+router.get(
+  "/cardCode/:cardCode",
+  auth,
+  quotationController.getQuotationsByCustomer
+);
 router.get("/", auth, quotationController.getAllQuotations);
 
 // @route   GET /api/quotations/cardCode/:cardCode
@@ -42,6 +46,17 @@ router.patch("/:docEntry/cancel", auth, quotationController.cancelQuotation);
 // @route   POST /api/quotations/:docEntry/duplicate
 // @desc    Create a duplicate of an existing quotation
 // @access  Private
-router.post("/:docEntry/duplicate", auth, quotationController.duplicateQuotation);
+router.post(
+  "/:docEntry/duplicate",
+  auth,
+  quotationController.duplicateQuotation
+);
+
+// Send quotation by email
+router.post(
+  "/:docEntry/send-email",
+  auth,
+  quotationController.sendQuotationByEmail
+);
 
 module.exports = router;

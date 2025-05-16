@@ -9,6 +9,7 @@ const {
   createSalesOrderInSAP,
   checkBusinessPartnerExists,
 } = require("../utils/sapB1Integration");
+const Customer = require("../models/Customer");
 
 // Helper function to update sales agent stats
 async function updateSalesAgentAchievement(salesAgentId, order) {
@@ -304,7 +305,7 @@ exports.getQuotationsByCustomer = async (req, res) => {
     const skip = (page - 1) * limit;
 
     // Base query - only show active quotations by default
-    const query = { CardCode: cardCode};
+    const query = { CardCode: cardCode };
 
     // Add option to show inactive quotations if requested
     if (req.query.showInactive === "true") {
@@ -706,4 +707,284 @@ exports.duplicateQuotation = async (req, res) => {
   }
 };
 
+// Add to controllers/quotation.controller.js
+
+exports.sendQuotationByEmail = async (req, res) => {
+  try {
+    console.log("Received request to send quotation by email", req.body);
+    const quotationId = req.params.docEntry;
+    const emailData = req.body;
+
+    if (!emailData || !emailData.to) {
+      return res.status(400).json({
+        success: false,
+        message: "Recipient email address is required",
+      });
+    }
+
+    console.log(
+      `Processing quotation ${quotationId} for email to ${emailData.to}`
+    );
+
+    // Find the quotation
+    const quotation = await Quotation.findOne({
+      DocEntry: quotationId,
+    }).populate("salesAgent", "firstName lastName email");
+
+    if (!quotation) {
+      return res.status(404).json({
+        success: false,
+        message: `Quotation with ID ${quotationId} not found`,
+      });
+    }
+
+    // Find the customer
+    const customer = await Customer.findOne({
+      CardCode: quotation.CardCode,
+    });
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: `Customer with CardCode ${quotation.CardCode} not found`,
+      });
+    }
+    const customerForTemplate = {
+      CardName: customer.CardName || "Customer",
+      // Directly flatten address fields to avoid nested property access issues
+      street: customer.address?.street || customer.Address || "",
+      city: customer.address?.city || customer.City || "",
+      zipCode: customer.address?.zipCode || customer.ZipCode || "",
+      Country: customer.Country || "",
+      Phone: customer.Phone || customer.Telephone || "",
+    };
+
+    console.log("Prepared customer template data:", customerForTemplate);
+    console.log("Here is the customer", customer);
+
+    // Generate PDF
+    console.log("Generating PDF...");
+    let pdfBuffer;
+    try {
+      const pdfGenerator = require("../utils/pdfGenerator");
+      pdfBuffer = await pdfGenerator.generateQuotationPDF(quotation, customerForTemplate);
+      // Log PDF details
+      console.log(`PDF generated successfully: ${pdfBuffer.length} bytes`);
+    } catch (pdfError) {
+      console.error("Error generating PDF:", pdfError);
+      return res.status(500).json({
+        success: false,
+        message: `Error generating PDF: ${pdfError.message}`,
+      });
+    }
+
+    // Send email with attachment
+    console.log("Sending email with PDF attachment...");
+    try {
+      const emailService = require("../utils/emailService");
+
+      // Format the email for better deliverability
+      const emailText =
+        emailData.message ||
+        `Cher client,\n\nVeuillez trouver ci-joint votre devis #${quotation.DocNum}.\n\nCordialement,\nL'équipe Halal Food Service`;
+
+      const emailHtml = emailText.replace(/\n/g, "<br>");
+
+      const info = await emailService.sendEmail({
+        to: emailData.to,
+        cc: emailData.cc || "",
+        subject: emailData.subject || `Devis HFS #${quotation.DocNum}`,
+        text: emailText,
+        html: emailHtml,
+        attachments: [
+          {
+            filename: `Devis_HFS_${quotation.DocNum}.pdf`,
+            content: pdfBuffer,
+            contentType: "application/pdf",
+            encoding: "binary",
+          },
+        ],
+      });
+
+      // Record email sent
+      quotation.emailSentTo = quotation.emailSentTo || [];
+      quotation.emailSentTo.push({
+        email: emailData.to,
+        sentBy: req.user._id,
+        sentDate: new Date(),
+        messageId: info.messageId,
+      });
+
+      await quotation.save();
+
+      return res.status(200).json({
+        success: true,
+        message: "Email sent successfully",
+        messageId: info.messageId,
+      });
+    } catch (emailError) {
+      console.error("Error sending email:", emailError);
+      return res.status(500).json({
+        success: false,
+        message: `Error sending email: ${emailError.message}`,
+      });
+    }
+  } catch (error) {
+    console.error("Error in sendQuotationByEmail:", error);
+    return res.status(500).json({
+      success: false,
+      message: `An unexpected error occurred: ${error.message}`,
+    });
+  }
+};
+// Helper functions
+
+// Generate PDF from quotation data (implementation depends on your PDF library)
+async function generateQuotationPDF(quotation) {
+  try {
+    // This is a placeholder - you would use a PDF library like PDFKit, Puppeteer, or html-pdf
+    // To convert your quotation HTML template to PDF
+
+    // Example with puppeteer (you would need to install it):
+    // const puppeteer = require('puppeteer');
+    // const browser = await puppeteer.launch();
+    // const page = await browser.newPage();
+    // await page.setContent(quotationHTMLTemplate(quotation));
+    // const pdfBuffer = await page.pdf({ format: 'A4' });
+    // await browser.close();
+    // return pdfBuffer;
+
+    // Placeholder implementation
+    const pdfBuffer = Buffer.from("PDF content would be here");
+    return pdfBuffer;
+  } catch (error) {
+    console.error("Error generating PDF:", error);
+    throw new Error("Failed to generate quotation PDF");
+  }
+}
+
+// Updated sendEmailWithAttachment function with full implementation
+async function sendEmailWithAttachment({ to, cc, subject, text, attachments }) {
+  try {
+    const nodemailer = require("nodemailer");
+    const config = require("../config/config");
+
+    // Create reusable transporter using SMTP configuration
+    const transporter = nodemailer.createTransport({
+      host: config.email.host,
+      port: config.email.port,
+      secure: config.email.port === 465, // true for 465, false for other ports
+      auth: {
+        user: config.email.user,
+        pass: config.email.password,
+      },
+      // Optional: Configure for SSL verification if needed
+      tls: {
+        rejectUnauthorized: false, // Only set to false if required for self-signed certificates
+      },
+    });
+
+    // Prepare email options
+    const mailOptions = {
+      from: `"${config.email.senderName}" <${config.email.user}>`,
+      to: to,
+      subject: subject,
+      text: text,
+    };
+
+    // Add CC if provided
+    if (cc && cc.trim() !== "") {
+      mailOptions.cc = cc;
+    }
+
+    // Add HTML version of the message for better formatting
+    if (text) {
+      // Convert plain text to HTML
+      mailOptions.html = text.replace(/\n/g, "<br>");
+    }
+
+    // Add attachments if provided
+    if (attachments && Array.isArray(attachments) && attachments.length > 0) {
+      mailOptions.attachments = attachments;
+    }
+
+    // Log that we're about to send an email (for debugging)
+    console.log(`Sending email to ${to}${cc ? " with CC to " + cc : ""}`);
+
+    // Verify connection configuration before sending
+    transporter.verify(function (error, success) {
+      if (error) {
+        console.error("SMTP verification error:", error);
+      } else {
+        console.log("SMTP server is ready to take our messages");
+      }
+    });
+
+    // Send mail with defined transport object
+    const info = await transporter.sendMail(mailOptions);
+
+    // Log success
+    console.log(
+      `Email sent successfully to ${to}. Message ID: ${info.messageId}`
+    );
+
+    // If SMTP server provides delivery status, log it
+    if (info.accepted && info.accepted.length > 0) {
+      console.log(
+        `Email accepted by SMTP server for: ${info.accepted.join(", ")}`
+      );
+    }
+
+    if (info.rejected && info.rejected.length > 0) {
+      console.warn(
+        `Email rejected by SMTP server for: ${info.rejected.join(", ")}`
+      );
+    }
+
+    return info;
+  } catch (error) {
+    console.error("Error sending email:", error);
+
+    // Provide more detailed error information
+    let errorMessage = "Failed to send email";
+
+    if (error.code === "ECONNREFUSED") {
+      errorMessage =
+        "Could not connect to email server. Please check SMTP configuration.";
+    } else if (error.code === "EAUTH") {
+      errorMessage =
+        "Email authentication failed. Please check username and password.";
+    } else if (error.responseCode) {
+      errorMessage = `SMTP Error: ${error.responseCode} - ${
+        error.response || error.message
+      }`;
+    } else if (error.message) {
+      errorMessage = error.message;
+    }
+
+    throw new Error(errorMessage);
+  }
+}
+
+async function logEmailActivity(userId, quotationDocEntry, recipient) {
+  try {
+    // If you have an EmailLog model, you can use it here
+    const EmailLog = require("../models/EmailLog");
+
+    await EmailLog.create({
+      user: userId,
+      quotationDocEntry,
+      recipient,
+      timestamp: new Date(),
+      type: "quotation_email",
+    });
+
+    console.log(
+      `Email log created for quotation ${quotationDocEntry} sent to ${recipient}`
+    );
+  } catch (error) {
+    console.error("Error logging email activity:", error);
+    // Don't throw here as this is a non-critical operation
+  }
+}
 module.exports = exports;
