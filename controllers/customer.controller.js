@@ -739,8 +739,6 @@ exports.getCustomersPaginated = async (req, res) => {
     // Apply filters if provided
     if (status) query.status = status;
 
-    if (assignedTo) query.assignedTo = assignedTo;
-
     if (assignedTo === "unassigned") {
       query.assignedTo = { $exists: false }; // This properly targets documents where assignedTo field doesn't exist
     } else if (assignedTo !== "all" && assignedTo) {
@@ -755,9 +753,6 @@ exports.getCustomersPaginated = async (req, res) => {
         { Email: { $regex: search, $options: "i" } },
       ];
     }
-
-    // Count total matching documents (for pagination)
-    const totalCount = await Customer.countDocuments(query);
 
     // Get all matching customers without pagination for sorting by metrics
     let customers = await Customer.find({ ...query })
@@ -956,6 +951,9 @@ exports.getCustomersPaginated = async (req, res) => {
       // Default sorting by CardName
       enhancedCustomers.sort((a, b) => a.CardName.localeCompare(b.CardName));
     }
+
+    // Get the total count AFTER all filters and sorting have been applied
+    const totalCount = enhancedCustomers.length;
 
     // Apply pagination after sorting
     const paginatedCustomers = enhancedCustomers.slice(skip, skip + limit);
@@ -1826,7 +1824,7 @@ exports.updateCustomerAddresses = async (req, res) => {
             street: row["Bill-to Street"] || row["Street"] || "",
             zipCode:
               row["Bill-to Zip Code"] || row["Zip Code"] || row["ZIP"] || "",
-            city: row["City"] || "",
+            city: row["Bill-to City"] || "",
             BP_Name: row["BP Name"] || row["CardName"] || "",
           };
         });
