@@ -506,6 +506,20 @@ exports.getCustomersSummary = async (req, res) => {
  */
 exports.getGlobalKPIs = async (req, res) => {
   try {
+    // Extract date range parameters from the request
+    const { startDate, endDate } = req.query;
+
+    // Create a date filter that will be applied to all relevant pipelines
+    const dateFilter = {};
+    if (startDate && endDate) {
+      dateFilter.DocDate = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate),
+      };
+      console.log("Date filter applied:", dateFilter);
+    }
+
+    // Initialize result object
     const kpiResult = {
       totalInvoices: 0,
       totalAmount: 0,
@@ -526,10 +540,9 @@ exports.getGlobalKPIs = async (req, res) => {
       topProducts: [],
     };
 
-    // Use separate smaller queries instead of one giant facet
-    
     // 1. Total statistics - more efficient without $addToSet for all customers
     const totalStatsPipeline = [
+      { $match: dateFilter },
       {
         $group: {
           _id: null,
@@ -537,18 +550,20 @@ exports.getGlobalKPIs = async (req, res) => {
           totalAmount: { $sum: "$DocTotal" },
           totalPaid: { $sum: "$PaidToDate" },
           averageAmount: { $avg: "$DocTotal" },
-        }
-      }
+        },
+      },
     ];
-    
+
     // 2. Count unique customers separately with a more efficient approach
     const uniqueCustomersPipeline = [
+      { $match: dateFilter },
       { $group: { _id: "$CardCode" } },
-      { $count: "uniqueCustomerCount" }
+      { $count: "uniqueCustomerCount" },
     ];
 
     // 3. Channel distribution
     const channelStatsPipeline = [
+      { $match: dateFilter },
       {
         $group: {
           _id: {
@@ -557,20 +572,13 @@ exports.getGlobalKPIs = async (req, res) => {
           },
           count: { $sum: 1 },
           amount: { $sum: "$DocTotal" },
-        }
-      }
+        },
+      },
     ];
 
-    // 4. Monthly trends (last 12 months)
-    const twelveMonthsAgo = new Date();
-    twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 12);
-    
+    // 4. Monthly trends (using date filter instead of hardcoded 12 months)
     const monthlyTrendsPipeline = [
-      {
-        $match: {
-          DocDate: { $gte: twelveMonthsAgo }
-        }
-      },
+      { $match: dateFilter },
       {
         $group: {
           _id: {
@@ -579,38 +587,41 @@ exports.getGlobalKPIs = async (req, res) => {
           },
           invoiceCount: { $sum: 1 },
           totalAmount: { $sum: "$DocTotal" },
-        }
+        },
       },
-      { $sort: { "_id.year": 1, "_id.month": 1 } }
+      { $sort: { "_id.year": 1, "_id.month": 1 } },
     ];
 
     // 5. Payment method distribution
     const paymentMethodsPipeline = [
+      { $match: dateFilter },
       {
         $group: {
           _id: "$paymentMethod",
           count: { $sum: 1 },
           amount: { $sum: "$DocTotal" },
-        }
-      }
+        },
+      },
     ];
 
     // 6. Top customers by revenue
     const topCustomersPipeline = [
+      { $match: dateFilter },
       {
         $group: {
           _id: "$CardCode",
           customerName: { $first: "$CardName" },
           invoiceCount: { $sum: 1 },
           totalAmount: { $sum: "$DocTotal" },
-        }
+        },
       },
       { $sort: { totalAmount: -1 } },
-      { $limit: 50 }
+      { $limit: 50 },
     ];
 
     // 7. Top products by revenue - process in smaller chunks
     const topProductsPipeline = [
+      { $match: dateFilter },
       { $unwind: "$DocumentLines" },
       {
         $group: {
@@ -619,17 +630,14 @@ exports.getGlobalKPIs = async (req, res) => {
           quantity: { $sum: "$DocumentLines.Quantity" },
           revenue: {
             $sum: {
-              $multiply: [
-                "$DocumentLines.Price",
-                "$DocumentLines.Quantity",
-              ],
-            }
+              $multiply: ["$DocumentLines.Price", "$DocumentLines.Quantity"],
+            },
           },
           occurrences: { $sum: 1 },
-        }
+        },
       },
       { $sort: { revenue: -1 } },
-      { $limit: 50 }
+      { $limit: 50 },
     ];
 
     // Execute all queries in parallel for better performance
@@ -640,15 +648,15 @@ exports.getGlobalKPIs = async (req, res) => {
       monthlyTrendsResults,
       paymentMethodsResults,
       topCustomersResults,
-      topProductsResults
+      topProductsResults,
     ] = await Promise.all([
-      Invoice.aggregate(totalStatsPipeline),
-      Invoice.aggregate(uniqueCustomersPipeline),
-      Invoice.aggregate(channelStatsPipeline),
-      Invoice.aggregate(monthlyTrendsPipeline),
-      Invoice.aggregate(paymentMethodsPipeline),
-      Invoice.aggregate(topCustomersPipeline),
-      Invoice.aggregate(topProductsPipeline)
+      Invoice.aggregate(totalStatsPipeline).allowDiskUse(true),
+      Invoice.aggregate(uniqueCustomersPipeline).allowDiskUse(true),
+      Invoice.aggregate(channelStatsPipeline).allowDiskUse(true),
+      Invoice.aggregate(monthlyTrendsPipeline).allowDiskUse(true),
+      Invoice.aggregate(paymentMethodsPipeline).allowDiskUse(true),
+      Invoice.aggregate(topCustomersPipeline).allowDiskUse(true),
+      Invoice.aggregate(topProductsPipeline).allowDiskUse(true),
     ]);
 
     // Extract and format total stats
@@ -659,23 +667,25 @@ exports.getGlobalKPIs = async (req, res) => {
       kpiResult.totalPaid = stats.totalPaid;
       kpiResult.totalUnpaid = stats.totalAmount - stats.totalPaid;
       kpiResult.averageInvoiceAmount = stats.averageAmount;
-      
+
       // Get unique customer count
-      kpiResult.uniqueCustomerCount = 
-        uniqueCustomersResults.length > 0 ? uniqueCustomersResults[0].uniqueCustomerCount : 0;
-      
+      kpiResult.uniqueCustomerCount =
+        uniqueCustomersResults.length > 0
+          ? uniqueCustomersResults[0].uniqueCustomerCount
+          : 0;
+
       // Calculate derived metrics
       kpiResult.averageRevenuePerCustomer = kpiResult.uniqueCustomerCount
         ? kpiResult.totalAmount / kpiResult.uniqueCustomerCount
         : 0;
-        
+
       kpiResult.collectionRate = kpiResult.totalAmount
         ? ((kpiResult.totalPaid / kpiResult.totalAmount) * 100).toFixed(2)
         : 0;
     }
 
     // Format payment method distribution
-    kpiResult.paymentMethodDistribution = paymentMethodsResults.map(item => ({
+    kpiResult.paymentMethodDistribution = paymentMethodsResults.map((item) => ({
       method: item._id || "Unknown",
       count: item.count,
       amount: item.amount,
@@ -685,7 +695,7 @@ exports.getGlobalKPIs = async (req, res) => {
     }));
 
     // Format channel distribution
-    channelStatsResults.forEach(item => {
+    channelStatsResults.forEach((item) => {
       if (item._id.isPOS) {
         kpiResult.channelDistribution.pos.count = item.count;
         kpiResult.channelDistribution.pos.amount = item.amount;
@@ -700,11 +710,21 @@ exports.getGlobalKPIs = async (req, res) => {
 
     // Format monthly trends
     const months = [
-      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec",
     ];
-    
-    kpiResult.monthlyTrends = monthlyTrendsResults.map(item => {
+
+    kpiResult.monthlyTrends = monthlyTrendsResults.map((item) => {
       // Calculate monthly unique customers separately if needed for high precision
       return {
         month: months[item._id.month - 1],
@@ -718,48 +738,45 @@ exports.getGlobalKPIs = async (req, res) => {
       };
     });
 
-    // If monthly unique customers are critically important, fetch them separately
-    // This can be commented out if approximation is acceptable
-    if (monthlyTrendsResults.length > 0) {
-      for (let i = 0; i < monthlyTrendsResults.length; i++) {
-        const item = monthlyTrendsResults[i];
-        const startDate = new Date(item._id.year, item._id.month - 1, 1);
-        const endDate = new Date(item._id.year, item._id.month, 0, 23, 59, 59);
-        
-        const monthlyCustomersPipeline = [
-          {
-            $match: {
-              DocDate: { $gte: startDate, $lte: endDate }
-            }
-          },
-          { $group: { _id: "$CardCode" } },
-          { $count: "uniqueCustomerCount" }
-        ];
-        
-        const monthlyCustomersResults = await Invoice.aggregate(monthlyCustomersPipeline);
-        kpiResult.monthlyTrends[i].customers = monthlyCustomersResults.length > 0 
-          ? monthlyCustomersResults[0].uniqueCustomerCount 
-          : 0;
-      }
+    // For monthly unique customers, we'll simplify this part to improve performance
+    // We'll calculate a rough estimate based on the overall unique customer count
+    // This avoids making too many separate aggregation queries
+    if (monthlyTrendsResults.length > 0 && kpiResult.uniqueCustomerCount > 0) {
+      const avgCustomersPerMonth = Math.round(
+        kpiResult.uniqueCustomerCount / monthlyTrendsResults.length
+      );
+      kpiResult.monthlyTrends.forEach((item) => {
+        // Assign a relative value based on invoice count compared to overall average
+        const relativeActivity =
+          item.count / (kpiResult.totalInvoices / monthlyTrendsResults.length);
+        item.customers = Math.max(
+          1,
+          Math.round(avgCustomersPerMonth * relativeActivity)
+        );
+      });
     }
 
     // Format top customers
-    kpiResult.topCustomers = topCustomersResults.map(item => ({
+    kpiResult.topCustomers = topCustomersResults.map((item) => ({
       customerCode: item._id,
       customerName: item.customerName,
       invoiceCount: item.invoiceCount,
       totalAmount: item.totalAmount,
-      averageInvoiceValue: (item.totalAmount / item.invoiceCount).toFixed(2),
+      averageInvoiceValue:
+        item.invoiceCount > 0
+          ? (item.totalAmount / item.invoiceCount).toFixed(2)
+          : "0.00",
     }));
 
     // Format top products
-    kpiResult.topProducts = topProductsResults.map(item => ({
+    kpiResult.topProducts = topProductsResults.map((item) => ({
       itemCode: item._id,
       itemName: item.itemName,
       quantity: item.quantity,
       revenue: item.revenue,
       occurrences: item.occurrences,
-      averagePrice: (item.revenue / item.quantity).toFixed(2),
+      averagePrice:
+        item.quantity > 0 ? (item.revenue / item.quantity).toFixed(2) : "0.00",
     }));
 
     return res.status(200).json({

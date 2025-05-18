@@ -81,8 +81,6 @@ router.get("/", auth, updateLastLogin, customerController.getCustomers);
 // Get all customers (with filtering and permissions)
 router.get("/sap", auth, updateLastLogin, customerController.getSAPCustomers);
 
-
-
 // Route for bulk unassignment
 router.post(
   "/bulk-unassign",
@@ -101,6 +99,13 @@ router.post(
   "/check-add-new",
   upload.single("file"),
   customerController.checkAndAddNewCustomers
+);
+
+// Add this new route:
+router.post(
+  "/bulk-assign",
+  auth,
+  customerController.bulkAssignCustomers
 );
 
 router.get(

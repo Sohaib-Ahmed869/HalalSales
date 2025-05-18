@@ -3026,3 +3026,70 @@ exports.updateMissingEmails = async (req, res) => {
     });
   }
 };
+
+exports.bulkAssignCustomers = async (req, res) => {
+  try {
+    const { customerIds, agentId } = req.body;
+
+    // Validate input
+    if (
+      !customerIds ||
+      !Array.isArray(customerIds) ||
+      customerIds.length === 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a valid array of customer IDs",
+      });
+    }
+
+    if (!agentId) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a valid agent ID",
+      });
+    }
+
+    // Verify user has permission (admins and sales managers)
+    if (
+      req.user &&
+      req.user.role !== "admin" &&
+      req.user.role !== "sales_manager"
+    ) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Unauthorized: Only admins and sales managers can reassign customers",
+      });
+    }
+
+    // Verify the agent exists and is a sales agent
+    const agent = await User.findById(agentId);
+    if (!agent || agent.role !== "sales_agent") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid sales agent ID",
+      });
+    }
+
+    // Perform bulk update to assign all customers to the specified agent
+    const result = await Customer.updateMany(
+      { _id: { $in: customerIds } },
+      { $set: { assignedTo: agentId } }
+    );
+
+    res.json({
+      success: true,
+      message: "Customers assigned successfully",
+      count: result.modifiedCount,
+      totalRequested: customerIds.length,
+    });
+  } catch (error) {
+    console.error("Bulk customer assignment error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};

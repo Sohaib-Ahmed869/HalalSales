@@ -4,103 +4,139 @@ const Invoice = require("../models/Invoice");
 const Payment = require("../models/payment");
 const PaymentLink = require("../models/paymentLinks");
 const mongoose = require("mongoose");
+
+const calculatePaymentTotal = (payment) => {
+  return (
+    (payment.CashSum || 0) +
+    (payment.TransferSum || 0) +
+    (payment.CheckSum || 0) +
+    // Handle credit cards collection
+    (payment.PaymentCreditCards?.reduce(
+      (sum, card) => sum + (card.CreditSum || 0),
+      0
+    ) || 0) +
+    // Handle checks collection
+    (payment.PaymentChecks?.reduce(
+      (sum, check) => sum + (check.CheckSum || 0),
+      0
+    ) || 0) +
+    // Handle DocTotal as fallback
+    (!payment.CashSum &&
+    !payment.TransferSum &&
+    !payment.CheckSum &&
+    (!payment.PaymentCreditCards || payment.PaymentCreditCards.length === 0) &&
+    (!payment.PaymentChecks || payment.PaymentChecks.length === 0)
+      ? payment.DocTotal || 0
+      : 0)
+  );
+};
 const weeklyDataFormatter = {
   // Takes a week string in format "YYYY-WWW" and returns a Date object for the week's start
   getWeekStartDate: (weekStr) => {
     const match = weekStr.match(/^(\d{4})-W(\d{2})$/);
     if (!match) return null;
-    
+
     const [_, year, weekNum] = match;
-    
+
     // Get the first day of the year
     const firstDayOfYear = new Date(parseInt(year), 0, 1);
-    
+
     // Calculate days to add to get to the start of the specified week
     // Week 1 is the week containing January 1
     const daysToAdd = (parseInt(weekNum) - 1) * 7;
-    
+
     // Adjust for day of week of January 1
     const firstDayWeekday = firstDayOfYear.getDay(); // 0 = Sunday, 1 = Monday, etc.
     const adjustedDaysToAdd = daysToAdd - firstDayWeekday + 1; // +1 because we want to start from Monday
-    
+
     // Create new date for the start of the week
     const weekStart = new Date(firstDayOfYear);
     weekStart.setDate(firstDayOfYear.getDate() + adjustedDaysToAdd);
-    
+
     return weekStart;
   },
-  
+
   // Format week as a readable string (e.g., "Jan 1-7, 2025")
   formatWeekDisplay: (weekStr) => {
     const weekStart = weeklyDataFormatter.getWeekStartDate(weekStr);
     if (!weekStart) return weekStr;
-    
+
     // Calculate week end (6 days after start)
     const weekEnd = new Date(weekStart);
     weekEnd.setDate(weekStart.getDate() + 6);
-    
+
     // Format dates
-    const formatMonth = (date) => date.toLocaleString('default', { month: 'short' });
+    const formatMonth = (date) =>
+      date.toLocaleString("default", { month: "short" });
     const formatDay = (date) => date.getDate();
     const year = weekStart.getFullYear();
-    
+
     // Check if week spans month boundaries
     if (weekStart.getMonth() === weekEnd.getMonth()) {
       // Same month (e.g., "Jan 1-7, 2025")
-      return `${formatMonth(weekStart)} ${formatDay(weekStart)}-${formatDay(weekEnd)}, ${year}`;
+      return `${formatMonth(weekStart)} ${formatDay(weekStart)}-${formatDay(
+        weekEnd
+      )}, ${year}`;
     } else {
       // Different months (e.g., "Dec 29-Jan 4, 2025")
-      return `${formatMonth(weekStart)} ${formatDay(weekStart)}-${formatMonth(weekEnd)} ${formatDay(weekEnd)}, ${year}`;
+      return `${formatMonth(weekStart)} ${formatDay(weekStart)}-${formatMonth(
+        weekEnd
+      )} ${formatDay(weekEnd)}, ${year}`;
     }
   },
-  
+
   // Generate week keys for a date range
   generateWeekKeys: (startDate, endDate) => {
     const weeks = [];
     const currentDate = new Date(startDate);
     const end = new Date(endDate);
-    
+
     while (currentDate <= end) {
       // Get year and week number
       const year = currentDate.getFullYear();
       const weekNum = Math.ceil(
-        ((currentDate - new Date(year, 0, 1)) / 86400000 + 
-        new Date(year, 0, 1).getDay() + 1) / 7
+        ((currentDate - new Date(year, 0, 1)) / 86400000 +
+          new Date(year, 0, 1).getDay() +
+          1) /
+          7
       );
-      
+
       // Create week key
       const weekKey = `${year}-W${String(weekNum).padStart(2, "0")}`;
-      
+
       // Add to list if not already present
       if (!weeks.includes(weekKey)) {
         weeks.push(weekKey);
       }
-      
+
       // Move to next week
       currentDate.setDate(currentDate.getDate() + 7);
     }
-    
+
     return weeks;
   },
-  
+
   // Fill in missing weeks in data with zero values
   fillMissingWeeks: (data, startDate, endDate) => {
     // Get all week keys in the date range
-    const allWeekKeys = weeklyDataFormatter.generateWeekKeys(startDate, endDate);
-    
+    const allWeekKeys = weeklyDataFormatter.generateWeekKeys(
+      startDate,
+      endDate
+    );
+
     // Convert data to map for easy lookup
     const dataMap = data.reduce((map, item) => {
       map[item.period] = item;
       return map;
     }, {});
-    
+
     // Create complete dataset with missing weeks filled in
-    const completedData = allWeekKeys.map(weekKey => {
+    const completedData = allWeekKeys.map((weekKey) => {
       if (dataMap[weekKey]) {
         return {
           ...dataMap[weekKey],
           displayName: weekKey,
-          formattedDisplayName: weeklyDataFormatter.formatWeekDisplay(weekKey)
+          formattedDisplayName: weeklyDataFormatter.formatWeekDisplay(weekKey),
         };
       } else {
         return {
@@ -113,13 +149,13 @@ const weeklyDataFormatter = {
           invoiceCount: 0,
           invoiceAmount: 0,
           paymentCount: 0,
-          paymentAmount: 0
+          paymentAmount: 0,
         };
       }
     });
-    
+
     return completedData;
-  }
+  },
 };
 // Updated calculateActivityByTimePeriod function for proper weekly display
 const calculateActivityByTimePeriod = (
@@ -184,11 +220,7 @@ const calculateActivityByTimePeriod = (
   // Process payments by time period
   payments.forEach((payment) => {
     const key = getTimeKey(payment.DocDate);
-    const paymentTotal =
-      (payment.CashSum || 0) +
-      (payment.TransferSum || 0) +
-      (payment.CheckSum || 0) +
-      (payment.CreditSum || 0);
+    const paymentTotal = calculatePaymentTotal(payment);
 
     if (!timeframes[key]) {
       timeframes[key] = {
@@ -326,18 +358,40 @@ exports.getCustomerJourney = async (req, res) => {
         balance: invoice.DocTotal - invoice.PaidToDate,
         details: invoice,
       })),
-      ...payments.map((payment) => ({
-        type: "payment",
-        date: payment.DocDate,
-        amount: payment.DocTotal,
-        docNum: payment.DocNum,
-        relatedInvoices:
-          payment.PaymentInvoices?.map((pi) => ({
-            invoiceNumber: pi.DocEntry,
-            amountApplied: pi.SumApplied,
-          })) || [],
-        details: payment,
-      })),
+      ...payments.map((payment) => {
+        // Determine the payment method
+        let paymentMethod = "Unknown";
+        if (payment.CashSum > 0) paymentMethod = "Cash";
+        else if (payment.TransferSum > 0) paymentMethod = "Bank Transfer";
+        else if (
+          payment.PaymentCreditCards &&
+          payment.PaymentCreditCards.length > 0
+        )
+          paymentMethod = "Credit Card";
+        else if (payment.PaymentChecks && payment.PaymentChecks.length > 0)
+          paymentMethod = "Check";
+
+        // Calculate payment total
+        const paymentTotal = calculatePaymentTotal(payment);
+
+        return {
+          type: "payment",
+          date: payment.DocDate,
+          amount: paymentTotal,
+          docNum: payment.DocNum,
+          paymentMethod: paymentMethod,
+          relatedInvoices:
+            payment.PaymentInvoices?.map((pi) => ({
+              invoiceNumber: pi.DocEntry,
+              amountApplied: pi.SumApplied,
+            })) || [],
+          details: {
+            ...payment,
+            paymentMethod: paymentMethod,
+            calculatedTotal: paymentTotal,
+          },
+        };
+      }),
     ].sort((a, b) => new Date(a.date) - new Date(b.date));
 
     //print payment were DocNum is 202487 from the timeline
@@ -438,46 +492,61 @@ const analyzePaymentMethods = (payments) => {
   let totalPayments = 0;
 
   payments.forEach((payment) => {
-    // Detect payment method
-    let method = "Unknown";
+    let methodsDetected = 0;
 
+    // Check for Cash payments
     if (payment.CashSum > 0) {
-      method = "Cash";
+      const method = "Cash";
       const amount = payment.CashSum || 0;
       methodAmounts[method] = (methodAmounts[method] || 0) + amount;
       methodCounts[method] = (methodCounts[method] || 0) + 1;
-      totalPayments++;
+      methodsDetected++;
     }
 
+    // Check for Bank Transfer payments
     if (payment.TransferSum > 0) {
-      method = "Bank Transfer";
+      const method = "Bank Transfer";
       const amount = payment.TransferSum || 0;
       methodAmounts[method] = (methodAmounts[method] || 0) + amount;
       methodCounts[method] = (methodCounts[method] || 0) + 1;
-      totalPayments++;
+      methodsDetected++;
     }
 
+    // Check for Credit Card payments
     if (payment.PaymentCreditCards && payment.PaymentCreditCards.length > 0) {
-      method = "Credit Card";
+      const method = "Credit Card";
       const amount = payment.PaymentCreditCards.reduce(
         (sum, card) => sum + (card.CreditSum || 0),
         0
       );
       methodAmounts[method] = (methodAmounts[method] || 0) + amount;
       methodCounts[method] = (methodCounts[method] || 0) + 1;
-      totalPayments++;
+      methodsDetected++;
     }
 
+    // Check for Check payments
     if (payment.PaymentChecks && payment.PaymentChecks.length > 0) {
-      method = "Check";
+      const method = "Check";
       const amount = payment.PaymentChecks.reduce(
         (sum, check) => sum + (check.CheckSum || 0),
         0
       );
       methodAmounts[method] = (methodAmounts[method] || 0) + amount;
       methodCounts[method] = (methodCounts[method] || 0) + 1;
-      totalPayments++;
+      methodsDetected++;
     }
+
+    // If no specific payment method was detected but DocTotal exists
+    if (methodsDetected === 0 && payment.DocTotal > 0) {
+      const method = "Other";
+      const amount = payment.DocTotal || 0;
+      methodAmounts[method] = (methodAmounts[method] || 0) + amount;
+      methodCounts[method] = (methodCounts[method] || 0) + 1;
+      methodsDetected++;
+    }
+
+    // Count the total number of payments detected
+    totalPayments += methodsDetected;
   });
 
   // Calculate percentages
@@ -493,7 +562,6 @@ const analyzePaymentMethods = (payments) => {
 
   return methods;
 };
-
 /**
  * Analyze payment patterns (early, on-time, late)
  */
