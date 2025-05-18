@@ -81,6 +81,15 @@ router.get("/", auth, updateLastLogin, customerController.getCustomers);
 // Get all customers (with filtering and permissions)
 router.get("/sap", auth, updateLastLogin, customerController.getSAPCustomers);
 
+
+
+// Route for bulk unassignment
+router.post(
+  "/bulk-unassign",
+  auth,
+  checkRole(["admin", "sales_manager"]),
+  customerController.bulkUnassignCustomers
+);
 router.get(
   "/paginated",
   auth,
@@ -88,11 +97,25 @@ router.get(
   customerController.getCustomersPaginated
 );
 
+router.post(
+  "/check-add-new",
+  upload.single("file"),
+  customerController.checkAndAddNewCustomers
+);
+
 router.get(
   "/paginated2",
   auth,
   updateLastLogin,
   customerController.getCustomersPaginated2
+);
+
+// Route to unassign a single customer
+router.post(
+  "/:id/unassign",
+  auth,
+  checkRole(["admin", "sales_manager"]),
+  customerController.unassignCustomer
 );
 
 // Get customer by ID

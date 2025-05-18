@@ -66,6 +66,133 @@ const processXLSXFile = (filePath) => {
   }
 };
 
+// Controller function for checking and adding new customers
+exports.checkAndAddNewCustomers = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "Please upload a file",
+      });
+    }
+
+    // Ensure uploads directory exists
+    const uploadsDir = path.join(process.cwd(), "uploads");
+    if (!fs.existsSync(uploadsDir)) {
+      fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+
+    console.log("File upload path:", req.file.path);
+    console.log("File exists check:", fs.existsSync(req.file.path));
+
+    // Process Excel file
+    let customersData = [];
+    try {
+      const workbook = XLSX.readFile(req.file.path);
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      const data = XLSX.utils.sheet_to_json(worksheet);
+
+      console.log(`Extracted ${data.length} rows from Excel file`);
+
+      // Map data to our customer format
+      customersData = data
+        .map((row) => {
+          return {
+            CardCode: row["BP Code"] || "",
+            CardName: row["BP Name"] || row["BP Code"],
+            Email: row["E-Mail 1"] || "",
+            phoneNumber: row["Telephone 1"] || "",
+            outstandingBalance: parseFloat(row["Account Balance"] || 0),
+            address: {
+              street: row["Bill-to Street"] || "",
+              zipCode: row["Bill-to Postcode"] || "",
+              city: row["Bill-to City"] || "",
+              country: "France",
+            },
+            status: "active",
+          };
+        })
+        .filter((customer) => customer.CardCode); // Filter out entries without CardCode
+    } catch (error) {
+      console.error("Error processing Excel file:", error);
+      throw new Error(`Failed to process Excel file: ${error.message}`);
+    }
+
+    // Get all existing CardCodes in one query for efficient comparison
+    const existingCardCodes = await Customer.distinct("CardCode");
+    const existingCardCodesSet = new Set(existingCardCodes);
+
+    // Filter out only new customers
+    const newCustomers = customersData.filter(
+      (customer) => !existingCardCodesSet.has(customer.CardCode)
+    );
+
+    console.log(
+      `Found ${newCustomers.length} new customers out of ${customersData.length} total`
+    );
+
+    // If no new customers, return early
+    if (newCustomers.length === 0) {
+      // Clean up the uploaded file
+      try {
+        if (fs.existsSync(req.file.path)) {
+          fs.unlinkSync(req.file.path);
+        }
+      } catch (unlinkError) {
+        console.error("Error deleting file after processing:", unlinkError);
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "No new customers found to add",
+        totalProcessed: customersData.length,
+        newCustomers: 0,
+      });
+    }
+
+    // Insert all new customers in one operation
+    const result = await Customer.insertMany(newCustomers);
+
+    // Clean up the uploaded file
+    try {
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error deleting file after processing:", unlinkError);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Added ${newCustomers.length} new customers`,
+      totalProcessed: customersData.length,
+      newCustomers: newCustomers.length,
+      newCustomerDetails: newCustomers.map((c) => ({
+        CardCode: c.CardCode,
+        CardName: c.CardName,
+      })),
+    });
+  } catch (error) {
+    console.error("Error in check and add new customers:", error);
+
+    // Clean up file if it exists
+    try {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error cleaning up file:", unlinkError);
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Error processing customers",
+      error: error.message,
+    });
+  }
+};
+
 // Get all customers
 exports.getCustomers = async (req, res) => {
   try {
@@ -151,6 +278,100 @@ exports.getSAPCustomers = async (req, res) => {
   } catch (error) {
     console.error("Customer fetch error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// Function to unassign a sales agent from a customer
+exports.unassignCustomer = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Check if customer exists
+    const customer = await Customer.findById(id);
+    if (!customer) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+
+    // Verify user has permission (admins and sales managers)
+    if (
+      req.user &&
+      req.user.role !== "admin" &&
+      req.user.role !== "sales_manager"
+    ) {
+      return res.status(403).json({
+        message:
+          "Unauthorized: Only admins and sales managers can unassign customers",
+      });
+    }
+
+    // Remove assignedTo field
+    customer.assignedTo = undefined;
+    await customer.save();
+
+    const updatedCustomer = await Customer.findById(id).populate(
+      "assignedTo",
+      "firstName lastName email hubspotId"
+    );
+
+    res.json({
+      message: "Customer unassigned successfully",
+      customer: updatedCustomer,
+    });
+  } catch (error) {
+    console.error("Customer unassignment error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// Function to bulk unassign customers
+exports.bulkUnassignCustomers = async (req, res) => {
+  try {
+    const { customerIds } = req.body;
+
+    // Validate input
+    if (
+      !customerIds ||
+      !Array.isArray(customerIds) ||
+      customerIds.length === 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a valid array of customer IDs",
+      });
+    }
+
+    // Verify user has permission (admins and sales managers)
+    if (
+      req.user &&
+      req.user.role !== "admin" &&
+      req.user.role !== "sales_manager"
+    ) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Unauthorized: Only admins and sales managers can unassign customers",
+      });
+    }
+
+    // Perform bulk update
+    const result = await Customer.updateMany(
+      { _id: { $in: customerIds } },
+      { $unset: { assignedTo: "" } }
+    );
+
+    res.json({
+      success: true,
+      message: "Customers unassigned successfully",
+      count: result.modifiedCount,
+      totalRequested: customerIds.length,
+    });
+  } catch (error) {
+    console.error("Bulk customer unassignment error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    });
   }
 };
 
