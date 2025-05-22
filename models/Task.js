@@ -15,7 +15,6 @@ const TaskSchema = new Schema({
   leadId: {
     type: Schema.Types.ObjectId,
     ref: "Lead",
-    required: true,
   },
   status: {
     type: String,
@@ -29,7 +28,7 @@ const TaskSchema = new Schema({
   },
   type: {
     type: String,
-    enum: ["follow-up", "call", "email", "meeting", "other"],
+    enum: ["follow-up", "call", "email", "meeting", "other", "approval"],
     default: "follow-up",
   },
   dueDate: {
@@ -60,6 +59,18 @@ const TaskSchema = new Schema({
   updatedAt: {
     type: Date,
     default: Date.now,
+  },
+  attachment: {
+    fileName: String,
+    fileSize: Number,
+    fileType: String,
+    s3Key: String,
+    s3Url: String,
+    uploadedAt: Date,
+  },
+  relatedQuotation: {
+    type: Number, // This should match the DocEntry type in your Quotation model
+    ref: "Quotation",
   },
 });
 

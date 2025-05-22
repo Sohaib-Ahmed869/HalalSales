@@ -2,6 +2,16 @@
 const Task = require("../models/Task");
 const Lead = require("../models/Lead");
 const User = require("../models/User");
+const Quotation = require("../models/Quotation");
+const {
+  uploadToS3,
+  generateSignedUrl,
+  deleteFileFromS3,
+  bucketName,
+} = require("../utils/s3Upload");
+const upload = uploadToS3.single("attachment");
+const util = require("util");
+const uploadAsync = util.promisify(upload);
 
 /**
  * Get all tasks with filtering options
@@ -107,28 +117,47 @@ exports.getTaskById = async (req, res) => {
  */
 exports.createTask = async (req, res) => {
   try {
+    // Process file upload if present
+    let attachment = null;
+
+    if (req.file) {
+      attachment = {
+        fileName: req.file.originalname,
+        fileSize: req.file.size,
+        fileType: req.file.mimetype,
+        s3Key: req.file.key,
+        s3Url: req.file.location,
+        uploadedAt: new Date(),
+      };
+    }
+
     const { leadId, title, description, dueDate, priority, type } = req.body;
 
+    console.log("Creating task with data:", req.body);
+
     // Validate required fields
-    if (!title || !dueDate || !leadId) {
+    if (!title || !dueDate) {
       return res.status(400).json({
         success: false,
-        message: "Title, due date, and lead ID are required",
+        message: "Title and due date are required",
       });
     }
 
-    // Check if lead exists
-    const lead = await Lead.findById(leadId);
-    if (!lead) {
-      return res.status(404).json({
-        success: false,
-        message: "Lead not found",
-      });
+    // Only check if lead exists if leadId is provided
+    if (leadId) {
+      // Check if lead exists
+      const lead = await Lead.findById(leadId);
+      if (!lead) {
+        return res.status(404).json({
+          success: false,
+          message: "Lead not found",
+        });
+      }
     }
 
     // Create new task
     const task = new Task({
-      leadId,
+      leadId: leadId ? leadId : null,
       title,
       description,
       dueDate,
@@ -137,15 +166,18 @@ exports.createTask = async (req, res) => {
       status: "pending",
       assignedTo: req.body.assignedTo || req.user._id,
       createdBy: req.user._id,
+      attachment: attachment, // Add the attachment if it exists
     });
 
     await task.save();
 
-    // Add task to lead's tasks array
-    await Lead.findByIdAndUpdate(leadId, {
-      $push: { tasks: task._id },
-      $set: { nextFollowUp: dueDate },
-    });
+    // Add task to lead's tasks array if leadId is provided
+    if (leadId) {
+      await Lead.findByIdAndUpdate(leadId, {
+        $push: { tasks: task._id },
+        $set: { nextFollowUp: dueDate },
+      });
+    }
 
     // Return the created task with populated fields
     const createdTask = await Task.findById(task._id)
@@ -186,19 +218,57 @@ exports.updateTask = async (req, res) => {
       });
     }
 
-    // Check permissions - creator can update most fields
+    // Check permissions - different role-based access control
     const isCreator = task.createdBy.toString() === req.user._id.toString();
     const isAssignee = task.assignedTo.toString() === req.user._id.toString();
+    const isAdmin = req.user.role === "admin";
+    const isManager = req.user.role === "sales_manager";
 
-    if (!isCreator && !isAssignee && req.user.role !== "admin") {
-      return res.status(403).json({
-        success: false,
-        message: "You do not have permission to update this task",
-      });
+    // Admins and managers have full edit access
+    if (isAdmin || isManager) {
+      // Allow all updates from admins/managers
+
+      // If task is being reassigned, add a note to the comments
+      if (
+        updateFields.assignedTo &&
+        updateFields.assignedTo !== task.assignedTo.toString()
+      ) {
+        const assignedToUser = await User.findById(updateFields.assignedTo);
+        const assigneeNote = `${req.user.firstName} ${req.user.lastName} reassigned this task to ${assignedToUser.firstName} ${assignedToUser.lastName}.`;
+        updateFields.comments = task.comments
+          ? `${task.comments}\n\n${assigneeNote}`
+          : assigneeNote;
+      }
+
+      // If dueDate is being changed, add a note to the comments
+      if (
+        updateFields.dueDate &&
+        updateFields.dueDate !== task.dueDate.toISOString().split("T")[0]
+      ) {
+        const dateNote = `${req.user.firstName} ${
+          req.user.lastName
+        } changed the due date from ${
+          task.dueDate.toISOString().split("T")[0]
+        } to ${updateFields.dueDate}.`;
+        updateFields.comments = updateFields.comments
+          ? `${updateFields.comments}\n\n${dateNote}`
+          : task.comments
+          ? `${task.comments}\n\n${dateNote}`
+          : dateNote;
+      }
     }
-
+    // Creator can update most fields
+    else if (isCreator) {
+      // Creators can update basic fields but not status if pending_approval
+      if (task.status === "pending_approval" && updateFields.status) {
+        return res.status(403).json({
+          success: false,
+          message: "Cannot update status of task pending approval",
+        });
+      }
+    }
     // Assignee can only update status to "pending_approval" and add comments
-    if (isAssignee && !isCreator && req.user.role !== "admin") {
+    else if (isAssignee) {
       const allowedFields = ["status", "comments"];
       const requestedFields = Object.keys(updateFields);
 
@@ -221,6 +291,47 @@ exports.updateTask = async (req, res) => {
         });
       }
     }
+    // None of the above roles - no permission
+    else {
+      return res.status(403).json({
+        success: false,
+        message: "You do not have permission to update this task",
+      });
+    }
+
+    // Add activity log entry for the update
+    if (!updateFields.activityLog) {
+      updateFields.activityLog = task.activityLog || [];
+    }
+
+    // Capture what changed in the activity
+    const changes = [];
+    if (
+      updateFields.assignedTo &&
+      updateFields.assignedTo !== task.assignedTo.toString()
+    ) {
+      changes.push("reassigned");
+    }
+    if (
+      updateFields.dueDate &&
+      updateFields.dueDate !== task.dueDate.toISOString().split("T")[0]
+    ) {
+      changes.push("due date changed");
+    }
+    if (updateFields.priority && updateFields.priority !== task.priority) {
+      changes.push("priority changed");
+    }
+
+    const activityDescription = changes.length
+      ? `Updated task: ${changes.join(", ")}`
+      : "Updated task";
+
+    updateFields.activityLog.push({
+      user: req.user._id,
+      type: "update",
+      description: activityDescription,
+      timestamp: new Date(),
+    });
 
     // Update task
     const updatedTask = await Task.findByIdAndUpdate(
@@ -416,8 +527,7 @@ exports.getAgentTasks = async (req, res) => {
       error: error.message,
     });
   }
-}
-
+};
 
 /**
  * Get assigned tasks for the current user
@@ -599,6 +709,288 @@ exports.requestApproval = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error requesting task approval",
+      error: error.message,
+    });
+  }
+};
+
+// Upload task attachment
+exports.uploadAttachment = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Find task
+    const task = await Task.findById(id);
+    if (!task) {
+      return res.status(404).json({
+        success: false,
+        message: "Task not found",
+      });
+    }
+
+    // Check permissions
+    const isCreator = task.createdBy.toString() === req.user._id.toString();
+    const isAssignee = task.assignedTo.toString() === req.user._id.toString();
+
+    if (!isCreator && !isAssignee && req.user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "You do not have permission to add attachments to this task",
+      });
+    }
+
+    // Handle file upload
+    await uploadAsync(req, res);
+
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "No file uploaded",
+      });
+    }
+
+    // Update task with attachment details
+    const attachment = {
+      fileName: req.file.originalname,
+      fileSize: req.file.size,
+      fileType: req.file.mimetype,
+      s3Key: req.file.key,
+      s3Url: req.file.location, // S3 URL from multer-s3
+      uploadedAt: new Date(),
+    };
+
+    const updatedTask = await Task.findByIdAndUpdate(
+      id,
+      { $set: { attachment } },
+      { new: true, runValidators: true }
+    )
+      .populate("assignedTo", "firstName lastName email role")
+      .populate("createdBy", "firstName lastName email role")
+      .populate("leadId", "fullName email company");
+
+    return res.status(200).json({
+      success: true,
+      message: "Attachment uploaded successfully",
+      data: updatedTask,
+    });
+  } catch (error) {
+    console.error(
+      `Error uploading attachment for task ${req.params.id}:`,
+      error
+    );
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Error uploading attachment",
+      error: error.message,
+    });
+  }
+};
+
+// Get a pre-signed URL for downloading an attachment
+exports.getAttachmentUrl = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Find task
+    const task = await Task.findById(id);
+    if (!task) {
+      return res.status(404).json({
+        success: false,
+        message: "Task not found",
+      });
+    }
+
+    if (!task.attachment || !task.attachment.s3Key) {
+      return res.status(404).json({
+        success: false,
+        message: "No attachment found for this task",
+      });
+    }
+
+    // Instead of generating a signed URL, return the direct S3 URL
+    return res.status(200).json({
+      success: true,
+      data: {
+        fileName: task.attachment.fileName,
+        fileType: task.attachment.fileType,
+        url: task.attachment.s3Url, // Use the stored S3 URL directly
+      },
+    });
+  } catch (error) {
+    console.error(
+      `Error getting attachment URL for task ${req.params.id}:`,
+      error
+    );
+    return res.status(500).json({
+      success: false,
+      message: "Error getting attachment URL",
+      error: error.message,
+    });
+  }
+};
+// Delete task attachment
+exports.deleteAttachment = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Find task
+    const task = await Task.findById(id);
+    if (!task) {
+      return res.status(404).json({
+        success: false,
+        message: "Task not found",
+      });
+    }
+
+    if (!task.attachment || !task.attachment.s3Key) {
+      return res.status(404).json({
+        success: false,
+        message: "No attachment found for this task",
+      });
+    }
+
+    // Check permissions
+    const isCreator = task.createdBy.toString() === req.user._id.toString();
+    const isAdmin = req.user.role === "admin";
+
+    if (!isCreator && !isAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: "Only the creator or an admin can delete attachments",
+      });
+    }
+
+    // Delete from S3
+    await deleteFileFromS3(task.attachment.s3Key);
+
+    // Update task to remove attachment
+    const updatedTask = await Task.findByIdAndUpdate(
+      id,
+      { $unset: { attachment: "" } },
+      { new: true, runValidators: true }
+    )
+      .populate("assignedTo", "firstName lastName email role")
+      .populate("createdBy", "firstName lastName email role")
+      .populate("leadId", "fullName email company");
+
+    return res.status(200).json({
+      success: true,
+      message: "Attachment deleted successfully",
+      data: updatedTask,
+    });
+  } catch (error) {
+    console.error(
+      `Error deleting attachment for task ${req.params.id}:`,
+      error
+    );
+    return res.status(500).json({
+      success: false,
+      message: "Error deleting attachment",
+      error: error.message,
+    });
+  }
+};
+
+exports.approveQuotation = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { action, comments } = req.body;
+
+    if (!action || !["approve", "reject"].includes(action)) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid action (approve or reject) is required",
+      });
+    }
+
+    // Find task
+    const task = await Task.findById(id);
+
+    if (!task) {
+      return res.status(404).json({
+        success: false,
+        message: "Task not found",
+      });
+    }
+
+    // Check that this is a quotation approval task
+    if (!task.relatedQuotation) {
+      return res.status(400).json({
+        success: false,
+        message: "This is not a quotation approval task",
+      });
+    }
+
+    // Check permissions - only admin can approve/reject
+    if (req.user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Only admins can approve or reject quotations",
+      });
+    }
+
+    // Find the related quotation
+    const quotation = await Quotation.findOne({
+      DocEntry: task.relatedQuotation,
+    });
+
+    if (!quotation) {
+      return res.status(404).json({
+        success: false,
+        message: "Related quotation not found",
+      });
+    }
+
+    // Update task status and add comments
+    const newStatus = action === "approve" ? "completed" : "rejected";
+    const newComments = comments
+      ? `${task.comments ? task.comments + "\n\n" : ""}${req.user.firstName} ${
+          req.user.lastName
+        } (${action}): ${comments}`
+      : task.comments;
+
+    // Set completion date if approved
+    const updateFields = {
+      status: newStatus,
+      comments: newComments,
+    };
+
+    if (action === "approve") {
+      updateFields.completedDate = new Date();
+    }
+
+    // Update task
+    const updatedTask = await Task.findByIdAndUpdate(
+      id,
+      { $set: updateFields },
+      { new: true, runValidators: true }
+    )
+      .populate("assignedTo", "firstName lastName email role")
+      .populate("createdBy", "firstName lastName email role");
+
+    // Update quotation approval status
+    quotation.approvalStatus = action === "approve" ? "approved" : "rejected";
+    await quotation.save();
+
+    res.json({
+      success: true,
+      message: `Quotation ${
+        action === "approve" ? "approved" : "rejected"
+      } successfully`,
+      data: updatedTask,
+      quotation: {
+        DocEntry: quotation.DocEntry,
+        approvalStatus: quotation.approvalStatus,
+      },
+    });
+  } catch (error) {
+    console.error(
+      `Error approving/rejecting quotation task ${req.params.id}:`,
+      error
+    );
+    res.status(500).json({
+      success: false,
+      message: "Error processing quotation approval",
       error: error.message,
     });
   }

@@ -63,11 +63,14 @@ function mapHubSpotDealToModel(hubspotDeal) {
   // Check deal stage to determine if it's closed (won or lost)
   const dealStage = properties.dealstage || "";
   const isClosed =
-    dealStage.includes("closed") ||
-    dealStage.includes("won") ||
-    dealStage.includes("lost");
-  const isClosedWon = dealStage.includes("won");
-  const isClosedLost = dealStage.includes("lost");
+    dealStage.toLowerCase().includes("closed") ||
+    dealStage.toLowerCase().includes("won") ||
+    dealStage.toLowerCase().includes("lost") ||
+    dealStage.toLowerCase().includes("processed");
+  const isClosedWon =
+    dealStage.toLowerCase().includes("won") ||
+    dealStage.toLowerCase().includes("processed");
+  const isClosedLost = dealStage.toLowerCase().includes("lost");
 
   // Extract contact information
   const contactInfo = {
@@ -76,50 +79,55 @@ function mapHubSpotDealToModel(hubspotDeal) {
     email: properties.email || "",
   };
 
-  // Map products if available (this would need enhancing based on HubSpot's product association structure)
+  // Map products if available (placeholder for now)
   const products = [];
-  // This is a placeholder - you might need to fetch product associations separately
-  // or parse them from a custom HubSpot property
 
-  // Map HubSpot deal to your model
+  // Safely parse numeric values
+  const safeParseFloat = (value) => {
+    if (!value) return 0;
+    const parsed = Number(value);
+    return isNaN(parsed) ? 0 : parsed;
+  };
+
+  // Map HubSpot deal to your model with correct date parsing
   return {
     recordId: hubspotDeal.id,
     abandonedCartUrl: properties.abandoned_cart_url || "",
     billingAddress: extractAddressFromProperties(properties, "billing"),
     shippingAddress: extractAddressFromProperties(properties, "shipping"),
-    amount: parseFloat(properties.amount) || 0,
-    amountInCompanyCurrency:
-      parseFloat(properties.amount_in_company_currency) || 0,
+    amount: safeParseFloat(properties.amount),
+    amountInCompanyCurrency: safeParseFloat(
+      properties.amount_in_company_currency
+    ),
     currency: properties.currency || "EUR",
-    createDate: properties.createdate
-      ? new Date(parseInt(properties.createdate))
-      : null,
-    closeDate: properties.closedate
-      ? new Date(parseInt(properties.closedate))
-      : null,
+    createDate:
+      parseHubSpotDate(properties.createdate) ||
+      parseHubSpotDate(hubspotDeal.createdAt),
+    closeDate: parseHubSpotDate(properties.closedate),
     dealName: properties.dealname || "",
     dealOwner: properties.hubspot_owner_name || "",
-    dealProbability: parseFloat(properties.hs_probability) || 0,
+    dealProbability: safeParseFloat(properties.hs_probability),
     dealStage: dealStage,
     dealType: properties.dealtype || "",
     orderNumber: properties.order_number || "",
     products: products,
-    isPaid: properties.is_paid === "true" || false,
+    isPaid: properties.is_paid === "true" || properties.is_paid === true,
     isClosedWon: isClosedWon,
     isClosedLost: isClosedLost,
     isClosed: isClosed,
     pipeline: properties.pipeline || "Ecommerce Pipeline",
-    totalProductsWithTaxes:
-      parseFloat(properties.total_products_with_taxes) || 0,
-    totalExcludingTaxes: parseFloat(properties.total_excluding_taxes) || 0,
-    totalIncludingTaxes: parseFloat(properties.total_including_taxes) || 0,
-    taxPrice: parseFloat(properties.tax_price) || 0,
+    totalProductsWithTaxes: safeParseFloat(
+      properties.total_products_with_taxes
+    ),
+    totalExcludingTaxes: safeParseFloat(properties.total_excluding_taxes),
+    totalIncludingTaxes: safeParseFloat(properties.total_including_taxes),
+    taxPrice: safeParseFloat(properties.tax_price),
     paymentMethod: properties.payment_method || "",
     customerName: properties.customer_name || "",
     customerEmail: properties.customer_email || "",
-    lastModifiedDate: properties.hs_lastmodifieddate
-      ? new Date(parseInt(properties.hs_lastmodifieddate))
-      : null,
+    lastModifiedDate:
+      parseHubSpotDate(properties.hs_lastmodifieddate) ||
+      parseHubSpotDate(hubspotDeal.updatedAt),
     contactInfo: contactInfo,
     source: properties.source || "",
     sourceDetail: properties.source_detail || "",
@@ -152,12 +160,12 @@ async function fetchHubSpotDeals(startDate, endDate) {
         {
           propertyName: "hs_lastmodifieddate",
           operator: "GTE",
-          value: new Date(startDate).getTime().toString(),
+          value: formattedStartDate,
         },
         {
           propertyName: "hs_lastmodifieddate",
           operator: "LTE",
-          value: new Date(endDate).getTime().toString(),
+          value: formattedEndDate,
         },
       ],
     },
@@ -265,6 +273,14 @@ async function fetchHubSpotDeals(startDate, endDate) {
         "Error fetching HubSpot deals:",
         error.response?.data || error.message
       );
+
+      // If it's a rate limiting error, wait longer and retry
+      if (error.response?.status === 429) {
+        console.log("Rate limited, waiting 60 seconds before retry...");
+        await new Promise((resolve) => setTimeout(resolve, 60000));
+        continue;
+      }
+
       hasMore = false;
     }
   }
@@ -328,13 +344,28 @@ async function fetchAndSaveYesterdayDeals() {
       try {
         const dealData = mapHubSpotDealToModel(hubspotDeal);
 
+        // Validate required fields
+        if (!dealData.recordId) {
+          console.error(`Deal missing recordId, skipping:`, hubspotDeal.id);
+          errorCount++;
+          continue;
+        }
+
         // Use findOneAndUpdate with upsert to avoid duplicates
-        await Deal.findOneAndUpdate({ recordId: dealData.recordId }, dealData, {
-          upsert: true,
-          new: true,
-        });
+        const result = await Deal.findOneAndUpdate(
+          { recordId: dealData.recordId },
+          dealData,
+          {
+            upsert: true,
+            new: true,
+            runValidators: true,
+          }
+        );
 
         savedCount++;
+        console.log(
+          `Saved/Updated deal: ${dealData.recordId} - ${dealData.dealName}`
+        );
       } catch (error) {
         console.error(`Error saving deal ${hubspotDeal.id}:`, error.message);
         errorCount++;
@@ -413,21 +444,308 @@ async function syncDateRange(startDate, endDate = new Date()) {
 }
 
 /**
- * Function to fetch data from February 21, 2025 to today
- * This can be called manually as needed
+ * Helper function to safely parse HubSpot dates
+ * HubSpot can return dates in different formats
+ */
+function parseHubSpotDate(dateValue) {
+  if (!dateValue) return null;
+
+  try {
+    // HubSpot returns ISO format dates like "2018-01-04T19:47:53Z"
+    const date = new Date(dateValue);
+    return isNaN(date.getTime()) ? null : date;
+  } catch (error) {
+    console.error(`Error parsing date: ${dateValue}`, error);
+    return null;
+  }
+}
+
+/**
+ * Maps HubSpot API response to your existing Deal model format with fixed date parsing
+ * @param {Object} hubspotDeal - Deal data from HubSpot API
+ * @returns {Object} Formatted deal data for MongoDB using your schema
+ */
+function mapHubSpotDealToModelFixed(hubspotDeal) {
+  // Extract all properties
+  const properties = hubspotDeal.properties || {};
+
+  // Check deal stage to determine if it's closed (won or lost)
+  const dealStage = properties.dealstage || "";
+  const isClosed =
+    dealStage.includes("closed") ||
+    dealStage.includes("won") ||
+    dealStage.includes("lost");
+  const isClosedWon = dealStage.includes("won");
+  const isClosedLost = dealStage.includes("lost");
+
+  // Extract contact information
+  const contactInfo = {
+    phone: properties.phone || "",
+    mobilePhone: properties.mobilephone || "",
+    email: properties.email || "",
+  };
+
+  // Map products if available
+  const products = [];
+
+  // Map HubSpot deal to your model with fixed date parsing
+  return {
+    recordId: hubspotDeal.id,
+    abandonedCartUrl: properties.abandoned_cart_url || "",
+    billingAddress: extractAddressFromProperties(properties, "billing"),
+    shippingAddress: extractAddressFromProperties(properties, "shipping"),
+    amount: parseFloat(properties.amount) || 0,
+    amountInCompanyCurrency:
+      parseFloat(properties.amount_in_company_currency) || 0,
+    currency: properties.currency || "EUR",
+    createDate: parseHubSpotDate(properties.createdate),
+    closeDate: parseHubSpotDate(properties.closedate),
+    dealName: properties.dealname || "",
+    dealOwner: properties.hubspot_owner_name || "",
+    dealProbability: parseFloat(properties.hs_probability) || 0,
+    dealStage: dealStage,
+    dealType: properties.dealtype || "",
+    orderNumber: properties.order_number || "",
+    products: products,
+    isPaid: properties.is_paid === "true" || false,
+    isClosedWon: isClosedWon,
+    isClosedLost: isClosedLost,
+    isClosed: isClosed,
+    pipeline: properties.pipeline || "Ecommerce Pipeline",
+    totalProductsWithTaxes:
+      parseFloat(properties.total_products_with_taxes) || 0,
+    totalExcludingTaxes: parseFloat(properties.total_excluding_taxes) || 0,
+    totalIncludingTaxes: parseFloat(properties.total_including_taxes) || 0,
+    taxPrice: parseFloat(properties.tax_price) || 0,
+    paymentMethod: properties.payment_method || "",
+    customerName: properties.customer_name || "",
+    customerEmail: properties.customer_email || "",
+    lastModifiedDate: parseHubSpotDate(properties.hs_lastmodifieddate),
+    contactInfo: contactInfo,
+    source: properties.source || "",
+    sourceDetail: properties.source_detail || "",
+  };
+}
+
+/**
+ * Function to fetch data from February 21, 2025 to end of March 2025
+ * Processes and saves deals in real-time batches of 100
  */
 async function syncFromFeb21() {
   // Set start date to February 21, 2025
-  const startDate = new Date(2025, 1, 21); // Month is 0-indexed, so 1 = February
+  const startDate = new Date(2025, 3, 1); // April 1st, 2025 (month is 0-indexed)
   startDate.setHours(0, 0, 0, 0);
 
   // End date is end of march
-  const endDate = new Date(2025, 2, 31); // Month is 0-indexed, so 2 = March
+  const endDate = new Date(2025, 4, 23); // May 23rd, 2025
   endDate.setHours(23, 59, 59, 999);
 
-  return syncDateRange(startDate, endDate);
-}
+  console.log(
+    `Running HubSpot sync from Feb 21 to March 31, 2025 with real-time batch processing`
+  );
 
+  const formattedStartDate = formatDateForHubSpot(startDate);
+  const formattedEndDate = formatDateForHubSpot(endDate);
+
+  console.log(
+    `Fetching HubSpot deals from ${formattedStartDate} to ${formattedEndDate}`
+  );
+
+  let totalSavedCount = 0;
+  let totalErrorCount = 0;
+  let totalDealsProcessed = 0;
+  let hasMore = true;
+  let after = undefined;
+  const limit = 100; // Maximum allowed by API
+
+  // Filter deals that were updated in the given date range
+  const filterGroups = [
+    {
+      filters: [
+        {
+          propertyName: "hs_lastmodifieddate",
+          operator: "GTE",
+          value: formattedStartDate,
+        },
+        {
+          propertyName: "hs_lastmodifieddate",
+          operator: "LTE",
+          value: formattedEndDate,
+        },
+      ],
+    },
+  ];
+
+  try {
+    // Paginate through all results and process each batch immediately
+    while (hasMore) {
+      try {
+        console.log(
+          `Fetching batch starting at cursor: ${after || "beginning"}`
+        );
+
+        const response = await axios({
+          method: "POST",
+          url: `${HUBSPOT_API_URL}/search`,
+          headers: {
+            Authorization: `Bearer ${HUBSPOT_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          data: {
+            filterGroups: filterGroups,
+            sorts: [
+              {
+                propertyName: "hs_lastmodifieddate",
+                direction: "DESCENDING",
+              },
+            ],
+            properties: [
+              // Deal basic information
+              "dealname",
+              "amount",
+              "closedate",
+              "createdate",
+              "hs_lastmodifieddate",
+              "pipeline",
+              "dealstage",
+              "hs_probability",
+              "dealtype",
+              "hubspot_owner_id",
+              "hubspot_owner_name",
+
+              // Currency and pricing fields
+              "currency",
+              "amount_in_company_currency",
+              "total_products_with_taxes",
+              "total_excluding_taxes",
+              "total_including_taxes",
+              "tax_price",
+
+              // E-commerce specific fields
+              "order_number",
+              "abandoned_cart_url",
+              "is_paid",
+              "payment_method",
+
+              // Customer information
+              "customer_name",
+              "customer_email",
+
+              // Billing address fields
+              "billing_address_line1",
+              "billing_address_line2",
+              "billing_city",
+              "billing_state",
+              "billing_postal_code",
+              "billing_country",
+              "billing_phone",
+
+              // Shipping address fields
+              "shipping_address_line1",
+              "shipping_address_line2",
+              "shipping_city",
+              "shipping_state",
+              "shipping_postal_code",
+              "shipping_country",
+              "shipping_phone",
+
+              // Source information
+              "source",
+              "source_detail",
+
+              // Contact info
+              "phone",
+              "mobilephone",
+              "email",
+            ],
+            limit: limit,
+            after: after,
+          },
+        });
+
+        const deals = response.data?.results || [];
+        console.log(`Retrieved ${deals.length} deals in this batch`);
+
+        // Process and save this batch immediately
+        let batchSavedCount = 0;
+        let batchErrorCount = 0;
+
+        for (const hubspotDeal of deals) {
+          try {
+            const dealData = mapHubSpotDealToModel(hubspotDeal);
+
+            // Validate required fields
+            if (!dealData.recordId) {
+              console.error(`Deal missing recordId, skipping:`, hubspotDeal.id);
+              batchErrorCount++;
+              totalErrorCount++;
+              continue;
+            }
+
+            // Use findOneAndUpdate with upsert to avoid duplicates
+            await Deal.findOneAndUpdate(
+              { recordId: dealData.recordId },
+              dealData,
+              {
+                upsert: true,
+                new: true,
+                runValidators: true,
+              }
+            );
+
+            batchSavedCount++;
+            totalSavedCount++;
+          } catch (error) {
+            console.error(
+              `Error saving deal ${hubspotDeal.id}:`,
+              error.message
+            );
+            batchErrorCount++;
+            totalErrorCount++;
+          }
+        }
+
+        totalDealsProcessed += deals.length;
+
+        console.log(
+          `Batch processed - Saved: ${batchSavedCount}, Errors: ${batchErrorCount}, Total processed so far: ${totalDealsProcessed}`
+        );
+
+        // Check if we have more results
+        after = response.data?.paging?.next?.after;
+        hasMore = !!after;
+
+        // Add a small delay to avoid rate limiting
+        if (hasMore) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      } catch (error) {
+        console.error(
+          "Error fetching HubSpot deals batch:",
+          error.response?.data || error.message
+        );
+        hasMore = false;
+      }
+    }
+
+    console.log(
+      `HubSpot Feb 21 - March 31 sync completed. Total Saved: ${totalSavedCount}, Total Errors: ${totalErrorCount}, Total Processed: ${totalDealsProcessed}`
+    );
+
+    return {
+      savedCount: totalSavedCount,
+      errorCount: totalErrorCount,
+      totalDeals: totalDealsProcessed,
+      dateRange: {
+        start: startDate.toISOString(),
+        end: endDate.toISOString(),
+      },
+    };
+  } catch (error) {
+    console.error("Error in syncFromFeb21:", error);
+    throw error;
+  }
+}
 // Schedule the task to run daily at 1:00 AM
 cron.schedule("0 1 * * *", async () => {
   console.log("Running scheduled HubSpot deal fetch task");

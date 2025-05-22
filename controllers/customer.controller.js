@@ -2285,7 +2285,7 @@ exports.updateCustomerOutstandingBalance = async (req, res) => {
     let balanceData = [];
     const fileExt = path.extname(req.file.originalname).toLowerCase();
 
-    // Process file based on extension
+    // Process file based on extension (same as before)
     if (fileExt === ".xlsx" || fileExt === ".xls") {
       // Process Excel file
       try {
@@ -2296,7 +2296,6 @@ exports.updateCustomerOutstandingBalance = async (req, res) => {
 
         console.log(`Extracted ${data.length} rows from Excel file`);
 
-        // Map data to our balance format
         balanceData = data.map((row) => {
           return {
             CardCode: row["BP Code"] || row["CardCode"] || "",
@@ -2346,12 +2345,10 @@ exports.updateCustomerOutstandingBalance = async (req, res) => {
 
         console.log(`Processing ${lines.length} lines from text file`);
 
-        // Process each line (skip header if present)
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i].trim();
           if (!line) continue;
 
-          // Skip header row if it contains column titles
           if (
             line.includes("BP Code") &&
             line.includes("BP Name") &&
@@ -2360,8 +2357,6 @@ exports.updateCustomerOutstandingBalance = async (req, res) => {
             continue;
           }
 
-          // Match text format: index BP_Code BP_Name Balance
-          // This regex captures the line structure with flexible spacing
           const match = line.match(
             /^\s*(\d+)\s+(C\d+)\s+(.+?)\s+(-?\d+(\.\d+)?)\s*$/
           );
@@ -2374,7 +2369,6 @@ exports.updateCustomerOutstandingBalance = async (req, res) => {
               outstandingBalance: parseFloat(balance),
             });
           } else {
-            // Try alternative format without index at the beginning
             const altMatch = line.match(
               /^(C\d+)\s+(.+?)\s+(-?\d+(\.\d+)?)\s*$/
             );
@@ -2416,7 +2410,7 @@ exports.updateCustomerOutstandingBalance = async (req, res) => {
       `Prepared ${cleanedBalanceData.length} balance records for update`
     );
 
-    // Update database
+    // OPTIMIZED BATCH UPDATE SECTION
     const updateResults = {
       total: cleanedBalanceData.length,
       updated: 0,
@@ -2424,26 +2418,78 @@ exports.updateCustomerOutstandingBalance = async (req, res) => {
       errors: [],
     };
 
-    for (const item of cleanedBalanceData) {
-      try {
-        // Find customer by CardCode
-        const customer = await Customer.findOne({ CardCode: item.CardCode });
+    if (cleanedBalanceData.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No valid balance data found in the uploaded file",
+      });
+    }
 
-        if (customer) {
-          // Update balance field
-          customer.outstandingBalance = item.outstandingBalance;
-          await customer.save();
+    try {
+      // Extract all CardCodes for bulk query
+      const cardCodes = cleanedBalanceData.map((item) => item.CardCode);
+
+      // Find all existing customers in one query
+      const existingCustomers = await Customer.find({
+        CardCode: { $in: cardCodes },
+      }).select("CardCode");
+
+      const existingCardCodes = new Set(
+        existingCustomers.map((c) => c.CardCode)
+      );
+
+      // Prepare bulk operations
+      const bulkOperations = [];
+
+      for (const item of cleanedBalanceData) {
+        if (existingCardCodes.has(item.CardCode)) {
+          bulkOperations.push({
+            updateOne: {
+              filter: { CardCode: item.CardCode },
+              update: { $set: { outstandingBalance: item.outstandingBalance } },
+            },
+          });
           updateResults.updated++;
         } else {
           updateResults.notFound++;
         }
-      } catch (error) {
-        console.error(`Error updating customer ${item.CardCode}:`, error);
-        updateResults.errors.push({
-          CardCode: item.CardCode,
-          error: error.message,
-        });
       }
+
+      // Execute bulk update if we have operations
+      if (bulkOperations.length > 0) {
+        console.log(
+          `Executing bulk update for ${bulkOperations.length} customers`
+        );
+
+        const bulkResult = await Customer.bulkWrite(bulkOperations, {
+          ordered: false, // Continue even if some operations fail
+        });
+
+        console.log("Bulk update result:", {
+          matchedCount: bulkResult.matchedCount,
+          modifiedCount: bulkResult.modifiedCount,
+          upsertedCount: bulkResult.upsertedCount,
+        });
+
+        // Update our results based on actual bulk operation results
+        updateResults.updated = bulkResult.modifiedCount;
+
+        // Handle any bulk write errors
+        if (bulkResult.writeErrors && bulkResult.writeErrors.length > 0) {
+          updateResults.errors = bulkResult.writeErrors.map((err) => ({
+            CardCode: err.op?.filter?.CardCode || "Unknown",
+            error: err.errmsg,
+          }));
+        }
+      }
+
+      console.log("Update completed:", updateResults);
+    } catch (error) {
+      console.error("Bulk update error:", error);
+      updateResults.errors.push({
+        CardCode: "Bulk Operation",
+        error: error.message,
+      });
     }
 
     // Clean up the uploaded file
@@ -2479,7 +2525,6 @@ exports.updateCustomerOutstandingBalance = async (req, res) => {
     });
   }
 };
-
 exports.getCustomerCallData = async (req, res) => {
   try {
     const customerId = req.params.id;
@@ -2490,13 +2535,28 @@ exports.getCustomerCallData = async (req, res) => {
     if (!customer) {
       return res.status(404).json({ message: "Customer not found" });
     }
-    console.log("Customer found:", customer);
 
-    // If customer doesn't have a phone number, return empty data
-    if (!customer.phoneNumber) {
+    // Validate phone number - return empty if invalid
+    if (
+      !customer.phoneNumber ||
+      customer.phoneNumber === "." ||
+      customer.phoneNumber === "" ||
+      customer.phoneNumber === null ||
+      customer.phoneNumber === undefined ||
+      customer.phoneNumber.length < 6
+    ) {
+      // Minimum 6 digits for valid phone
       return res.status(200).json({
         success: true,
         data: [],
+        statistics: {
+          totalCalls: 0,
+          inboundCalls: 0,
+          outboundCalls: 0,
+          missedCalls: 0,
+          answerRate: 0,
+          avgDuration: 0,
+        },
         pagination: {
           total: 0,
           page: 1,
@@ -2506,56 +2566,62 @@ exports.getCustomerCallData = async (req, res) => {
       });
     }
 
-    console.log("Customer phone number:", customer.phoneNumber);
-
     // Get pagination parameters
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
-    //if customer phone number begins with +, remove it if it has . or space remove them
-    let phoneNumber = customer.phoneNumber.replace(/[\s.]/g, "");
-    if (phoneNumber.startsWith("+")) {
-      phoneNumber = phoneNumber.substring(1);
-    }
-    //if customer phone number begins with 0, remove it
-    if (phoneNumber.startsWith("0")) {
-      phoneNumber = phoneNumber.substring(1);
-    }
-    //if customer phone number has . or space, remove them
-    phoneNumber = phoneNumber.replace(/[\s.]/g, "");
+    // Clean the customer's phone number for exact matching
+    let customerPhone = customer.phoneNumber.replace(/[\s.-]/g, "");
 
-    console.log("Customer phone number:", phoneNumber);
-    // Build filter object based on query params and customer phone number
+    // Remove leading + if present
+    if (customerPhone.startsWith("+")) {
+      customerPhone = customerPhone.substring(1);
+    }
+
+    // Create exact match filter - NO PARTIAL MATCHING
     const filter = {
-      $or: [
-        { fromNumber: { $regex: phoneNumber, $options: "i" } },
-        { toNumber: { $regex: phoneNumber, $options: "i" } },
+      $and: [
+        // Exclude invalid phone numbers from database
+        { fromNumber: { $nin: [null, "", ".", "N/A", "Unknown"] } },
+        { toNumber: { $nin: [null, "", ".", "N/A", "Unknown"] } },
+        // EXACT phone number match only
+        {
+          $or: [
+            { fromNumber: customer.phoneNumber }, // Exact match with original format
+            { toNumber: customer.phoneNumber }, // Exact match with original format
+            { fromNumber: customerPhone }, // Exact match with cleaned format
+            { toNumber: customerPhone }, // Exact match with cleaned format
+          ],
+        },
       ],
     };
 
-    // Add date range filter if provided
+    // Add additional filters based on query params
     if (req.query.startDate && req.query.endDate) {
-      filter.startTime = {
-        $gte: new Date(req.query.startDate),
-        $lte: new Date(req.query.endDate),
-      };
+      filter.$and.push({
+        startTime: {
+          $gte: new Date(req.query.startDate),
+          $lte: new Date(req.query.endDate),
+        },
+      });
     }
 
-    // Add direction filter if provided
     if (req.query.direction && req.query.direction !== "all") {
-      filter.direction = req.query.direction;
+      filter.$and.push({ direction: req.query.direction });
     }
 
-    // Add missed calls filter if provided
     if (req.query.status === "missed") {
-      filter.missed = { $ne: "" };
+      filter.$and.push({ missed: { $ne: "" } });
     } else if (req.query.status === "answered") {
-      filter.missed = "";
+      filter.$and.push({ missed: "" });
     }
 
     // Get call data with pagination
     const callData = await CallData.find(filter)
+      .select(
+        "id callID direction fromNumber toNumber startTime inCallDuration totalDuration lastState missed userName transcript analysis qualityScore structuredAnalysis analysisTimestamp file"
+      )
       .sort({ startTime: -1 })
       .skip(skip)
       .limit(limit)

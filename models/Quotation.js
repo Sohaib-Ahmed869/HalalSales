@@ -512,6 +512,15 @@ const OrderSchema = new Schema(
     U_U_ROUTEPAYMETHOD: String,
     U_U_ROUTEORDER: String,
     U_U_ROUTEPAYAMOUNT: String,
+    approvalTask: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Task",
+    },
+    approvalStatus: {
+      type: String,
+      enum: ["pending", "approved", "rejected", "approval"],
+      default: "pending",
+    },
     emailSentTo: [
       {
         email: {

@@ -824,14 +824,38 @@ const callDataController = {
         return res.status(400).json({ error: "Missing callID parameter" });
       }
 
-      if (!audioUrl) {
-        return res.status(400).json({ error: "Missing audioUrl parameter" });
-      }
-
       // Find the call in the database
       const callData = await CallData.findOne({ callID });
       if (!callData) {
         return res.status(404).json({ error: "Call not found" });
+      }
+
+      // Check if analysis already exists and is less than 30 days old
+      if (
+        callData.analysis &&
+        callData.transcript &&
+        callData.qualityScore > 0
+      ) {
+        const analysisAge = callData.analysisTimestamp
+          ? (new Date() - new Date(callData.analysisTimestamp)) /
+            (1000 * 60 * 60 * 24)
+          : 999;
+
+        if (analysisAge < 30) {
+          // Return existing analysis
+          return res.status(200).json({
+            transcript: callData.transcript,
+            analysis: callData.analysis,
+            qualityScore: callData.qualityScore,
+            structuredAnalysis: callData.structuredAnalysis || null,
+            fromCache: true,
+          });
+        }
+      }
+
+      // Continue with API call if analysis doesn't exist or is outdated
+      if (!audioUrl) {
+        return res.status(400).json({ error: "Missing audioUrl parameter" });
       }
 
       // Create axios request to the Flask API
@@ -849,37 +873,28 @@ const callDataController = {
         // Get the analysis result
         const analysisResult = response.data;
 
-        // Update the call data with analysis results
-        callData.transcript = analysisResult.transcript;
-        callData.analysis = analysisResult.analysis;
-        callData.qualityScore = analysisResult.qualityScore;
-        callData.analysisTimestamp = new Date();
+        // FIX: Properly update and save the call data
+        await CallData.findOneAndUpdate(
+          { callID: callID },
+          {
+            $set: {
+              transcript: analysisResult.transcript,
+              analysis: analysisResult.analysis,
+              qualityScore: analysisResult.qualityScore || 0,
+              analysisTimestamp: new Date(),
+              structuredAnalysis: analysisResult.structuredAnalysis || null,
+            },
+          },
+          { new: true }
+        );
 
-        if (analysisResult.structuredAnalysis) {
-          // Handle the structuredAnalysis safely, ensuring proper data types
-          // Convert arrays to strings if needed
-          const structuredAnalysis = {
-            ...analysisResult.structuredAnalysis,
-          };
-
-          // Process speaker identification data - handle arrays
-          if (structuredAnalysis.speakerIdentification) {
-            // This will accept arrays or convert them to strings as needed
-            structuredAnalysis.speakerIdentification = {
-              ...structuredAnalysis.speakerIdentification,
-              // Store arrays as-is without type conversion
-              agentLines: structuredAnalysis.speakerIdentification.agentLines,
-              clientLines: structuredAnalysis.speakerIdentification.clientLines,
-            };
-          }
-
-          callData.structuredAnalysis = structuredAnalysis;
-        }
-        // Save the updated call data
-        await callData.save();
+        console.log(`Analysis saved for call ${callID}`);
 
         // Return the analysis results to the client
-        return res.status(200).json(analysisResult);
+        return res.status(200).json({
+          ...analysisResult,
+          fromCache: false,
+        });
       } catch (apiError) {
         console.error("Error calling analysis API:", apiError.message);
 
@@ -902,9 +917,6 @@ const callDataController = {
       });
     }
   },
-
-
 };
-
 
 module.exports = callDataController;

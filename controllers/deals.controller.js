@@ -254,7 +254,14 @@ exports.getAbandonedCarts = async (req, res) => {
     const productId = req.query.productId || null;
 
     // Build query
-    const query = { orderNumber: null };
+    const query = {
+      $or: [
+        { orderNumber: null },
+        { orderNumber: "" },
+        { dealStage: "checkout_abandoned" },
+        { dealStage: "Panier Abandonn�" },
+      ],
+    };
 
     // Apply date filters
     if (startDate && endDate) {
@@ -324,7 +331,14 @@ exports.getAbandonedCartCategories = async (req, res) => {
     const daysAgo = parseInt(req.query.daysAgo) || 30;
 
     // Build the match query
-    const matchQuery = { orderNumber: null };
+    let matchQuery = {
+      $or: [
+        { orderNumber: null },
+        { orderNumber: "" },
+        { dealStage: "checkout_abandoned" },
+        { dealStage: "Panier Abandonn�" },
+      ],
+    };
 
     // Apply date filters
     if (startDate && endDate) {
@@ -411,9 +425,13 @@ exports.getProductDetails = async (req, res) => {
     const endDate = req.query.endDate ? new Date(req.query.endDate) : null;
 
     // Build match query
-    const matchQuery = {
-      orderNumber: null,
-      "products.id": productId,
+    let matchQuery = {
+      $or: [
+        { orderNumber: null },
+        { orderNumber: "" },
+        { dealStage: "checkout_abandoned" },
+        { dealStage: "Panier Abandonn�" },
+      ],
     };
 
     // Apply date filters
@@ -538,7 +556,14 @@ exports.getAbandonedCartTimeAnalytics = async (req, res) => {
     const endDate = req.query.endDate ? new Date(req.query.endDate) : null;
     const timeframe = req.query.timeframe || "daily"; // daily, weekly, monthly
 
-    let matchQuery = { orderNumber: null };
+    let matchQuery = {
+      $or: [
+        { orderNumber: null },
+        { orderNumber: "" },
+        { dealStage: "checkout_abandoned" },
+        { dealStage: "Panier Abandonn�" },
+      ],
+    };
 
     // Apply date filters
     if (startDate && endDate) {
@@ -613,12 +638,23 @@ exports.getAbandonedCartRecoveryOpportunities = async (req, res) => {
   try {
     // Build query
     const query = {
-      orderNumber: null,
-      $or: [
-        { "contactInfo.email": { $ne: null, $ne: "" } },
-        { "contactInfo.phone": { $ne: null, $ne: "" } },
-        { "contactInfo.mobilePhone": { $ne: null, $ne: "" } },
-        { customerEmail: { $ne: null, $ne: "" } },
+      $and: [
+        {
+          $or: [
+            { orderNumber: null },
+            { orderNumber: "" },
+            { dealStage: "checkout_abandoned" },
+            { dealStage: "Panier Abandonn�" },
+          ],
+        },
+        {
+          $or: [
+            { "contactInfo.email": { $ne: null, $ne: "" } },
+            { "contactInfo.phone": { $ne: null, $ne: "" } },
+            { "contactInfo.mobilePhone": { $ne: null, $ne: "" } },
+            { customerEmail: { $ne: null, $ne: "" } },
+          ],
+        },
       ],
     };
 
@@ -829,14 +865,18 @@ exports.getConversionStats = async (req, res) => {
     const completedPurchases = await Deal.countDocuments({
       ...dateFilter,
       ...categoryProductFilter,
-      orderNumber: { $ne: null },
+      orderNumber: { $ne: null, $ne: "" },
     });
-
     // Abandoned carts
     const abandonedCarts = await Deal.countDocuments({
       ...dateFilter,
       ...categoryProductFilter,
-      orderNumber: null,
+      $or: [
+        { orderNumber: null },
+        { orderNumber: "" },
+        { dealStage: "checkout_abandoned" },
+        { dealStage: "Panier Abandonn�" },
+      ],
     });
 
     // Average value of abandoned carts
@@ -845,7 +885,12 @@ exports.getConversionStats = async (req, res) => {
         $match: {
           ...dateFilter,
           ...categoryProductFilter,
-          orderNumber: null,
+          $or: [
+            { orderNumber: null },
+            { orderNumber: "" },
+            { dealStage: "checkout_abandoned" },
+            { dealStage: "Panier Abandonn�" },
+          ],
           amount: { $ne: null, $gt: 0 },
         },
       },
@@ -981,11 +1026,15 @@ exports.getAbandonedCartAnalytics = async (req, res) => {
 exports.getTopAbandonedProducts = async (req, res) => {
   try {
     // Build match query
-    const matchQuery = {
-      orderNumber: null,
+    let matchQuery = {
+      $or: [
+        { orderNumber: null },
+        { orderNumber: "" },
+        { dealStage: "checkout_abandoned" },
+        { dealStage: "Panier Abandonn�" },
+      ],
       "products.0": { $exists: true },
     };
-
     // Add date filters
     const startDate = req.query.startDate
       ? new Date(req.query.startDate)

@@ -202,19 +202,22 @@ const calculateActivityByTimePeriod = (
   // Process invoices by time period
   invoices.forEach((invoice) => {
     const key = getTimeKey(invoice.DocDate);
+    const netAmount = (invoice.DocTotal || 0) - (invoice.VatSum || 0);
 
     if (!timeframes[key]) {
       timeframes[key] = {
         period: key,
         invoiceCount: 0,
         invoiceAmount: 0,
+        invoiceAmountGross: 0, // Keep gross for reference
         paymentCount: 0,
         paymentAmount: 0,
       };
     }
 
     timeframes[key].invoiceCount++;
-    timeframes[key].invoiceAmount += invoice.DocTotal || 0;
+    timeframes[key].invoiceAmount += netAmount; // Net amount
+    timeframes[key].invoiceAmountGross += invoice.DocTotal || 0; // Gross amount
   });
 
   // Process payments by time period
@@ -344,35 +347,78 @@ exports.getCustomerJourney = async (req, res) => {
       }
     }
 
+    const paymentLinksByPayment = paymentLinks.reduce((acc, link) => {
+      if (!acc[link.paymentNumber]) {
+        acc[link.paymentNumber] = [];
+      }
+      acc[link.paymentNumber].push(link);
+      return acc;
+    }, {});
+
     // Create customer journey timeline
     const timeline = [
-      ...invoices.map((invoice) => ({
-        type: "invoice",
-        date: invoice.DocDate,
-        amount: invoice.DocTotal,
-        docNum: invoice.DocNum,
-        isPaid: invoice.PaidToDate === invoice.DocTotal,
-        partiallyPaid:
-          invoice.PaidToDate > 0 && invoice.PaidToDate < invoice.DocTotal,
-        paidAmount: invoice.PaidToDate,
-        balance: invoice.DocTotal - invoice.PaidToDate,
-        details: invoice,
-      })),
+      ...invoices.map((invoice) => {
+        const netAmount = (invoice.DocTotal || 0) - (invoice.VatSum || 0);
+        return {
+          type: "invoice",
+          date: invoice.DocDate,
+          amount: netAmount, // Use net amount instead of DocTotal
+          grossAmount: invoice.DocTotal, // Keep gross for reference
+          vatAmount: invoice.VatSum || 0,
+          docNum: invoice.DocNum,
+          isPaid: invoice.PaidToDate === invoice.DocTotal,
+          partiallyPaid:
+            invoice.PaidToDate > 0 && invoice.PaidToDate < invoice.DocTotal,
+          paidAmount: invoice.PaidToDate,
+          balance: invoice.DocTotal - invoice.PaidToDate,
+          details: invoice,
+        };
+      }),
       ...payments.map((payment) => {
         // Determine the payment method
         let paymentMethod = "Unknown";
         if (payment.CashSum > 0) paymentMethod = "Cash";
         else if (payment.TransferSum > 0) paymentMethod = "Bank Transfer";
-        else if (
-          payment.PaymentCreditCards &&
-          payment.PaymentCreditCards.length > 0
-        )
-          paymentMethod = "Credit Card";
-        else if (payment.PaymentChecks && payment.PaymentChecks.length > 0)
-          paymentMethod = "Check";
+        else if (payment.CreditSum) paymentMethod = "Credit Card";
+        else if (payment.CheckSum) paymentMethod = "Check";
 
         // Calculate payment total
         const paymentTotal = calculatePaymentTotal(payment);
+
+        // Get related invoices from PaymentLink collection
+        const linkedInvoices = paymentLinksByPayment[payment.DocNum] || [];
+
+        // Also get from payment document itself as fallback
+        const paymentInvoices =
+          payment.PaymentInvoices?.map((pi) => ({
+            invoiceNumber: pi.DocEntry,
+            amountApplied: pi.SumApplied,
+          })) || [];
+
+        // Combine both sources and deduplicate
+        const allRelatedInvoices = [
+          ...linkedInvoices.map((link) => ({
+            invoiceNumber: link.invoiceNumber,
+            amountApplied: link.paymentAmount,
+            linkSource: "PaymentLink",
+          })),
+          ...paymentInvoices.map((pi) => ({
+            invoiceNumber: pi.invoiceNumber,
+            amountApplied: pi.amountApplied,
+            linkSource: "PaymentDocument",
+          })),
+        ];
+
+        // Remove duplicates based on invoice number
+        const uniqueRelatedInvoices = allRelatedInvoices.reduce((acc, curr) => {
+          const existing = acc.find(
+            (item) => item.invoiceNumber === curr.invoiceNumber
+          );
+          if (!existing) {
+            acc.push(curr);
+          }
+          return acc;
+        }, []);
 
         return {
           type: "payment",
@@ -380,11 +426,7 @@ exports.getCustomerJourney = async (req, res) => {
           amount: paymentTotal,
           docNum: payment.DocNum,
           paymentMethod: paymentMethod,
-          relatedInvoices:
-            payment.PaymentInvoices?.map((pi) => ({
-              invoiceNumber: pi.DocEntry,
-              amountApplied: pi.SumApplied,
-            })) || [],
+          relatedInvoices: uniqueRelatedInvoices, // Now properly populated
           details: {
             ...payment,
             paymentMethod: paymentMethod,
@@ -404,8 +446,18 @@ exports.getCustomerJourney = async (req, res) => {
     const metrics = {
       totalInvoices: invoices.length,
       totalPayments: payments.length,
-      totalInvoiceAmount: invoices.reduce((sum, inv) => sum + inv.DocTotal, 0),
-      totalPaidAmount: invoices.reduce((sum, inv) => sum + inv.PaidToDate, 0),
+      totalInvoiceAmount: invoices.reduce(
+        (sum, inv) => sum + ((inv.DocTotal || 0) - (inv.VatSum || 0)),
+        0
+      ),
+      totalInvoiceAmountGross: invoices.reduce(
+        (sum, inv) => sum + (inv.DocTotal || 0),
+        0
+      ), // Keep gross for reference
+      totalPaidAmount: invoices.reduce(
+        (sum, inv) => sum + (inv.PaidToDate || 0),
+        0
+      ),
       outstandingBalance: invoices.reduce(
         (sum, inv) => sum + (inv.DocTotal - inv.PaidToDate),
         0
@@ -718,10 +770,12 @@ const identifyPurchasePatterns = (invoices) => {
   }
 
   // Calculate average order value
+  const totalNetAmount = invoices.reduce(
+    (sum, inv) => sum + ((inv.DocTotal || 0) - (inv.VatSum || 0)),
+    0
+  );
   const averageOrderValue =
-    invoices.length > 0
-      ? invoices.reduce((sum, inv) => sum + inv.DocTotal, 0) / invoices.length
-      : 0;
+    invoices.length > 0 ? totalNetAmount / invoices.length : 0;
 
   // Analyze seasonal trends by month
   const monthlyTotals = {};
@@ -1515,4 +1569,90 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
   }
 };
 
+/**
+ * Fetch invoices by revenue segment
+ * @param {Object} segmentParams - The segment parameters (min, max values)
+ * @param {Object} filters - Additional filters such as date range
+ * @returns {Promise} API response with invoices data
+ */
+exports.getInvoicesBySegment = async (req, res) => {
+  try {
+    const { minAmount, maxAmount, startDate, endDate } = req.query;
+
+    // Build the query filter
+    const filter = {};
+
+    // Add amount range filter
+    if (minAmount !== undefined && maxAmount !== undefined) {
+      filter.DocTotal = {
+        $gte: parseFloat(minAmount),
+        $lte:
+          parseFloat(maxAmount) === Infinity
+            ? Number.MAX_VALUE
+            : parseFloat(maxAmount),
+      };
+    } else if (minAmount !== undefined) {
+      filter.DocTotal = { $gte: parseFloat(minAmount) };
+    } else if (maxAmount !== undefined && parseFloat(maxAmount) !== Infinity) {
+      filter.DocTotal = { $lte: parseFloat(maxAmount) };
+    }
+
+    // Add date range filter if provided
+    if (startDate && endDate) {
+      filter.DocDate = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate),
+      };
+    } else if (startDate) {
+      filter.DocDate = { $gte: new Date(startDate) };
+    } else if (endDate) {
+      filter.DocDate = { $lte: new Date(endDate) };
+    }
+
+    // Fetch the invoices with pagination
+    const invoices = await Invoice.find(filter)
+      .sort({ DocDate: -1 })
+      .limit(100) // Limit results to prevent overwhelming response
+      .lean();
+
+    // Calculate totals for the fetched invoices
+    const totalAmount = invoices.reduce(
+      (sum, invoice) => sum + (invoice.DocTotal || 0),
+      0
+    );
+    const totalPaid = invoices.reduce(
+      (sum, invoice) => sum + (invoice.PaidToDate || 0),
+      0
+    );
+
+    // Add payment status to each invoice
+    const enrichedInvoices = invoices.map((invoice) => ({
+      ...invoice,
+      paid: invoice.PaidToDate === invoice.DocTotal,
+      partiallyPaid:
+        invoice.PaidToDate > 0 && invoice.PaidToDate < invoice.DocTotal,
+      outstanding: invoice.DocTotal - invoice.PaidToDate,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        invoices: enrichedInvoices,
+        summary: {
+          count: invoices.length,
+          totalAmount,
+          totalPaid,
+          outstanding: totalAmount - totalPaid,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching invoices by segment:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch invoices by segment",
+      error: error.message,
+    });
+  }
+};
 module.exports = exports;

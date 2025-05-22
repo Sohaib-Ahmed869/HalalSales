@@ -3,6 +3,7 @@ const router = express.Router();
 const invoiceController = require("../controllers/invoices.controller");
 const { protect, authorize } = require("../middleware/auth");
 
+
 // Get invoices by customer with pagination and filtering
 router.get("/customer", invoiceController.getInvoicesByCustomer);
 

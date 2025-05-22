@@ -10,6 +10,7 @@ dotenv.config();
 // Ringover API configuration
 const RINGOVER_API_KEY = process.env.RINGOVER_API_KEY;
 const RINGOVER_API_URL = "https://public-api.ringover.com/v2/calls";
+const RINGOVER_RECORDING_API_URL = "https://public-api.ringover.com/v2/calls"; // May need to be adjusted based on actual API
 
 // Connect to MongoDB (if not already connected in your main app)
 if (!mongoose.connection.readyState) {
@@ -68,7 +69,12 @@ function mapRingoverCallToModel(call) {
     }
   }
 
-  // Based on the actual response structure you provided
+  // Handle user information
+  const userName = call.user
+    ? `${call.user.firstname} ${call.user.lastname}`
+    : "";
+  const userID = call.user ? call.user.user_id.toString() : "";
+
   return {
     id: call.cdr_id.toString(), // Ensure it's a string
     callID: call.call_id || "",
@@ -78,33 +84,84 @@ function mapRingoverCallToModel(call) {
     lastState: call.last_state || "",
     startTime: call.start_time ? new Date(call.start_time) : null,
     answeredTime: call.answered_time ? new Date(call.answered_time) : null,
-    hangupTime: call.end_time ? new Date(call.end_time) : null, // Using end_time as hangupTime
+    hangupTime: call.end_time ? new Date(call.end_time) : null,
     totalDuration: call.total_duration || 0,
-    inCallDuration: call.incall_duration || 0, // Note: incall_duration in response vs inCallDuration in model
+    inCallDuration: call.incall_duration || 0,
     queueDuration: call.queue_duration || 0,
     holdDuration: call.hold_duration || 0,
     ringingDuration: call.ringing_duration || 0,
-    afterCallDuration: call.after_call_duration || 0,
+    afterCallDuration: call.aftercall_duration || 0, // Note field name difference
     ivrDuration: call.ivr_duration || 0,
     fromNumber: call.from_number || "",
     toNumber: call.to_number || "",
-    contact: call.contact_id || "",
-    userID: call.user_id || "",
-    userName: call.user_name || "",
-    ivrID: call.ivr_id || "",
-    ivrName: call.ivr_name || "",
+    contact: call.contact ? call.contact.contact_id.toString() : "",
+    userID: userID,
+    userName: userName,
+    ivrID: call.ivr ? call.ivr.ivr_id : "",
+    ivrName: call.ivr ? call.ivr.ivr_name : "",
     scenarioName: call.scenario_name || "",
-    file: call.recording_file || "",
+    file: call.record || "", // Using record instead of recording_file
     note: call.note || "",
-    tags: tagStrings, // Use the processed tag strings
+    tags: tagStrings,
     groups: call.groups || "",
     notes: call.notes || "",
-    locations: call.location || "",
-    digitEntered: call.digit_entered || "",
+    locations: call.locations || "",
+    digitEntered: call.digits_entered || "",
     missed: call.is_answered ? "false" : "true", // Inverting is_answered for missed
     transcript: call.transcript || "",
-    // Skip analysis fields as mentioned
+    // Analysis fields are initialized with defaults and filled later by another process
   };
+}
+
+/**
+ * Fetches call recordings and updates call objects with recording URLs
+ * @param {Array} calls - Array of call data from Ringover API
+ * @returns {Promise<Array>} - Updated array of call data with recording URLs
+ */
+async function fetchCallRecordings(calls) {
+  console.log(`Checking recordings for ${calls.length} calls...`);
+  let recordingsFound = 0;
+
+  for (const call of calls) {
+    // Only check for recordings on answered calls
+    if (call.is_answered && call.incall_duration > 0) {
+      try {
+        // Try to fetch recording
+        const recordingResponse = await axios({
+          method: "GET",
+          url: `${RINGOVER_RECORDING_API_URL}/${call.cdr_id}/record`,
+          headers: {
+            Authorization: `${RINGOVER_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+        });
+
+        // Check if a recording URL is returned
+        if (
+          recordingResponse.data &&
+          (recordingResponse.data.url || recordingResponse.data.record_url)
+        ) {
+          call.record =
+            recordingResponse.data.url || recordingResponse.data.record_url;
+          recordingsFound++;
+          console.log(`Found recording for call ${call.cdr_id}`);
+        }
+      } catch (error) {
+        // If 404, the recording probably doesn't exist
+        if (error.response && error.response.status === 404) {
+          console.log(`No recording found for call ${call.cdr_id}`);
+        } else {
+          console.error(
+            `Error fetching recording for call ${call.cdr_id}:`,
+            error.response?.data || error.message
+          );
+        }
+      }
+    }
+  }
+
+  console.log(`Found ${recordingsFound} recordings for ${calls.length} calls`);
+  return calls;
 }
 
 /**
@@ -144,8 +201,19 @@ async function fetchRingoverCalls(startDate, endDate) {
         },
       });
 
-      // Use call_list instead of calls based on your response structure
+      // Use call_list instead of calls based on response structure
       const calls = response.data?.call_list || [];
+
+      // Log sample call data to debug
+      if (calls.length > 0 && offset === 0) {
+        console.log(
+          `Sample call data structure: ${JSON.stringify(
+            calls[0].record || "No record field"
+          )}`
+        );
+        console.log(`Call has recording: ${calls[0].record ? "Yes" : "No"}`);
+      }
+
       allCalls = [...allCalls, ...calls];
 
       // Check if we've received all calls based on total_call_count
@@ -172,7 +240,10 @@ async function fetchRingoverCalls(startDate, endDate) {
     }
   }
 
-  return allCalls;
+  // Try to fetch recordings for calls
+  const callsWithRecordings = await fetchCallRecordings(allCalls);
+
+  return callsWithRecordings;
 }
 
 /**
@@ -195,10 +266,16 @@ async function fetchAndSaveYesterdayCalls() {
     // Map and save each call to MongoDB
     let savedCount = 0;
     let errorCount = 0;
+    let recordingsFound = 0;
 
     for (const call of calls) {
       try {
         const callData = mapRingoverCallToModel(call);
+
+        // Track if we found a recording
+        if (callData.file) {
+          recordingsFound++;
+        }
 
         // Use findOneAndUpdate with upsert to avoid duplicates
         await CallData.findOneAndUpdate({ id: callData.id }, callData, {
@@ -214,7 +291,7 @@ async function fetchAndSaveYesterdayCalls() {
     }
 
     console.log(
-      `Ringover data sync completed. Saved: ${savedCount}, Errors: ${errorCount}`
+      `Ringover data sync completed. Saved: ${savedCount}, Errors: ${errorCount}, Recordings found: ${recordingsFound}`
     );
   } catch (error) {
     console.error("Error in fetchAndSaveYesterdayCalls:", error);
@@ -222,7 +299,6 @@ async function fetchAndSaveYesterdayCalls() {
 }
 
 // Schedule the task to run daily at 2:00 AM
-// Currently set to run every minute for testing, change to '0 2 * * *' for production
 cron.schedule("0 2 * * *", async () => {
   console.log("Running scheduled Ringover data fetch task");
   await fetchAndSaveYesterdayCalls();
@@ -246,10 +322,16 @@ async function manuallyRunSync(daysAgo = 1) {
 
   let savedCount = 0;
   let errorCount = 0;
+  let recordingsFound = 0;
 
   for (const call of calls) {
     try {
       const callData = mapRingoverCallToModel(call);
+
+      // Track recordings
+      if (callData.file) {
+        recordingsFound++;
+      }
 
       await CallData.findOneAndUpdate({ id: callData.id }, callData, {
         upsert: true,
@@ -264,9 +346,9 @@ async function manuallyRunSync(daysAgo = 1) {
   }
 
   console.log(
-    `Manual sync completed. Saved: ${savedCount}, Errors: ${errorCount}`
+    `Manual sync completed. Saved: ${savedCount}, Errors: ${errorCount}, Recordings found: ${recordingsFound}`
   );
-  return { savedCount, errorCount };
+  return { savedCount, errorCount, recordingsFound };
 }
 
 // Function to sync data for a specific date range
@@ -280,6 +362,9 @@ async function syncDateRange(startDate, endDate) {
   // The API has a 15-day limit, so we need to chunk requests
   const maxDaySpan = 15;
   let currentStart = new Date(startDate);
+  let totalSaved = 0;
+  let totalErrors = 0;
+  let totalRecordings = 0;
 
   while (currentStart < endDate) {
     // Calculate the end of this chunk (either 15 days later or the end date)
@@ -301,10 +386,17 @@ async function syncDateRange(startDate, endDate) {
 
     let savedCount = 0;
     let errorCount = 0;
+    let recordingsFound = 0;
 
     for (const call of calls) {
       try {
         const callData = mapRingoverCallToModel(call);
+
+        // Track recordings
+        if (callData.file) {
+          recordingsFound++;
+          totalRecordings++;
+        }
 
         await CallData.findOneAndUpdate({ id: callData.id }, callData, {
           upsert: true,
@@ -312,14 +404,16 @@ async function syncDateRange(startDate, endDate) {
         });
 
         savedCount++;
+        totalSaved++;
       } catch (error) {
         console.error(`Error saving call ${call.cdr_id}:`, error.message);
         errorCount++;
+        totalErrors++;
       }
     }
 
     console.log(
-      `Chunk sync completed. Saved: ${savedCount}, Errors: ${errorCount}`
+      `Chunk sync completed. Saved: ${savedCount}, Errors: ${errorCount}, Recordings found: ${recordingsFound}`
     );
 
     // Move to the next chunk
@@ -330,8 +424,12 @@ async function syncDateRange(startDate, endDate) {
   console.log(
     `Date range sync completed from ${
       startDate.toISOString().split("T")[0]
-    } to ${endDate.toISOString().split("T")[0]}`
+    } to ${
+      endDate.toISOString().split("T")[0]
+    }. Total saved: ${totalSaved}, Total errors: ${totalErrors}, Total recordings: ${totalRecordings}`
   );
+
+  return { totalSaved, totalErrors, totalRecordings };
 }
 
 // Initialize job

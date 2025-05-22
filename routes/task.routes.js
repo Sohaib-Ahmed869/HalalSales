@@ -2,10 +2,14 @@
 const express = require("express");
 const router = express.Router();
 const { auth, checkRole } = require("../middleware/auth");
+const { handleTaskAttachment } = require("../utils/taskUploadMiddleware");
+
 const taskController = require("../controllers/task.controller");
 
 // Get all tasks (filtered by role permissions)
 router.get("/", auth, taskController.getTasks);
+
+router.post('/approve-quotation/:id', auth, taskController.approveQuotation);
 
 router.get("/agent/:agentId", auth, taskController.getAgentTasks);
 
@@ -19,8 +23,7 @@ router.get("/created", auth, taskController.getCreatedTasks);
 router.get("/:id", auth, taskController.getTaskById);
 
 // Create a new task
-router.post("/", auth, taskController.createTask);
-
+router.post("/", auth, handleTaskAttachment, taskController.createTask);
 // Update a task
 router.put("/:id", auth, taskController.updateTask);
 
@@ -32,5 +35,10 @@ router.post("/:id/approve-reject", auth, taskController.approveOrRejectTask);
 
 // Delete a task
 router.delete("/:id", auth, taskController.deleteTask);
+
+// Add these new routes
+router.post("/:id/attachment", auth, taskController.uploadAttachment);
+router.get("/:id/attachment", auth, taskController.getAttachmentUrl);
+router.delete("/:id/attachment", auth, taskController.deleteAttachment);
 
 module.exports = router;

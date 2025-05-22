@@ -36,12 +36,18 @@ const ringoverJob = require("./jobs/ringoverJob");
 const desktimeJob = require("./jobs/desktimeJob");
 const {linkDocumentsToAgents} = require("./migrateAgentReferences");
 const { syncFromFeb21 } = require("./jobs/hubspotJob");
+const { fetchCallsFromMay2UntilToday } = require("./jobs/mayScript");
 // Initialize express app
 const app = express();
 
 // Schedule jobs/
 //syncFromFeb21();
+async function someFunction() {
+  const result = await fetchCallsFromMay2UntilToday();
+  console.log(`Found ${result.totalCalls} calls`);
+}
 
+// someFunction();
 // Environment variables
 const PORT = process.env.PORT || 5000;
 const MONGO_URI =

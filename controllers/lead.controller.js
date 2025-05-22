@@ -142,6 +142,7 @@ exports.getLeadById = async (req, res) => {
 /**
  * Create a new lead
  */
+// Update in createLead function
 exports.createLead = async (req, res) => {
   try {
     const {
@@ -157,6 +158,7 @@ exports.createLead = async (req, res) => {
 
     // Validate required fields
     if (!fullName) {
+      console.log('here');
       return res.status(400).json({
         success: false,
         message: "Full name is required",
@@ -191,6 +193,29 @@ exports.createLead = async (req, res) => {
       createdAt: Date.now(),
     });
 
+    await newLead.save();
+
+    console.log("New lead created:", newLead);  
+
+    // Automatically create a task for the new lead
+    const taskAssignee = assignedTo || req.user._id;
+    const newTask = new Task({
+      leadId: newLead._id,
+      title: `New lead: ${fullName} - Initial Contact`,
+      description: `A new lead (${fullName}) has been added to the system. Please review their information and make initial contact.`,
+      dueDate: new Date(Date.now() + 24 * 60 * 60 * 1000), // Due date is tomorrow
+      priority: "medium",
+      type: "follow-up",
+      status: "pending",
+      assignedTo: taskAssignee,
+      createdBy: req.user._id,
+    });
+
+    await newTask.save();
+
+    // Add task to lead's tasks array
+    newLead.tasks = [newTask._id];
+    newLead.nextFollowUp = newTask.dueDate;
     await newLead.save();
 
     // Return the created lead with populated fields

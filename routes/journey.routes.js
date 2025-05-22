@@ -4,6 +4,7 @@ const router = express.Router();
 const customerJourneyController = require("../controllers/customerjourney.controller");
 const { auth } = require("../middleware/auth");
 
+router.get('/invoices/by-segment', customerJourneyController.getInvoicesBySegment);
 /**
  * @route   GET /api/customer-journey/analytics
  * @desc    Get global customer journey analytics across all customers

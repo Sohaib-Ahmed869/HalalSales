@@ -1,6 +1,7 @@
 // controllers/quotation.controller.js
 const Quotation = require("../models/Quotation");
 const SalesOrder = require("../models/SalesOrder");
+const Task = require("../models/Task");
 const User = require("../models/User");
 const Item = require("../models/item");
 const customerTargetController = require("./customerTarget.controller");
@@ -138,6 +139,7 @@ exports.createQuotation = async (req, res) => {
     // Validate items without checking stock availability
     const itemCodes = req.body.DocumentLines.map((line) => line.ItemCode);
     const items = await Item.find({ ItemCode: { $in: itemCodes } });
+    const adminUsers = await User.find({ role: "admin" }).select("_id");
 
     // Create a map for quick lookups
     const itemMap = {};
@@ -207,8 +209,34 @@ exports.createQuotation = async (req, res) => {
       newQuotation.DocTotal = total;
     }
 
-    // Save to local database
-    await newQuotation.save();
+    if (adminUsers.length > 0) {
+      // Assign to the first admin (or you could implement round-robin assignment)
+      const adminId = adminUsers[0]._id;
+
+      // Create new task for quotation approval
+      const task = new Task({
+        title: `Approve Quotation #${newQuotation.DocNum}`,
+        description: `Review and approve quotation #${
+          newQuotation.DocNum
+        } for ${newQuotation.CardName} (${
+          newQuotation.CardCode
+        }) - Total: $${newQuotation.DocTotal.toFixed(2)}`,
+        dueDate: new Date(new Date().setDate(new Date().getDate() + 1)), // Due tomorrow
+        priority: "medium",
+        type: "approval",
+        status: "pending",
+        assignedTo: adminId,
+        createdBy: salesAgentId,
+        relatedQuotation: newQuotation.DocEntry,
+      });
+
+      await task.save();
+
+      // Link the task to the quotation
+      newQuotation.approvalTask = task._id;
+      newQuotation.approvalStatus = "pending";
+      await newQuotation.save();
+    }
 
     res.status(201).json({
       success: true,
@@ -397,6 +425,8 @@ exports.getQuotationByDocEntry = async (req, res) => {
   }
 };
 
+
+
 // Convert quotation to sales order
 exports.convertToOrder = async (req, res) => {
   try {
@@ -410,6 +440,14 @@ exports.convertToOrder = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: `Active quotation with DocEntry ${req.params.docEntry} not found`,
+      });
+    }
+
+    if (quotation.approvalStatus !== "approved") {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Quotation must be approved by an admin before conversion to order",
       });
     }
 
@@ -767,7 +805,10 @@ exports.sendQuotationByEmail = async (req, res) => {
     let pdfBuffer;
     try {
       const pdfGenerator = require("../utils/pdfGenerator");
-      pdfBuffer = await pdfGenerator.generateQuotationPDF(quotation, customerForTemplate);
+      pdfBuffer = await pdfGenerator.generateQuotationPDF(
+        quotation,
+        customerForTemplate
+      );
       // Log PDF details
       console.log(`PDF generated successfully: ${pdfBuffer.length} bytes`);
     } catch (pdfError) {
