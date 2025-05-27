@@ -27,6 +27,10 @@ const CustomerSchema = new Schema({
     type: String,
     trim: true,
   },
+  additionalPhoneNumbers: {
+    type: [String],
+    default: [],
+  },
   // External System IDs
   hubspotId: {
     type: String,

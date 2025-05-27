@@ -2529,23 +2529,23 @@ exports.getCustomerCallData = async (req, res) => {
   try {
     const customerId = req.params.id;
 
-    // First, find the customer to get their phone number
+    // First, find the customer to get their phone numbers
     const customer = await Customer.findOne({ CardCode: customerId });
 
     if (!customer) {
       return res.status(404).json({ message: "Customer not found" });
     }
 
-    // Validate phone number - return empty if invalid
-    if (
-      !customer.phoneNumber ||
-      customer.phoneNumber === "." ||
-      customer.phoneNumber === "" ||
-      customer.phoneNumber === null ||
-      customer.phoneNumber === undefined ||
-      customer.phoneNumber.length < 6
-    ) {
-      // Minimum 6 digits for valid phone
+    // Collect and clean all phone numbers
+    let phoneNumbers = [
+      customer.phoneNumber,
+      ...(customer.additionalPhoneNumbers || []),
+    ]
+      .filter((p) => p && typeof p === "string" && p.length >= 6) // Filter out invalid entries
+      .map((p) => p.replace(/[\s+.-]/g, "")); // Clean format
+
+    // If no valid numbers, return empty response
+    if (phoneNumbers.length === 0) {
       return res.status(200).json({
         success: true,
         data: [],
@@ -2571,33 +2571,21 @@ exports.getCustomerCallData = async (req, res) => {
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
-    // Clean the customer's phone number for exact matching
-    let customerPhone = customer.phoneNumber.replace(/[\s.-]/g, "");
-
-    // Remove leading + if present
-    if (customerPhone.startsWith("+")) {
-      customerPhone = customerPhone.substring(1);
-    }
-
-    // Create exact match filter - NO PARTIAL MATCHING
+    // Create exact match filter for any of the phone numbers
     const filter = {
       $and: [
-        // Exclude invalid phone numbers from database
         { fromNumber: { $nin: [null, "", ".", "N/A", "Unknown"] } },
         { toNumber: { $nin: [null, "", ".", "N/A", "Unknown"] } },
-        // EXACT phone number match only
         {
-          $or: [
-            { fromNumber: customer.phoneNumber }, // Exact match with original format
-            { toNumber: customer.phoneNumber }, // Exact match with original format
-            { fromNumber: customerPhone }, // Exact match with cleaned format
-            { toNumber: customerPhone }, // Exact match with cleaned format
-          ],
+          $or: phoneNumbers.flatMap((number) => [
+            { fromNumber: number },
+            { toNumber: number },
+          ]),
         },
       ],
     };
 
-    // Add additional filters based on query params
+    // Date range filter
     if (req.query.startDate && req.query.endDate) {
       filter.$and.push({
         startTime: {
@@ -2607,17 +2595,19 @@ exports.getCustomerCallData = async (req, res) => {
       });
     }
 
+    // Direction filter
     if (req.query.direction && req.query.direction !== "all") {
       filter.$and.push({ direction: req.query.direction });
     }
 
+    // Call status filter
     if (req.query.status === "missed") {
       filter.$and.push({ missed: { $ne: "" } });
     } else if (req.query.status === "answered") {
       filter.$and.push({ missed: "" });
     }
 
-    // Get call data with pagination
+    // Get paginated call data
     const callData = await CallData.find(filter)
       .select(
         "id callID direction fromNumber toNumber startTime inCallDuration totalDuration lastState missed userName transcript analysis qualityScore structuredAnalysis analysisTimestamp file"
@@ -2627,10 +2617,10 @@ exports.getCustomerCallData = async (req, res) => {
       .limit(limit)
       .lean();
 
-    // Count total matching documents for pagination
+    // Count total documents
     const total = await CallData.countDocuments(filter);
 
-    // Get call statistics
+    // Aggregate call statistics
     const statistics = await CallData.aggregate([
       { $match: filter },
       {
@@ -2651,21 +2641,16 @@ exports.getCustomerCallData = async (req, res) => {
       },
     ]);
 
-    // Prepare statistics response
-    const stats =
-      statistics.length > 0
-        ? statistics[0]
-        : {
-            totalCalls: 0,
-            inboundCalls: 0,
-            outboundCalls: 0,
-            missedCalls: 0,
-            totalDuration: 0,
-            avgDuration: 0,
-            totalInCallDuration: 0,
-          };
+    const stats = statistics[0] || {
+      totalCalls: 0,
+      inboundCalls: 0,
+      outboundCalls: 0,
+      missedCalls: 0,
+      totalDuration: 0,
+      avgDuration: 0,
+      totalInCallDuration: 0,
+    };
 
-    // Add answer rate calculation
     stats.answerRate =
       stats.totalCalls > 0
         ? (

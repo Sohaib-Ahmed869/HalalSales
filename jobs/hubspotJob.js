@@ -746,14 +746,14 @@ async function syncFromFeb21() {
     throw error;
   }
 }
-// Schedule the task to run daily at 1:00 AM
-cron.schedule("0 1 * * *", async () => {
-  console.log("Running scheduled HubSpot deal fetch task");
-  await fetchAndSaveYesterdayDeals();
-});
+// // Schedule the task to run daily at 1:00 AM
+// cron.schedule("0 1 * * *", async () => {
+//   console.log("Running scheduled HubSpot deal fetch task");
+//   await fetchAndSaveYesterdayDeals();
+// });
 
-// Initialize job
-console.log("HubSpot daily deal fetch scheduler initialized");
+// // Initialize job
+// console.log("HubSpot daily deal fetch scheduler initialized");
 
 module.exports = {
   fetchAndSaveYesterdayDeals,
