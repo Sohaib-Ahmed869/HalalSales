@@ -14,7 +14,11 @@ router.post(
 
 // Get all customer targets with filtering and pagination
 router.get("/", auth, customerTargetController.getAllCustomerTargets);
-
+router.get(
+  "/:targetId/achievement-details",
+  auth,
+  customerTargetController.getTargetAchievementDetails
+);
 // Get a single customer target by ID
 router.get("/:id", auth, customerTargetController.getCustomerTargetById);
 

@@ -18,8 +18,11 @@ const uploadAsync = util.promisify(upload);
  */
 exports.getTasks = async (req, res) => {
   try {
-    const { status, priority, type, leadId, assignedTo, search } = req.query;
+    const { status, priority, type, leadId, assignedTo, search, view } =
+      req.query;
     const query = {};
+
+    console.log("Role", req.user.role);
 
     // Apply filters
     if (status) query.status = status;
@@ -27,35 +30,132 @@ exports.getTasks = async (req, res) => {
     if (type) query.type = type;
     if (leadId) query.leadId = leadId;
 
-    // Role-based access control
+    const { taskType, agentFilter, startDate, endDate } = req.query;
+
+    if (taskType) {
+      if (taskType === "quotation") {
+        query.relatedQuotation = { $exists: true, $ne: null };
+      } else if (taskType === "lead") {
+        query.leadId = { $exists: true, $ne: null };
+        query.$and = query.$and || [];
+        query.$and.push({ relatedQuotation: { $exists: false } });
+      } else if (taskType === "others") {
+        query.leadId = { $exists: false };
+        query.relatedQuotation = { $exists: false };
+      }
+    }
+
+    // NEW: Add agent filter
+    if (agentFilter && req.user.role !== "sales_agent") {
+      // Only admins and sales managers can filter by specific agents
+      // Sales agents automatically see their own tasks
+      query.assignedTo = agentFilter;
+    }
+
+    // NEW: Add date range filter
+    if (startDate || endDate) {
+      query.dueDate = {};
+      if (startDate) {
+        query.dueDate.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        query.dueDate.$lte = new Date(endDate);
+      }
+    }
+
+    // Role-based access control with proper "All Tasks" view logic
     if (req.user.role === "sales_agent") {
-      // Sales agents can only see tasks assigned to them
-      query.assignedTo = req.user._id;
-    } else if (req.user.role === "sales_manager") {
-      // Sales managers can see their own tasks and tasks assigned to their team
-      if (assignedTo) {
-        query.assignedTo = assignedTo;
+      // For sales agents, "All Tasks" should show both assigned to them AND created by them
+      if (view === "all") {
+        query.$or = [
+          { assignedTo: req.user._id }, // Tasks assigned to them
+          { createdBy: req.user._id }, // Tasks created by them
+        ];
+      } else if (view === "assigned") {
+        // Only tasks assigned to them
+        query.assignedTo = req.user._id;
+      } else if (view === "created") {
+        // Only tasks created by them
+        query.createdBy = req.user._id;
       } else {
+        // Default behavior - show both (same as "all")
+        query.$or = [{ assignedTo: req.user._id }, { createdBy: req.user._id }];
+      }
+    } else if (req.user.role === "sales_manager") {
+      console.log("Assigned To", assignedTo);
+      if (assignedTo) {
+        // If specific assignedTo is requested, check if it's the manager or their agent
+        const requestedUser = await User.findById(assignedTo);
+        if (
+          requestedUser &&
+          (requestedUser._id.toString() === req.user._id.toString() ||
+            requestedUser.manager?.toString() === req.user._id.toString())
+        ) {
+          query.assignedTo = assignedTo;
+        } else {
+          // Not authorized to see this user's tasks
+          return res.status(403).json({
+            success: false,
+            message:
+              "You can only view tasks for yourself or your team members",
+          });
+        }
+      } else {
+        // Get sales agents under this manager
         const salesAgents = await User.find({
           role: "sales_agent",
           manager: req.user._id,
         }).select("_id");
 
+        console.log(salesAgents);
+
         const agentIds = salesAgents.map((agent) => agent._id);
-        agentIds.push(req.user._id); // Include the manager's own tasks
-        query.assignedTo = { $in: agentIds };
+        agentIds.push(req.user._id); // Include the manager's own ID
+
+        // IMPORTANT: Convert to ObjectIds for proper comparison
+        const agentObjectIds = agentIds.map((id) => id.toString());
+        const managerIdString = req.user._id.toString();
+
+        if (view === "all") {
+          // Show all tasks assigned to team members OR created by team members
+          query.$or = [
+            { assignedTo: { $in: agentIds } },
+            { createdBy: { $in: agentIds } },
+          ];
+        } else if (view === "assigned") {
+          // Only tasks assigned to manager or their agents
+          query.assignedTo = { $in: agentIds };
+        } else if (view === "created") {
+          // Only tasks created by manager or their agents
+          query.createdBy = { $in: agentIds };
+        } else {
+          // Default - show all team tasks
+          query.$or = [
+            { assignedTo: { $in: agentIds } },
+            { createdBy: { $in: agentIds } },
+          ];
+        }
       }
     } else if (req.user.role === "admin") {
-      // Admin can filter by assignedTo if provided
+      // Admin can filter by assignedTo if provided, otherwise see everything
       if (assignedTo) query.assignedTo = assignedTo;
+      // No additional filtering for admins - they can see all tasks
     }
 
-    // Search
+    // Search functionality
     if (search) {
-      query.$or = [
+      const searchConditions = [
         { title: { $regex: search, $options: "i" } },
         { description: { $regex: search, $options: "i" } },
       ];
+
+      // If we already have an $or condition, we need to combine it with search
+      if (query.$or) {
+        query.$and = [{ $or: query.$or }, { $or: searchConditions }];
+        delete query.$or;
+      } else {
+        query.$or = searchConditions;
+      }
     }
 
     // Get tasks
@@ -97,7 +197,36 @@ exports.getTaskById = async (req, res) => {
         message: "Task not found",
       });
     }
+    // Check permissions for non-admin users
+    if (req.user.role !== "admin") {
+      const isCreator = task.createdBy.toString() === req.user._id.toString();
+      const isAssignee = task.assignedTo.toString() === req.user._id.toString();
+      const isManager = req.user.role === "sales_manager";
 
+      let hasAccess = isCreator || isAssignee;
+
+      // For sales managers, check team access
+      if (isManager && !hasAccess) {
+        const salesAgents = await User.find({
+          role: "sales_agent",
+          manager: req.user._id,
+        }).select("_id");
+
+        const teamIds = salesAgents.map((agent) => agent._id.toString());
+        teamIds.push(req.user._id.toString());
+
+        hasAccess =
+          teamIds.includes(task.assignedTo.toString()) ||
+          teamIds.includes(task.createdBy.toString());
+      }
+
+      if (!hasAccess) {
+        return res.status(403).json({
+          success: false,
+          message: "You do not have permission to access this task",
+        });
+      }
+    }
     return res.status(200).json({
       success: true,
       data: task,
@@ -224,8 +353,24 @@ exports.updateTask = async (req, res) => {
     const isAdmin = req.user.role === "admin";
     const isManager = req.user.role === "sales_manager";
 
-    // Admins and managers have full edit access
-    if (isAdmin || isManager) {
+    let canManagerAccess = false;
+    if (isManager) {
+      // Check if task is assigned to manager or their agents, or created by them or their agents
+      const salesAgents = await User.find({
+        role: "sales_agent",
+        manager: req.user._id,
+      }).select("_id");
+
+      const teamIds = salesAgents.map((agent) => agent._id.toString());
+      teamIds.push(req.user._id.toString()); // Include manager's own ID
+
+      canManagerAccess =
+        teamIds.includes(task.assignedTo.toString()) ||
+        teamIds.includes(task.createdBy.toString());
+    }
+
+    // Admins and managers (with team access) have full edit access
+    if (isAdmin || (isManager && canManagerAccess)) {
       // Allow all updates from admins/managers
 
       // If task is being reassigned, add a note to the comments
@@ -542,6 +687,32 @@ exports.getMyTasks = async (req, res) => {
     if (priority) query.priority = priority;
     if (type) query.type = type;
 
+    // NEW: Add task type filter
+    const { taskType, startDate, endDate } = req.query;
+
+    if (taskType) {
+      if (taskType === "quotation") {
+        query.relatedQuotation = { $exists: true, $ne: null };
+      } else if (taskType === "lead") {
+        query.leadId = { $exists: true, $ne: null };
+        query.$and = query.$and || [];
+        query.$and.push({ relatedQuotation: { $exists: false } });
+      } else if (taskType === "others") {
+        query.leadId = { $exists: false };
+        query.relatedQuotation = { $exists: false };
+      }
+    }
+
+    // NEW: Add date range filter
+    if (startDate || endDate) {
+      query.dueDate = {};
+      if (startDate) {
+        query.dueDate.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        query.dueDate.$lte = new Date(endDate);
+      }
+    }
     // Get tasks
     const tasks = await Task.find(query)
       .populate("leadId", "fullName email company")
@@ -597,6 +768,32 @@ exports.getCreatedTasks = async (req, res) => {
     if (type) query.type = type;
     if (assignedTo) query.assignedTo = assignedTo;
 
+    // NEW: Add task type filter
+    const { taskType, startDate, endDate } = req.query;
+
+    if (taskType) {
+      if (taskType === "quotation") {
+        query.relatedQuotation = { $exists: true, $ne: null };
+      } else if (taskType === "lead") {
+        query.leadId = { $exists: true, $ne: null };
+        query.$and = query.$and || [];
+        query.$and.push({ relatedQuotation: { $exists: false } });
+      } else if (taskType === "others") {
+        query.leadId = { $exists: false };
+        query.relatedQuotation = { $exists: false };
+      }
+    }
+
+    // NEW: Add date range filter
+    if (startDate || endDate) {
+      query.dueDate = {};
+      if (startDate) {
+        query.dueDate.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        query.dueDate.$lte = new Date(endDate);
+      }
+    }
     // Get tasks
     const tasks = await Task.find(query)
       .populate("assignedTo", "firstName lastName email role")

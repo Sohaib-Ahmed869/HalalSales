@@ -31,8 +31,9 @@ const taskRoutes = require("./routes/task.routes");
 const QuotationRoutes = require("./routes/quotation.routes");
 const salesAgentJourneyRoutes = require("./routes/salesAgentJourney.routes");
 const applicationUsageRoutes = require("./routes/applicationUsage.routes");
+const CartRoutes = require("./routes/carts.routes");
 const config = require("./services/config");
-const ringoverJob = require("./jobs/ringoverJob");
+// const ringoverJob = require("./jobs/ringoverJob");
 const desktimeJob = require("./jobs/desktimeJob");
 const {linkDocumentsToAgents} = require("./migrateAgentReferences");
 const { syncFromFeb21 } = require("./jobs/hubspotJob");
@@ -132,6 +133,7 @@ app.use("/api/leads", leadRoutes); // Lead routes
 app.use("/api/tasks", taskRoutes); // Task routes
 app.use("/api/sales-agent-journey", salesAgentJourneyRoutes); // Sales agent journey routes
 app.use("/api/application-usage", applicationUsageRoutes); // Application usage routes
+app.use("/api/carts", CartRoutes); // Cart routes
 
 // Health check route
 app.get("/health", (req, res) => {

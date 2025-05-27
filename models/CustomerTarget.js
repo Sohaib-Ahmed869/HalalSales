@@ -80,9 +80,48 @@ const CustomerTargetSchema = new Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
     },
+    clientExistingAverage: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     notes: {
       type: String,
       trim: true,
+    },
+    transactions: [
+      {
+        transactionId: {
+          type: mongoose.Schema.Types.ObjectId,
+          refPath: "transactions.transactionType",
+        },
+        transactionType: {
+          type: String,
+          enum: ["SalesOrder", "Invoice"],
+          default: "Invoice",
+        },
+        docEntry: Number,
+        docTotal: Number,
+        docDate: Date,
+        docType: {
+          type: String,
+          enum: ["order", "invoice"],
+          default: "invoice",
+        },
+      },
+    ],
+
+    // Add field to track calculation method
+    achievementSource: {
+      type: String,
+      enum: ["orders", "invoices"],
+      default: "invoices",
+    },
+
+    // Add field to track last recalculation
+    lastRecalculated: {
+      type: Date,
+      default: Date.now,
     },
     orders: [
       {

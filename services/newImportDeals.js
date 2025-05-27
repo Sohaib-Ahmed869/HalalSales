@@ -8,7 +8,10 @@ const csv = require("csv-parser"); // You'll need to install this: npm install c
 
 // Connect to MongoDB
 mongoose
-  .connect(process.env.MONGODB_URI || "mongodb://localhost:27017/salesHalal")
+  .connect(
+    process.env.MONGODB_URI ||
+      "mongodb+srv://sohaibsipra869:nvidia940MX@cluster0.q1so4va.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+  )
   .then(() => console.log("MongoDB connected"))
   .catch((err) => {
     console.error("MongoDB connection error:", err);
@@ -63,7 +66,7 @@ async function importDealsFromCSV() {
           const elapsedSeconds = Math.round((currentTime - startTime) / 1000);
           const rowsPerSecond = Math.round(processedCount / elapsedSeconds);
           console.log(
-            `Processed ${processedCount} rows in ${elapsedSeconds} seconds (${rowsPerSecond} rows/sec)`
+            `⏳ Processed ${processedCount} rows in ${elapsedSeconds} seconds (${rowsPerSecond} rows/sec)`
           );
           lastLogTime = currentTime;
         }
@@ -101,15 +104,15 @@ async function importDealsFromCSV() {
         }
 
         const totalTime = Math.round((Date.now() - startTime) / 1000);
-        console.log("\n--- Import Summary ---");
-        console.log(`Total rows processed: ${processedCount}`);
-        console.log(`Successful imports: ${successCount}`);
-        console.log(`Errors: ${errorCount}`);
-        console.log(`Total time: ${totalTime} seconds`);
+        console.log("\n🎉 === IMPORT SUMMARY ===");
+        console.log(`📈 Total rows processed: ${processedCount}`);
+        console.log(`✅ Successful imports: ${successCount}`);
+        console.log(`❌ Errors: ${errorCount}`);
+        console.log(`⏱️  Total time: ${totalTime} seconds`);
         console.log(
-          `Average speed: ${Math.round(processedCount / totalTime)} rows/sec`
+          `🚀 Average speed: ${Math.round(processedCount / totalTime)} rows/sec`
         );
-        console.log("Import completed");
+        console.log("🏁 Import completed successfully!");
         resolve();
       });
 
@@ -121,16 +124,24 @@ async function importDealsFromCSV() {
 
     // Function to process a batch of records
     async function processBatch(batch) {
-      console.log(`Processing batch of ${batch.length} records...`);
+      console.log(`\n🔄 Processing batch of ${batch.length} records...`);
 
       for (const dealData of batch) {
         try {
-          // Extract products HTML if available
+          // Extract products HTML if available - Fix encoding issue
           let products = [];
-          if (dealData["Panier abandonné Produits HTML"]) {
-            products = parseProductsHTML(
-              dealData["Panier abandonné Produits HTML"]
+          const productsHTML =
+            dealData["Panier abandonné Produits HTML"] ||
+            dealData["Panier abandonn� Produits HTML"];
+          if (productsHTML) {
+            console.log(`📦 Parsing products for deal...`);
+            products = parseProductsHTML(productsHTML);
+            console.log(
+              `✅ Found ${products.length} products:`,
+              products.map((p) => `${p.name} (${p.quantity}x)`)
             );
+          } else {
+            console.log(`⚠️  No products HTML found for this deal`);
           }
 
           // Create a simplified deal object
@@ -241,7 +252,7 @@ async function importDealsFromCSV() {
             isClosed:
               dealData["Is Deal Closed?"] === "true" ||
               dealData["Is Deal Closed?"] === "1",
-            pipeline: dealData["Pipeline"] || null,
+            pipeline: dealData["Pipeline"] || "Ecommerce Pipeline",
             totalProductsWithTaxes:
               parseFloat(dealData["Total des produits avec taxes"] || 0) || 0,
             totalExcludingTaxes:
@@ -253,10 +264,11 @@ async function importDealsFromCSV() {
               dealData["Mode de paiement de la commande"] ||
               dealData["Payment Method"] ||
               null,
-            customerName: dealData["Associated Contact"] || null,
-            customerEmail: dealData["Associated Contact"]?.match(/\(([^)]+)\)/)
-              ? dealData["Associated Contact"].match(/\(([^)]+)\)/)[1]
-              : dealData["Email"] || null,
+            customerName: dealData["Associated Contact"] || null, // This field doesn't exist in CSV
+            customerEmail:
+              extractEmailFromContact(dealData["Associated Contact"]) ||
+              dealData["Email"] ||
+              null,
             lastModifiedDate: dealData["Last Modified Date"]
               ? new Date(dealData["Last Modified Date"])
               : null,
@@ -269,9 +281,10 @@ async function importDealsFromCSV() {
                 dealData["Contact facturation téléphone portable"] ||
                 dealData["Mobile"] ||
                 null,
-              email: dealData["Associated Contact"]?.match(/\(([^)]+)\)/)
-                ? dealData["Associated Contact"].match(/\(([^)]+)\)/)[1]
-                : dealData["Email"] || null,
+              email:
+                extractEmailFromContact(dealData["Associated Contact"]) ||
+                dealData["Email"] ||
+                null, // Associated Contact doesn't exist
             },
             source:
               dealData["Original Traffic Source"] || dealData["Source"] || null,
@@ -281,31 +294,120 @@ async function importDealsFromCSV() {
               null,
           };
 
-          // Only process records with a valid ID or necessary fields
-        
-            if (dealObj.recordId) {
-              // Use updateOne with upsert option to avoid _id issues
-              await Deal.updateOne(
-                { recordId: dealObj.recordId },
-                { $set: dealObj },
-                { upsert: true, runValidators: true }
+          // Log the deal object being stored
+          console.log(`\n💾 STORING DEAL:`);
+          console.log(`📋 Deal ID: ${dealObj.recordId || "NEW"}`);
+          console.log(
+            `🛒 Order Number: ${dealObj.orderNumber || "N/A"} (from CSV: ${
+              dealData["Order number"] || "N/A"
+            })`
+          );
+          console.log(
+            `💰 Amount: ${dealObj.amount} ${dealObj.currency} (from CSV: ${
+              dealData["Amount"] || "N/A"
+            })`
+          );
+          console.log(`👤 Customer: ${dealObj.customerName || "N/A"}`);
+          console.log(`📧 Email: ${dealObj.customerEmail || "N/A"}`);
+          console.log(
+            `📍 City: ${
+              dealObj.shippingAddress?.city ||
+              dealObj.billingAddress?.city ||
+              "N/A"
+            }`
+          );
+          console.log(`📦 Products: ${dealObj.products.length} items`);
+          if (dealObj.products.length > 0) {
+            dealObj.products.forEach((product, idx) => {
+              console.log(
+                `   ${idx + 1}. ${product.name} - ${product.quantity}x €${
+                  product.price
+                } = €${product.totalPrice}`
               );
-              successCount++;
+            });
+          }
+          console.log(`💳 Payment Method: ${dealObj.paymentMethod || "N/A"}`);
+          console.log(`✅ Is Paid: ${dealObj.isPaid}`);
+          console.log(`🏢 Pipeline: ${dealObj.pipeline}`);
+          console.log(`📊 Stage: ${dealObj.dealStage || "N/A"}`);
+          console.log(`📈 Source: ${dealObj.source || "N/A"}`);
+          console.log(`🔍 DEBUG - Raw CSV fields:`);
+          console.log(`   - Record ID: "${dealData["Record ID"]}"`);
+          console.log(`   - Amount: "${dealData["Amount"]}"`);
+          console.log(`   - Order number: "${dealData["Order number"]}"`);
+          console.log(`   - Deal Name: "${dealData["Deal Name"]}"`);
+          console.log(
+            `   - Products HTML: ${productsHTML ? "EXISTS" : "MISSING"}`
+          );
+          console.log(`---`);
+
+          // Validate if deal has meaningful data before storing
+          const hasValidData =
+            dealObj.recordId ||
+            dealObj.orderNumber ||
+            dealObj.amount > 0 ||
+            dealObj.products.length > 0 ||
+            dealObj.customerName ||
+            dealObj.customerEmail ||
+            dealObj.dealName;
+
+          if (!hasValidData) {
+            console.log(`🚫 SKIPPING empty deal - no meaningful data found`);
+            console.log(
+              `   Raw data check: recordId=${dealObj.recordId}, orderNumber=${dealObj.orderNumber}, amount=${dealObj.amount}, products=${dealObj.products.length}, customer=${dealObj.customerName}`
+            );
+            continue; // Skip this deal entirely
+          }
+
+          // Only process records with meaningful data
+          if (dealObj.recordId) {
+            // Use updateOne with upsert option to avoid _id issues
+            const result = await Deal.updateOne(
+              { recordId: dealObj.recordId },
+              { $set: dealObj },
+              { upsert: true, runValidators: true }
+            );
+
+            if (result.upsertedCount > 0) {
+              console.log(`✨ NEW deal created with ID: ${dealObj.recordId}`);
             } else {
-              // If no recordId, create a new deal with dealName
-              const newDeal = new Deal(dealObj);
-              await newDeal.save();
-              successCount++;
+              console.log(
+                `🔄 UPDATED existing deal with ID: ${dealObj.recordId}`
+              );
             }
-          
+            successCount++;
+          } else if (
+            dealObj.orderNumber ||
+            dealObj.dealName ||
+            dealObj.customerName
+          ) {
+            // Only create deals without recordId if they have other identifying info
+            const newDeal = new Deal(dealObj);
+            const savedDeal = await newDeal.save();
+            console.log(
+              `✨ NEW deal created without recordID: ${savedDeal._id} (has: ${
+                dealObj.orderNumber || dealObj.dealName || dealObj.customerName
+              })`
+            );
+            successCount++;
+          } else {
+            console.log(
+              `🚫 SKIPPING deal - no recordId and no other identifying information`
+            );
+          }
         } catch (saveError) {
-          console.error(`Error saving deal: ${saveError.message}`);
+          console.error(`❌ ERROR saving deal: ${saveError.message}`);
+          console.error(`📋 Deal data that failed:`, {
+            recordId: dealData["Record ID"] || "N/A",
+            orderNumber: dealData["Order number"] || "N/A",
+            customerName: dealData["Associated Contact"] || "N/A",
+          });
           errorCount++;
         }
       }
 
       console.log(
-        `Batch complete. Progress: ${processedCount} rows processed, ${successCount} successful, ${errorCount} errors`
+        `\n📊 Batch complete. Progress: ${processedCount} rows processed, ${successCount} successful, ${errorCount} errors`
       );
     }
 
@@ -329,51 +431,75 @@ function parseProductsHTML(html) {
     $("tr").each((i, row) => {
       const productCells = $(row).find("td");
 
-      // Check if we have enough cells to extract product info
-      if (productCells.length >= 6) {
-        // Process cells in pairs (image/name/price/details/quantity/total)
+      // Check if we have cells to extract product info
+      if (productCells.length > 0) {
+        // Process cells in groups of 6 (each product has 6 cells)
         for (let j = 0; j < productCells.length; j += 6) {
-          // Skip if not enough cells left
+          // Skip if not enough cells left for a complete product
           if (j + 5 >= productCells.length) break;
 
-          const imageUrl = $(productCells[j]).find("img").attr("src");
-          const name = $(productCells[j + 1])
-            .find("a")
-            .text()
-            .trim();
-          const price =
-            parseFloat(
-              $(productCells[j + 2])
-                .find(".price")
-                .text()
-                .replace("€", "")
-                .replace(",", ".")
-                .trim()
-            ) || 0;
-          const quantity =
-            parseInt(
-              $(productCells[j + 4])
-                .find(".quantity")
-                .text()
-                .trim()
-            ) || 1;
-          const totalPrice =
-            parseFloat(
-              $(productCells[j + 5])
-                .find("strong")
-                .text()
-                .replace("€", "")
-                .replace(",", ".")
-                .trim()
-            ) || 0;
+          try {
+            // Extract image URL from first cell
+            const imageUrl = $(productCells[j]).find("img").attr("src") || null;
 
-          products.push({
-            name,
-            price,
-            quantity,
-            totalPrice,
-            imageUrl,
-          });
+            // Extract product name from second cell
+            const name = $(productCells[j + 1])
+              .find("a")
+              .text()
+              .trim();
+
+            // Skip if no product name found
+            if (!name) continue;
+
+            // Extract price from third cell - remove € symbol and convert comma to dot
+            const priceText = $(productCells[j + 2])
+              .find(".price")
+              .text()
+              .replace("€", "")
+              .replace(",", ".")
+              .trim();
+            const price = parseFloat(priceText) || 0;
+
+            // Extract quantity from fifth cell
+            const quantityText = $(productCells[j + 4])
+              .find(".quantity")
+              .text()
+              .trim();
+            const quantity = parseInt(quantityText) || 1;
+
+            // Extract total price from sixth cell
+            const totalPriceText = $(productCells[j + 5])
+              .find("strong")
+              .text()
+              .replace("€", "")
+              .replace(",", ".")
+              .trim();
+            const totalPrice = parseFloat(totalPriceText) || 0;
+
+            // Only add product if we have essential data
+            if (name && (price > 0 || totalPrice > 0)) {
+              console.log(
+                `   ✅ Product parsed: ${name} - ${quantity}x €${price} = €${totalPrice}`
+              );
+              products.push({
+                name,
+                price,
+                quantity,
+                totalPrice,
+                imageUrl,
+              });
+            } else {
+              console.log(
+                `   ⚠️  Skipped product (missing data): ${name || "No name"}`
+              );
+            }
+          } catch (productError) {
+            console.error(
+              `   ❌ Error parsing individual product at position ${j}:`,
+              productError.message
+            );
+            // Continue processing other products even if one fails
+          }
         }
       }
     });
@@ -382,6 +508,17 @@ function parseProductsHTML(html) {
   }
 
   return products;
+}
+
+// Helper function to extract email from contact string like "Name (email@domain.com)"
+function extractEmailFromContact(contactString) {
+  if (!contactString) return null;
+
+  const emailMatch = contactString.match(/\(([^)]+)\)/);
+  if (emailMatch && emailMatch[1] && emailMatch[1].includes("@")) {
+    return emailMatch[1];
+  }
+  return null;
 }
 
 // Run the import function

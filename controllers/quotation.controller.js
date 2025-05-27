@@ -224,7 +224,7 @@ exports.createQuotation = async (req, res) => {
         dueDate: new Date(new Date().setDate(new Date().getDate() + 1)), // Due tomorrow
         priority: "medium",
         type: "approval",
-        status: "pending",
+        status: "pending_approval",
         assignedTo: adminId,
         createdBy: salesAgentId,
         relatedQuotation: newQuotation.DocEntry,
@@ -424,8 +424,6 @@ exports.getQuotationByDocEntry = async (req, res) => {
     });
   }
 };
-
-
 
 // Convert quotation to sales order
 exports.convertToOrder = async (req, res) => {

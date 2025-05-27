@@ -1055,7 +1055,7 @@ const salesAgentJourneyController = {
         totalAmount += inv.DocTotal || 0;
 
         // Calculate without VAT
-        totalAmountNoVat += inv.DocTotal - inv.VatSum
+        totalAmountNoVat += inv.DocTotal - inv.VatSum;
 
         if (inv.verified) totalVerified++;
       });
@@ -1460,9 +1460,11 @@ async function getAgentCurrentTargetProgress(agent) {
     const currentYear = now.getFullYear();
 
     // Find target entry for current period
-    const targetEntry = agent.targetHistory.find(
-      (entry) => entry.year === currentYear && entry.month === currentMonth
-    );
+    const targetEntry = agent.targetHistory
+      ? agent.targetHistory.find(
+          (entry) => entry.year === currentYear && entry.month === currentMonth
+        )
+      : null;
 
     if (!targetEntry) {
       return {
