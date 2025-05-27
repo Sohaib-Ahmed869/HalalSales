@@ -298,11 +298,11 @@ async function fetchAndSaveYesterdayCalls() {
   }
 }
 
-// Schedule the task to run daily at 2:00 AM
-cron.schedule("0 2 * * *", async () => {
-  console.log("Running scheduled Ringover data fetch task");
-  await fetchAndSaveYesterdayCalls();
-});
+// // Schedule the task to run daily at 2:00 AM
+// cron.schedule("0 2 * * *", async () => {
+//   console.log("Running scheduled Ringover data fetch task");
+//   await fetchAndSaveYesterdayCalls();
+// });
 
 // Also expose a function to manually run the job if needed
 async function manuallyRunSync(daysAgo = 1) {
@@ -432,11 +432,6 @@ async function syncDateRange(startDate, endDate) {
   return { totalSaved, totalErrors, totalRecordings };
 }
 
-// Initialize job
-console.log("Ringover daily data fetch scheduler initialized");
+// // Initialize job
+// console.log("Ringover daily data fetch scheduler initialized");
 
-module.exports = {
-  fetchAndSaveYesterdayCalls,
-  manuallyRunSync,
-  syncDateRange,
-};

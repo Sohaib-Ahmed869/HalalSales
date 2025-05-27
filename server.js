@@ -33,7 +33,6 @@ const salesAgentJourneyRoutes = require("./routes/salesAgentJourney.routes");
 const applicationUsageRoutes = require("./routes/applicationUsage.routes");
 const CartRoutes = require("./routes/carts.routes");
 const config = require("./services/config");
-// const ringoverJob = require("./jobs/ringoverJob");
 const desktimeJob = require("./jobs/desktimeJob");
 const {linkDocumentsToAgents} = require("./migrateAgentReferences");
 const { syncFromFeb21 } = require("./jobs/hubspotJob");
