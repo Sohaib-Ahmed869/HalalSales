@@ -112,7 +112,7 @@ exports.getCustomerTargetById = async (req, res) => {
   try {
     const targetId = req.params.id;
 
-    console.log('check',targetId)
+    console.log("check", targetId);
     const target = await CustomerTarget.findById(targetId)
       .populate("salesAgent", "firstName lastName email")
       .populate("createdBy", "firstName lastName email");
@@ -546,7 +546,6 @@ exports.getAllCustomerTargets = async (req, res) => {
 
     // Base query
 
-    
     let query = {};
 
     // Filter by sales agent if agent ID is provided
@@ -582,8 +581,6 @@ exports.getAllCustomerTargets = async (req, res) => {
       query.salesAgent = { $in: agentIds };
     }
 
-   
-
     // Get targets with pagination
     const targets = await CustomerTarget.find(query)
       .populate("salesAgent", "firstName lastName email")
@@ -592,7 +589,6 @@ exports.getAllCustomerTargets = async (req, res) => {
       .limit(limit)
       .sort({ currentPeriodEnd: 1 });
 
-      
     // Calculate achievements for all targets
     const targetsWithAchievements = await Promise.all(
       targets.map(async (target) => {
@@ -761,10 +757,36 @@ exports.getCustomerTargets = async (req, res) => {
       .populate("salesAgent", "firstName lastName email")
       .sort({ currentPeriodEnd: 1 });
 
+    // Calculate achievements for all targets (same as getAllCustomerTargets)
+    const targetsWithAchievements = await Promise.all(
+      targets.map(async (target) => {
+        const achievement = await calculateTargetAchievement(target);
+
+        // Convert to plain object and add calculated fields
+        const targetObj = target.toObject();
+        targetObj.achievedAmount = achievement.achievedAmount;
+        targetObj.achievementRate = achievement.achievementRate;
+        targetObj.invoiceCount = achievement.invoiceCount;
+
+        // Update status based on achievement (optional)
+        if (
+          achievement.achievementRate >= 100 &&
+          targetObj.status === "active" &&
+          !targetObj.isRecurring
+        ) {
+          targetObj.calculatedStatus = "completed";
+        } else {
+          targetObj.calculatedStatus = targetObj.status;
+        }
+
+        return targetObj;
+      })
+    );
+
     res.status(200).json({
       success: true,
-      count: targets.length,
-      data: targets,
+      count: targetsWithAchievements.length,
+      data: targetsWithAchievements,
     });
   } catch (error) {
     console.error("Error fetching customer targets:", error);
@@ -775,7 +797,6 @@ exports.getCustomerTargets = async (req, res) => {
     });
   }
 };
-
 // Updated helper to update customer target progress when an invoice is processed
 exports.updateCustomerTargetProgressFromInvoice = async (invoice) => {
   try {
@@ -997,8 +1018,6 @@ exports.getTargetAchievementDetails = async (req, res) => {
       "salesAgent",
       "firstName lastName email"
     );
-
-   
 
     if (!target) {
       return res.status(404).json({

@@ -54,18 +54,10 @@ const salesAgentJourneyController = {
       }
 
       // Get all metrics in parallel for better performance
-      const [customers, salesOrders, callData, desktimeData, targetProgress] =
+      const [customers, callData, desktimeData, targetProgress] =
         await Promise.all([
           // Get assigned customers
           Customer.find({ assignedTo: agentId }).lean(),
-
-          // Get sales orders for this agent
-          SalesOrder.find({
-            salesAgent: agentId,
-            DocDate: { $gte: start, $lte: end },
-          })
-            .sort({ DocDate: -1 })
-            .lean(),
 
           // Get call data
           CallData.find({
@@ -87,6 +79,14 @@ const salesAgentJourneyController = {
           // Calculate current period target achievement
           getAgentCurrentTargetProgress(agent),
         ]);
+      const customerCodes = customers.map((c) => c.CardCode);
+      const invoices =
+        customerCodes.length > 0
+          ? await Invoice.find({
+              CardCode: { $in: customerCodes },
+              DocDate: { $gte: start, $lte: end },
+            }).lean()
+          : [];
 
       // Calculate summary metrics
       const summary = {
@@ -95,17 +95,15 @@ const salesAgentJourneyController = {
         activeCustomers: customers.filter((c) => c.status === "active").length,
 
         // Sales metrics
-        totalOrders: salesOrders.length,
-        totalSales: salesOrders.reduce(
+        totalOrders: invoices.length,
+        totalSales: invoices.reduce(
           (sum, order) => sum + (order.DocTotal || 0),
           0
         ),
         averageOrderValue:
-          salesOrders.length > 0
-            ? salesOrders.reduce(
-                (sum, order) => sum + (order.DocTotal || 0),
-                0
-              ) / salesOrders.length
+          invoices.length > 0
+            ? invoices.reduce((sum, order) => sum + (order.DocTotal || 0), 0) /
+              invoices.length
             : 0,
 
         // Call metrics
@@ -224,7 +222,7 @@ const salesAgentJourneyController = {
         });
       }
 
-      // Build query
+      // Build query for customers assigned to this agent
       const query = { assignedTo: agentId };
 
       // Add search filter if provided
@@ -996,7 +994,7 @@ const salesAgentJourneyController = {
 
       // First check if there are any invoices matching the basic query
       const totalInvoicesCheck = await Invoice.countDocuments({
-        salesAgent: new mongoose.Types.ObjectId(agentId),
+        CardCode: { $in: customerCodes },
       });
 
       console.log(`Total invoices for agent ${agentId}: ${totalInvoicesCheck}`);
@@ -1569,12 +1567,9 @@ async function calculateAgentTrends(agentId, agent, startDate, endDate) {
     }
 
     // Fetch data for trends
-    const [salesOrders, callData, productivityData] = await Promise.all([
+    const [assignedCustomers, callData, productivityData] = await Promise.all([
       // Sales orders
-      SalesOrder.find({
-        salesAgent: agentId,
-        DocDate: { $gte: startDate, $lte: endDate },
-      }).lean(),
+      Customer.find({ assignedTo: agentId }).lean(),
 
       // Call data
       CallData.find({
@@ -1590,18 +1585,29 @@ async function calculateAgentTrends(agentId, agent, startDate, endDate) {
     ]);
 
     // Process sales orders
-    salesOrders.forEach((order) => {
-      const date = new Date(order.DocDate);
+    // Get invoices for assigned customers
+    const customerCodes = assignedCustomers.map((c) => c.CardCode);
+    const invoices =
+      customerCodes.length > 0
+        ? await Invoice.find({
+            CardCode: { $in: customerCodes },
+            DocDate: { $gte: startDate, $lte: endDate },
+          }).lean()
+        : [];
+
+    // Process invoices
+    invoices.forEach((invoice) => {
+      const date = new Date(invoice.DocDate);
       const dayKey = getDayKey(date);
       const weekKey = getWeekKey(date);
 
       if (dailyData[dayKey]) {
-        dailyData[dayKey].sales += order.DocTotal || 0;
+        dailyData[dayKey].sales += invoice.DocTotal || 0;
         dailyData[dayKey].orders += 1;
       }
 
       if (weeklyData[weekKey]) {
-        weeklyData[weekKey].sales += order.DocTotal || 0;
+        weeklyData[weekKey].sales += invoice.DocTotal || 0;
         weeklyData[weekKey].orders += 1;
       }
     });
@@ -1679,11 +1685,25 @@ async function calculateAgentTrends(agentId, agent, startDate, endDate) {
  */
 async function getTopCustomers(agentId, startDate, endDate) {
   try {
-    // Get top customers by sales amount
-    const topByRevenue = await SalesOrder.aggregate([
+    // Get customers assigned to this agent
+    const assignedCustomers = await Customer.find({
+      assignedTo: agentId,
+    }).lean();
+    const customerCodes = assignedCustomers.map((c) => c.CardCode);
+
+    if (customerCodes.length === 0) {
+      return {
+        topByRevenue: [],
+        topByFrequency: [],
+        recentCustomers: [],
+      };
+    }
+
+    // Get top customers by invoice amount
+    const topByRevenue = await Invoice.aggregate([
       {
         $match: {
-          salesAgent: new mongoose.Types.ObjectId(agentId),
+          CardCode: { $in: customerCodes },
           DocDate: { $gte: startDate, $lte: endDate },
         },
       },
@@ -1691,8 +1711,8 @@ async function getTopCustomers(agentId, startDate, endDate) {
         $group: {
           _id: "$CardCode",
           totalSpent: { $sum: "$DocTotal" },
-          orderCount: { $sum: 1 },
-          lastOrderDate: { $max: "$DocDate" },
+          invoiceCount: { $sum: 1 },
+          lastInvoiceDate: { $max: "$DocDate" },
           customerName: { $first: "$CardName" },
         },
       },
@@ -1700,11 +1720,11 @@ async function getTopCustomers(agentId, startDate, endDate) {
       { $limit: 5 },
     ]);
 
-    // Get top customers by order frequency
-    const topByFrequency = await SalesOrder.aggregate([
+    // Get top customers by invoice frequency
+    const topByFrequency = await Invoice.aggregate([
       {
         $match: {
-          salesAgent: new mongoose.Types.ObjectId(agentId),
+          CardCode: { $in: customerCodes },
           DocDate: { $gte: startDate, $lte: endDate },
         },
       },
@@ -1712,20 +1732,20 @@ async function getTopCustomers(agentId, startDate, endDate) {
         $group: {
           _id: "$CardCode",
           totalSpent: { $sum: "$DocTotal" },
-          orderCount: { $sum: 1 },
-          lastOrderDate: { $max: "$DocDate" },
+          invoiceCount: { $sum: 1 },
+          lastInvoiceDate: { $max: "$DocDate" },
           customerName: { $first: "$CardName" },
         },
       },
-      { $sort: { orderCount: -1 } },
+      { $sort: { invoiceCount: -1 } },
       { $limit: 5 },
     ]);
 
-    // Get most recent customer orders
-    const recentOrders = await SalesOrder.aggregate([
+    // Get most recent customer invoices
+    const recentCustomers = await Invoice.aggregate([
       {
         $match: {
-          salesAgent: new mongoose.Types.ObjectId(agentId),
+          CardCode: { $in: customerCodes },
           DocDate: { $gte: startDate, $lte: endDate },
         },
       },
@@ -1733,12 +1753,12 @@ async function getTopCustomers(agentId, startDate, endDate) {
         $group: {
           _id: "$CardCode",
           totalSpent: { $sum: "$DocTotal" },
-          orderCount: { $sum: 1 },
-          lastOrderDate: { $max: "$DocDate" },
+          invoiceCount: { $sum: 1 },
+          lastInvoiceDate: { $max: "$DocDate" },
           customerName: { $first: "$CardName" },
         },
       },
-      { $sort: { lastOrderDate: -1 } },
+      { $sort: { lastInvoiceDate: -1 } },
       { $limit: 5 },
     ]);
 
@@ -1747,22 +1767,22 @@ async function getTopCustomers(agentId, startDate, endDate) {
         cardCode: c._id,
         cardName: c.customerName || c._id,
         totalSpent: parseFloat(c.totalSpent.toFixed(2)),
-        orderCount: c.orderCount,
-        lastOrderDate: c.lastOrderDate,
+        orderCount: c.invoiceCount,
+        lastOrderDate: c.lastInvoiceDate,
       })),
       topByFrequency: topByFrequency.map((c) => ({
         cardCode: c._id,
         cardName: c.customerName || c._id,
         totalSpent: parseFloat(c.totalSpent.toFixed(2)),
-        orderCount: c.orderCount,
-        lastOrderDate: c.lastOrderDate,
+        orderCount: c.invoiceCount,
+        lastOrderDate: c.lastInvoiceDate,
       })),
-      recentCustomers: recentOrders.map((c) => ({
+      recentCustomers: recentCustomers.map((c) => ({
         cardCode: c._id,
         cardName: c.customerName || c._id,
         totalSpent: parseFloat(c.totalSpent.toFixed(2)),
-        orderCount: c.orderCount,
-        lastOrderDate: c.lastOrderDate,
+        orderCount: c.invoiceCount,
+        lastOrderDate: c.lastInvoiceDate,
       })),
     };
   } catch (error) {

@@ -10,6 +10,7 @@ const SalesOrder = require("../models/SalesOrder");
 const Invoice = require("../models/Invoice");
 const Quotation = require("../models/Quotation");
 const Deal = require("../models/Deal");
+const Cart = require("../models/Cart");
 
 // Process customer data from text format
 const processCustomerData = (text) => {
@@ -1010,14 +1011,16 @@ exports.getCustomersPaginated = async (req, res) => {
       ]),
 
       // Get abandoned cart counts for all customers at once
-      Deal.aggregate([
+      // Get abandoned cart counts for all customers at once
+      Cart.aggregate([
         {
           $match: {
             $or: [
               { customerEmail: { $in: customerEmails } },
               { "contactInfo.email": { $in: customerEmails } },
             ],
-            orderNumber: { $ne: null },
+            status: "abandoned",
+            isAbandoned: true,
           },
         },
         {
@@ -1254,14 +1257,16 @@ exports.getCustomersPaginated2 = async (req, res) => {
       ]),
 
       // Get abandoned cart counts for all customers at once
-      Deal.aggregate([
+      // Get abandoned cart counts for all customers at once
+      Cart.aggregate([
         {
           $match: {
             $or: [
               { customerEmail: { $in: customerEmails } },
               { "contactInfo.email": { $in: customerEmails } },
             ],
-            orderNumber: { $ne: null },
+            status: "abandoned",
+            isAbandoned: true,
           },
         },
         {
