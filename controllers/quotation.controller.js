@@ -115,6 +115,254 @@ async function pushOrderToSAPInternal(order) {
   }
 }
 
+// Add these methods to your quotation.controller.js file
+
+// Get quotation statistics
+exports.getQuotationStats = async (req, res) => {
+  try {
+    const { fromDate, toDate, salesAgent } = req.query;
+
+    // Build filter query
+    let query = { IsActive: true };
+
+    if (fromDate && toDate) {
+      query.DocDate = {
+        $gte: new Date(fromDate),
+        $lte: new Date(toDate),
+      };
+    }
+
+    if (salesAgent) {
+      query.salesAgent = salesAgent;
+    }
+
+    // Get total quotations
+    const totalQuotations = await Quotation.countDocuments(query);
+
+    // Get total value
+    const totalValueResult = await Quotation.aggregate([
+      { $match: query },
+      { $group: { _id: null, total: { $sum: "$DocTotal" } } },
+    ]);
+    const totalValue = totalValueResult[0]?.total || 0;
+
+    // Get pending approval count
+    const pendingApproval = await Quotation.countDocuments({
+      ...query,
+      approvalStatus: "pending",
+    });
+
+    // Calculate conversion rate (you'll need to implement based on your logic)
+    const convertedQuotations = await Quotation.countDocuments({
+      ...query,
+      ConvertedToOrderDocEntry: { $exists: true },
+    });
+
+    const conversionRate =
+      totalQuotations > 0
+        ? `${Math.round((convertedQuotations / totalQuotations) * 100)}%`
+        : "0%";
+
+    res.status(200).json({
+      success: true,
+      data: {
+        totalQuotations,
+        totalValue,
+        pendingApproval,
+        conversionRate,
+      },
+    });
+  } catch (error) {
+    console.error("Error getting quotation stats:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error getting quotation statistics",
+      error: error.message,
+    });
+  }
+};
+
+// Export quotations
+exports.exportQuotations = async (req, res) => {
+  try {
+    const { fromDate, toDate, salesAgent, status, cardCode } = req.query;
+
+    // Build filter query
+    let query = { IsActive: true };
+
+    if (fromDate && toDate) {
+      query.DocDate = {
+        $gte: new Date(fromDate),
+        $lte: new Date(toDate),
+      };
+    }
+
+    if (salesAgent) query.salesAgent = salesAgent;
+    if (status) query.DocumentStatus = status;
+    if (cardCode) query.CardCode = cardCode;
+
+    const quotations = await Quotation.find(query)
+      .populate("salesAgent", "firstName lastName")
+      .sort({ DocDate: -1 });
+
+    // Convert to CSV format
+    const csvData = quotations.map((q) => ({
+      DocNum: q.DocNum,
+      CardCode: q.CardCode,
+      CardName: q.CardName,
+      SalesAgent: q.salesAgent
+        ? `${q.salesAgent.firstName} ${q.salesAgent.lastName}`
+        : "Unknown",
+      DocTotal: q.DocTotal,
+      DocDate: q.DocDate ? q.DocDate.toISOString().split("T")[0] : "",
+      Status: q.approvalStatus || q.DocumentStatus,
+    }));
+
+    // Create CSV string
+    const headers = Object.keys(csvData[0] || {}).join(",");
+    const rows = csvData.map((row) => Object.values(row).join(","));
+    const csv = [headers, ...rows].join("\n");
+
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", "attachment; filename=quotations.csv");
+    res.status(200).send(csv);
+  } catch (error) {
+    console.error("Error exporting quotations:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error exporting quotations",
+      error: error.message,
+    });
+  }
+};
+
+// Approve quotation
+exports.approveQuotation = async (req, res) => {
+  try {
+    const { docEntry } = req.params;
+    const { comments } = req.body;
+
+    const quotation = await Quotation.findOne({
+      DocEntry: docEntry,
+      IsActive: true,
+    });
+
+    if (!quotation) {
+      return res.status(404).json({
+        success: false,
+        message: `Quotation with DocEntry ${docEntry} not found`,
+      });
+    }
+
+    quotation.approvalStatus = "approved";
+    quotation.approvedBy = req.user._id;
+    quotation.approvedDate = new Date();
+    if (comments) quotation.approvalComments = comments;
+    quotation.UpdateDate = new Date();
+
+    await quotation.save();
+
+    res.status(200).json({
+      success: true,
+      data: quotation,
+      message: "Quotation approved successfully",
+    });
+  } catch (error) {
+    console.error("Error approving quotation:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error approving quotation",
+      error: error.message,
+    });
+  }
+};
+
+// Reject quotation
+exports.rejectQuotation = async (req, res) => {
+  try {
+    const { docEntry } = req.params;
+    const { reason } = req.body;
+
+    const quotation = await Quotation.findOne({
+      DocEntry: docEntry,
+      IsActive: true,
+    });
+
+    if (!quotation) {
+      return res.status(404).json({
+        success: false,
+        message: `Quotation with DocEntry ${docEntry} not found`,
+      });
+    }
+
+    quotation.approvalStatus = "rejected";
+    quotation.rejectedBy = req.user._id;
+    quotation.rejectedDate = new Date();
+    if (reason) quotation.rejectionReason = reason;
+    quotation.UpdateDate = new Date();
+
+    await quotation.save();
+
+    res.status(200).json({
+      success: true,
+      data: quotation,
+      message: "Quotation rejected successfully",
+    });
+  } catch (error) {
+    console.error("Error rejecting quotation:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error rejecting quotation",
+      error: error.message,
+    });
+  }
+};
+
+// Bulk update status
+exports.bulkUpdateStatus = async (req, res) => {
+  try {
+    const { docEntries, status } = req.body;
+
+    if (!docEntries || !Array.isArray(docEntries) || docEntries.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "DocEntries array is required",
+      });
+    }
+
+    const updateData = {
+      approvalStatus: status,
+      UpdateDate: new Date(),
+    };
+
+    if (status === "approved") {
+      updateData.approvedBy = req.user._id;
+      updateData.approvedDate = new Date();
+    } else if (status === "rejected") {
+      updateData.rejectedBy = req.user._id;
+      updateData.rejectedDate = new Date();
+    }
+
+    const result = await Quotation.updateMany(
+      { DocEntry: { $in: docEntries }, IsActive: true },
+      updateData
+    );
+
+    res.status(200).json({
+      success: true,
+      message: `${result.modifiedCount} quotations updated successfully`,
+      modifiedCount: result.modifiedCount,
+    });
+  } catch (error) {
+    console.error("Error bulk updating quotations:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error bulk updating quotations",
+      error: error.message,
+    });
+  }
+};
+
 // Create a new quotation (saved to local DB only)
 exports.createQuotation = async (req, res) => {
   try {
@@ -260,6 +508,7 @@ exports.getAllQuotations = async (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
     const skip = (page - 1) * limit;
 
+    console.log("Query parameters for fetching quotations:", req.query);
     // Base query - only show active quotations by default
     let query = { IsActive: true };
 
@@ -274,14 +523,32 @@ exports.getAllQuotations = async (req, res) => {
     }
 
     if (req.query.status) {
-      query.DocumentStatus = req.query.status;
+      query.approvalStatus = req.query.status;
     }
+
 
     if (req.query.fromDate && req.query.toDate) {
       query.DocDate = {
         $gte: new Date(req.query.fromDate),
         $lte: new Date(req.query.toDate),
       };
+    }
+
+    if (req.query.fromDate && !req.query.toDate) {
+      query.DocDate = {
+        $gte: new Date(req.query.fromDate),
+      };
+    }
+
+    if (!req.query.fromDate && req.query.toDate) {
+      query.DocDate = {
+        $lte: new Date(req.query.toDate),
+      };
+    }
+    
+
+    if (req.query.salesAgent) {
+      query.salesAgent = req.query.salesAgent;
     }
 
     // Filter for current user if sales agent

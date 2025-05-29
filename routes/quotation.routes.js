@@ -4,6 +4,32 @@ const router = express.Router();
 const quotationController = require("../controllers/quotation.controller");
 const { auth } = require("../middleware/auth");
 
+// Add these routes to your quotationRoutes.js file
+
+// @route   GET /api/quotations/stats
+// @desc    Get quotation statistics
+// @access  Private (Admin only)
+router.get("/stats", auth, quotationController.getQuotationStats);
+
+// @route   GET /api/quotations/export
+// @desc    Export quotations to CSV
+// @access  Private (Admin only)
+router.get("/export", auth, quotationController.exportQuotations);
+
+// @route   POST /api/quotations/:docEntry/approve
+// @desc    Approve a quotation
+// @access  Private (Admin only)
+router.post("/:docEntry/approve", auth, quotationController.approveQuotation);
+
+// @route   POST /api/quotations/:docEntry/reject
+// @desc    Reject a quotation
+// @access  Private (Admin only)
+router.post("/:docEntry/reject", auth, quotationController.rejectQuotation);
+
+// @route   PUT /api/quotations/bulk/status
+// @desc    Bulk update quotation status
+// @access  Private (Admin only)
+router.put("/bulk/status", auth, quotationController.bulkUpdateStatus);
 // @route   POST /api/quotations
 // @desc    Create a new quotation in local DB
 // @access  Private
