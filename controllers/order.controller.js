@@ -9,7 +9,254 @@ const {
   getSalesOrderFromSAP,
   checkBusinessPartnerExists,
 } = require("../utils/sapB1Integration");
+const XLSX = require("xlsx");
+exports.bulkImportSalesOrders = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "Excel file is required",
+      });
+    }
 
+    const startTime = Date.now();
+    console.log("Starting Sales Orders Excel import...");
+
+    // Parse Excel file
+    const workbook = XLSX.read(req.file.buffer, {
+      cellDates: true,
+      cellNF: true,
+      cellStyles: true,
+    });
+
+    // Get the first worksheet
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+
+    // Convert to JSON with headers
+    const excelRows = XLSX.utils.sheet_to_json(worksheet, {
+      header: 1,
+      defval: "",
+      blankrows: false,
+    });
+
+    if (excelRows.length < 2) {
+      return res.status(400).json({
+        success: false,
+        message: "Excel file must contain headers and data rows",
+      });
+    }
+
+    // Extract headers and data
+    const headers = excelRows[0];
+    const dataRows = excelRows.slice(1);
+
+    // Convert to objects using headers
+    const processedRows = dataRows.map((row) => {
+      const obj = {};
+      headers.forEach((header, index) => {
+        obj[header] = row[index] || "";
+      });
+      return obj;
+    });
+
+    console.log(`Parsed ${processedRows.length} rows from Excel`);
+
+    // Group Excel rows by Internal Number to create order documents
+    const orderGroups = {};
+
+    processedRows.forEach((row) => {
+      const docId = row["Internal Number"];
+      if (!docId) return;
+
+      if (!orderGroups[docId]) {
+        orderGroups[docId] = {
+          mainData: row,
+          lines: [],
+        };
+      }
+
+      // Add line item if it has valid data
+      if (row["Item No."] && row["Item/Service Description"]) {
+        orderGroups[docId].lines.push({
+          LineNum: row["Row Number"] || 0,
+          ItemCode: row["Item No."],
+          ItemDescription: row["Item/Service Description"],
+          Quantity: row["Quantity"] || 0,
+          Price: row["Price after Discount"] || 0,
+          PriceAfterVAT: row["Gross Price after Discount"] || 0,
+          Currency: row["Price Currency"] || "EUR",
+          LineTotal: row["Row Total"] || 0,
+          UnitPrice: row["Unit Price"] || 0,
+          VatGroup: null,
+        });
+      }
+    });
+
+    const totalOrders = Object.keys(orderGroups).length;
+    console.log(`Grouped into ${totalOrders} sales orders`);
+
+    // Get existing DocEntry values in bulk
+    const docEntries = Object.keys(orderGroups).map((id) => parseInt(id));
+    const existingOrders = await SalesOrder.find(
+      { DocEntry: { $in: docEntries } },
+      { DocEntry: 1 }
+    ).lean();
+
+    const existingDocEntries = new Set(
+      existingOrders.map((order) => order.DocEntry)
+    );
+    console.log(`Found ${existingDocEntries.size} existing sales orders`);
+
+    // Prepare new orders for bulk insert
+    const newOrders = [];
+
+    Object.entries(orderGroups).forEach(([docId, group]) => {
+      const docEntry = parseInt(docId);
+
+      // Skip if order already exists
+      if (existingDocEntries.has(docEntry)) {
+        return;
+      }
+
+      const row = group.mainData;
+
+      // Parse dates - handle Excel date formats
+      const parseDate = (dateValue) => {
+        if (!dateValue) return null;
+
+        // If it's already a Date object (from Excel)
+        if (dateValue instanceof Date) {
+          return dateValue;
+        }
+
+        // If it's a string, try to parse it
+        if (typeof dateValue === "string") {
+          const parts = dateValue.split("/");
+          if (parts.length === 3) {
+            return new Date(
+              `20${parts[2]}-${parts[1].padStart(2, "0")}-${parts[0].padStart(
+                2,
+                "0"
+              )}`
+            );
+          }
+          return new Date(dateValue);
+        }
+
+        // If it's a number (Excel serial date)
+        if (typeof dateValue === "number") {
+          return XLSX.SSF.parse_date_code(dateValue);
+        }
+
+        return new Date(dateValue);
+      };
+
+      // Determine order status
+      const docTotal = parseFloat(row["Document Total"]) || 0;
+      const paidToDate = parseFloat(row["Paid to Date"]) || 0;
+      const isCancelled = row["Cancelled"] === "Y";
+      const orderStatus = row["OrderStatus"] || (isCancelled ? "C" : "O");
+
+      // Create sales order document
+      const salesOrder = {
+        // Required fields
+        DocEntry: docEntry,
+        DocNum: parseInt(row["Document Number"]) || docEntry,
+
+        // Customer info
+        CardCode: row["Customer/Supplier No."] || "",
+        CardName: row["Customer/Supplier Name"] || "",
+
+        // Financial data
+        DocTotal: docTotal,
+        PaidToDate: paidToDate,
+        DocCurrency: row["Price Currency"] || "EUR",
+
+        // Dates
+        DocDate: parseDate(row["Posting Date"]),
+        CreationDate: parseDate(row["Posting Date"]),
+
+        // Address
+        Address: row["Ship-to Description"] || "",
+
+        // Document status and cancellation
+        DocumentStatus: orderStatus,
+        Cancelled: isCancelled ? "Y" : "N",
+
+        // Additional computed fields
+        VatSum: parseFloat(row["Total Tax - Row"]) || 0,
+
+        // Document lines
+        DocumentLines: group.lines,
+
+        // Timestamps
+        CreationDate: parseDate(row["Posting Date"]) || new Date(),
+        UpdateDate: new Date(),
+      };
+
+      newOrders.push(salesOrder);
+    });
+
+    console.log(`Prepared ${newOrders.length} new sales orders for import`);
+
+    // Bulk insert new orders
+    let insertedCount = 0;
+    let insertedDocNums = [];
+    if (newOrders.length > 0) {
+      try {
+        const result = await SalesOrder.insertMany(newOrders, {
+          ordered: false, // Continue even if some fail
+          lean: true,
+        });
+        insertedCount = result.length;
+        insertedDocNums = result.map((order) => order.DocNum);
+        console.log(`Successfully inserted ${insertedCount} sales orders`);
+      } catch (error) {
+        // Handle partial success in bulk insert
+        if (error.writeErrors) {
+          insertedCount = newOrders.length - error.writeErrors.length;
+          // Get DocNums of successfully inserted orders
+          const failedIndices = new Set(
+            error.writeErrors.map((err) => err.index)
+          );
+          insertedDocNums = newOrders
+            .filter((_, index) => !failedIndices.has(index))
+            .map((order) => order.DocNum);
+          console.log(
+            `Partial success: ${insertedCount} inserted, ${error.writeErrors.length} failed`
+          );
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    const endTime = Date.now();
+    const processingTime = ((endTime - startTime) / 1000).toFixed(2);
+
+    return res.status(200).json({
+      success: true,
+      message: "Sales Orders Excel import completed",
+      data: {
+        totalRowsProcessed: processedRows.length,
+        totalOrdersInExcel: totalOrders,
+        existingOrders: existingDocEntries.size,
+        newOrdersInserted: insertedCount,
+        skippedOrders: totalOrders - insertedCount,
+        processingTimeSeconds: processingTime,
+        insertedOrderDocNums: insertedDocNums,
+      },
+    });
+  } catch (error) {
+    console.error("Error in sales orders bulk import:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to import Sales Orders Excel file",
+      error: error.message,
+    });
+  }
+};
 // Add this helper function
 async function updateSalesAgentStats(salesAgentId, order) {
   try {
@@ -408,14 +655,11 @@ exports.getAllOrders = async (req, res) => {
 // Get orders for a specific customer
 exports.getOrdersByCustomer = async (req, res) => {
   try {
-    
-
     const { cardCode } = req.params;
     const page = parseInt(req.query.page) || 1;
 
     // Base query
     const query = { CardCode: cardCode };
-
 
     const orders = await SalesOrder.find(query)
       .populate("salesAgent", "firstName lastName email")

@@ -36,6 +36,10 @@ const CustomerSchema = new Schema({
     type: String,
     trim: true,
   },
+   prestashopAcc: {
+    type: String,
+    trim: true,
+  },
   // Assigned sales agent
   assignedTo: {
     type: Schema.Types.ObjectId,

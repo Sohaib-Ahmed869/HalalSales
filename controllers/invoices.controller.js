@@ -1,5 +1,253 @@
 const Invoice = require("../models/Invoice");
 const mongoose = require("mongoose");
+const XLSX = require("xlsx");
+exports.bulkImportInvoices = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "Excel file is required",
+      });
+    }
+
+    const startTime = Date.now();
+    console.log("Starting Excel import...");
+
+    // Parse Excel file
+    const workbook = XLSX.read(req.file.buffer, {
+      cellDates: true,
+      cellNF: true,
+      cellStyles: true,
+    });
+
+    // Get the first worksheet
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+
+    // Convert to JSON with headers
+    const excelRows = XLSX.utils.sheet_to_json(worksheet, {
+      header: 1,
+      defval: "",
+      blankrows: false,
+    });
+
+    if (excelRows.length < 2) {
+      return res.status(400).json({
+        success: false,
+        message: "Excel file must contain headers and data rows",
+      });
+    }
+
+    // Extract headers and data
+    const headers = excelRows[0];
+    const dataRows = excelRows.slice(1);
+
+    // Convert to objects using headers
+    const processedRows = dataRows.map((row) => {
+      const obj = {};
+      headers.forEach((header, index) => {
+        obj[header] = row[index] || "";
+      });
+      return obj;
+    });
+
+    console.log(`Parsed ${processedRows.length} rows from Excel`);
+
+    // Group Excel rows by Document Internal ID to create invoice documents
+    const invoiceGroups = {};
+
+    processedRows.forEach((row) => {
+      const docId = row["Document Internal ID"];
+      if (!docId) return;
+
+      if (!invoiceGroups[docId]) {
+        invoiceGroups[docId] = {
+          mainData: row,
+          lines: [],
+        };
+      }
+
+      // Add line item if it has valid data
+      if (row["Item No."] && row["Item/Service Description"]) {
+        invoiceGroups[docId].lines.push({
+          LineNum: row["Row Number"] || 0,
+          ItemCode: row["Item No."],
+          ItemDescription: row["Item/Service Description"],
+          Quantity: row["Quantity"] || 0,
+          Price: row["Unit Price"] || 0,
+          PriceAfterVAT: row["Gross Price after Discount"] || 0,
+          Currency: row["Price Currency"] || "EUR",
+          LineTotal: row["Row Total"] || 0,
+          VatGroup: null,
+        });
+      }
+    });
+
+    const totalInvoices = Object.keys(invoiceGroups).length;
+    console.log(`Grouped into ${totalInvoices} invoices`);
+
+    // Get existing DocEntry values in bulk
+    const docEntries = Object.keys(invoiceGroups).map((id) => parseInt(id));
+    const existingInvoices = await Invoice.find(
+      { DocEntry: { $in: docEntries } },
+      { DocEntry: 1 }
+    ).lean();
+
+    const existingDocEntries = new Set(
+      existingInvoices.map((inv) => inv.DocEntry)
+    );
+    console.log(`Found ${existingDocEntries.size} existing invoices`);
+
+    // Prepare new invoices for bulk insert
+    const newInvoices = [];
+
+    Object.entries(invoiceGroups).forEach(([docId, group]) => {
+      const docEntry = parseInt(docId);
+
+      // Skip if invoice already exists
+      if (existingDocEntries.has(docEntry)) {
+        return;
+      }
+
+      const row = group.mainData;
+
+      // Parse dates - handle Excel date formats
+      const parseDate = (dateValue) => {
+        if (!dateValue) return null;
+
+        // If it's already a Date object (from Excel)
+        if (dateValue instanceof Date) {
+          return dateValue;
+        }
+
+        // If it's a string, try to parse it
+        if (typeof dateValue === "string") {
+          const parts = dateValue.split("/");
+          if (parts.length === 3) {
+            return new Date(
+              `20${parts[2]}-${parts[1].padStart(2, "0")}-${parts[0].padStart(
+                2,
+                "0"
+              )}`
+            );
+          }
+          return new Date(dateValue);
+        }
+
+        // If it's a number (Excel serial date)
+        if (typeof dateValue === "number") {
+          return XLSX.SSF.parse_date_code(dateValue);
+        }
+
+        return new Date(dateValue);
+      };
+
+      // Determine payment status
+      const docTotal = parseFloat(row["Document Total"]) || 0;
+      const paidToDate = parseFloat(row["Paid to Date"]) || 0;
+      const isPaid = Math.abs(docTotal - paidToDate) < 0.01;
+
+      // Create invoice document
+      const invoice = {
+        // Required fields
+        DocEntry: docEntry,
+        DocNum: parseInt(row["Document Number"]) || docEntry,
+
+        // Customer info
+        CardCode: row["Customer/Supplier No."] || "",
+        CardName: row["Customer/Supplier Name"] || "",
+
+        // Financial data
+        DocTotal: docTotal,
+        PaidToDate: paidToDate,
+        DocCurrency: row["Price Currency"] || "EUR",
+
+        // Dates
+        DocDate: parseDate(row["Posting Date"]),
+        CreationDate: parseDate(row["Posting Date"]),
+
+        // Address
+        Address: row["Ship-to Description"] || "",
+
+        // Custom fields for tracking
+        verified: isPaid,
+        dateStored: new Date(),
+        tag: "External Delivery", // Default assumption
+        paymentMethod: isPaid ? "POS-Cash" : "Unknown",
+        isPOS: false,
+        isDelivery: true,
+
+        // Document lines
+        DocumentLines: group.lines,
+
+        // Additional computed fields
+        VatSum: parseFloat(row["Total Tax"]) || 0,
+        Cancelled: "N",
+        DocumentStatus: isPaid ? "C" : "O",
+      };
+
+      newInvoices.push(invoice);
+    });
+
+    console.log(`Prepared ${newInvoices.length} new invoices for import`);
+
+    // Bulk insert new invoices
+    let insertedCount = 0;
+    let insertedDocNums = [];
+    if (newInvoices.length > 0) {
+      try {
+        const result = await Invoice.insertMany(newInvoices, {
+          ordered: false, // Continue even if some fail
+          lean: true,
+        });
+        insertedCount = result.length;
+        insertedDocNums = result.map((invoice) => invoice.DocNum);
+        console.log(`Successfully inserted ${insertedCount} invoices`);
+      } catch (error) {
+        // Handle partial success in bulk insert
+        if (error.writeErrors) {
+          insertedCount = newInvoices.length - error.writeErrors.length;
+          // Get DocNums of successfully inserted invoices
+          const failedIndices = new Set(
+            error.writeErrors.map((err) => err.index)
+          );
+          insertedDocNums = newInvoices
+            .filter((_, index) => !failedIndices.has(index))
+            .map((invoice) => invoice.DocNum);
+          console.log(
+            `Partial success: ${insertedCount} inserted, ${error.writeErrors.length} failed`
+          );
+        } else {
+          throw error;
+        }
+      }
+    }
+
+    const endTime = Date.now();
+    const processingTime = ((endTime - startTime) / 1000).toFixed(2);
+
+    return res.status(200).json({
+      success: true,
+      message: "Excel import completed",
+      data: {
+        totalRowsProcessed: processedRows.length,
+        totalInvoicesInExcel: totalInvoices,
+        existingInvoices: existingDocEntries.size,
+        newInvoicesInserted: insertedCount,
+        skippedInvoices: totalInvoices - insertedCount,
+        processingTimeSeconds: processingTime,
+        insertedInvoiceDocNums: insertedDocNums,
+      },
+    });
+  } catch (error) {
+    console.error("Error in bulk import:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to import Excel file",
+      error: error.message,
+    });
+  }
+};
 
 /**
  * Get invoices for a specific customer with pagination, sorting, and filtering

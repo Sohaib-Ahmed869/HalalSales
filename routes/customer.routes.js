@@ -52,6 +52,20 @@ const upload = multer({
   },
 });
 
+// Add this route to your customer.routes.js file after the existing routes
+
+router.post(
+  "/fast-hubspot-import",
+  upload.single("file"),
+  customerController.fastHubspotImportWithAgents
+);
+
+router.post(
+  "/comprehensive-update",
+  upload.single("file"),
+  customerController.comprehensiveCustomerUpdate
+);
+
 router.post(
   "/update-missing-emails",
   upload.single("file"),
@@ -102,11 +116,7 @@ router.post(
 );
 
 // Add this new route:
-router.post(
-  "/bulk-assign",
-  auth,
-  customerController.bulkAssignCustomers
-);
+router.post("/bulk-assign", auth, customerController.bulkAssignCustomers);
 
 router.get(
   "/paginated2",

@@ -67,6 +67,667 @@ const processXLSXFile = (filePath) => {
   }
 };
 
+// Add this function to your customer.controller.js
+// Add this to customer.controller.js
+
+// Add this to customer.controller.js
+
+exports.fastHubspotImportWithAgents = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "Please upload a CSV file",
+      });
+    }
+
+    console.log("Processing HubSpot import with agents:", req.file.path);
+    const startTime = Date.now();
+
+    // Process CSV file
+    const fileContent = fs.readFileSync(req.file.path, "utf8");
+    const csv = require("csv-parser");
+
+    // Parse CSV data
+    const data = [];
+    const stream = fs
+      .createReadStream(req.file.path)
+      .pipe(csv())
+      .on("data", (row) => {
+        data.push(row);
+      });
+
+    // Wait for CSV parsing to complete
+    await new Promise((resolve, reject) => {
+      stream.on("end", resolve);
+      stream.on("error", reject);
+    });
+
+    console.log(`Extracted ${data.length} rows from CSV file`);
+
+    // Build agent mapping from contact owner names to agent IDs
+    const salesAgents = await User.find({ role: "sales_agent" }).lean();
+    const agentMapping = new Map();
+
+    salesAgents.forEach((agent) => {
+      const fullName = `${agent.firstName} ${agent.lastName}`
+        .toLowerCase()
+        .trim();
+      const firstName = agent.firstName.toLowerCase().trim();
+      const lastName = agent.lastName.toLowerCase().trim();
+
+      agentMapping.set(fullName, agent._id);
+      agentMapping.set(firstName, agent._id);
+      agentMapping.set(lastName, agent._id);
+
+      // Handle variations
+      agentMapping.set(`${firstName} ${lastName}`, agent._id);
+      agentMapping.set(`${lastName} ${firstName}`, agent._id);
+    });
+
+    console.log(`Created agent mapping for ${salesAgents.length} agents`);
+
+    // Process HubSpot data
+    const processedContacts = [];
+    const usedCodes = new Set();
+
+    // Get existing NC codes to avoid conflicts
+    const existingNCCodes = await Customer.find({ CardCode: /^NC-/ })
+      .select("CardCode")
+      .lean();
+    existingNCCodes.forEach((customer) => usedCodes.add(customer.CardCode));
+
+    for (let i = 0; i < data.length; i++) {
+      const row = data[i];
+
+      // Helper function to safely get string value
+      const getString = (value) => {
+        if (value === null || value === undefined) return "";
+        return String(value).trim();
+      };
+
+      // Extract data safely
+      const email = getString(row["Email"]);
+      const phone = getString(row["Phone Number"]).replace(/[^\d+]/g, "");
+
+      // Skip if no email or phone
+      if (!email && !phone) continue;
+
+      // Extract names - handle RingOver contacts
+      let firstName = getString(row["First Name"]);
+      let lastName = getString(row["Last Name"]);
+
+      // Clean up RingOver contact names
+      if (
+        firstName.includes("New RingOver Contact") ||
+        firstName.includes("Ringover contact") ||
+        firstName.match(/^\+?\d+/)
+      ) {
+        firstName = "";
+      }
+      if (
+        lastName.includes("New RingOver Contact") ||
+        lastName.includes("Ringover contact") ||
+        lastName.match(/^\+?\d+/)
+      ) {
+        lastName = "";
+      }
+
+      // Generate CardName
+      let cardName = "";
+      if (firstName || lastName) {
+        cardName = `${firstName} ${lastName}`.trim();
+      } else if (phone) {
+        cardName = `Contact ${phone}`;
+      } else if (email) {
+        cardName = email;
+      } else {
+        cardName = "Unnamed Contact";
+      }
+
+      // Clean cardName if it contains RingOver references
+      if (
+        cardName.includes("New RingOver Contact") ||
+        cardName.includes("Ringover contact")
+      ) {
+        if (phone) {
+          cardName = `Contact ${phone}`;
+        } else if (email) {
+          cardName = email;
+        } else {
+          cardName = "Unnamed Contact";
+        }
+      }
+
+      // Generate unique CardCode
+      let baseCode = "NC-";
+      const hubspotId = getString(row["Record ID"]);
+
+      if (hubspotId) {
+        if (hubspotId.includes("E+")) {
+          const parts = hubspotId.split("E+");
+          const base = parseFloat(parts[0]);
+          const exponent = parseInt(parts[1]);
+          const fullNumber = Math.round(
+            base * Math.pow(10, exponent)
+          ).toString();
+          baseCode += "HS-" + fullNumber.substring(0, 8);
+        } else {
+          baseCode += "HS-" + hubspotId.substring(0, 8);
+        }
+      } else if (email) {
+        const emailPrefix = email.split("@")[0];
+        baseCode += "EM-" + emailPrefix.substring(0, 8);
+      } else {
+        baseCode += "TMP-" + Date.now().toString().substring(8) + "-" + i;
+      }
+
+      // Ensure uniqueness
+      let finalCode = baseCode;
+      let counter = 1;
+      while (usedCodes.has(finalCode)) {
+        finalCode = `${baseCode}-${counter}`;
+        counter++;
+      }
+      usedCodes.add(finalCode);
+
+      // Find assigned agent
+      let assignedTo = null;
+      const contactOwner = getString(row["Contact owner"]).toLowerCase();
+      if (contactOwner && agentMapping.has(contactOwner)) {
+        assignedTo = agentMapping.get(contactOwner);
+      }
+
+      // Marketing status
+      let marketingStatus = "marketing-contact";
+      const marketingContactStatus = getString(
+        row["Marketing contact status"]
+      ).toLowerCase();
+      if (marketingContactStatus.includes("non-marketing")) {
+        marketingStatus = "non-marketing-contact";
+      } else if (marketingContactStatus.includes("unsubscribe")) {
+        marketingStatus = "unsubscribed";
+      }
+
+      // Parse create date
+      let createDate = new Date();
+      const createDateStr = getString(row["Create Date"]);
+      if (createDateStr) {
+        try {
+          createDate = new Date(createDateStr);
+          if (isNaN(createDate.getTime())) {
+            createDate = new Date();
+          }
+        } catch (error) {
+          createDate = new Date();
+        }
+      }
+
+      processedContacts.push({
+        CardCode: finalCode,
+        CardName: cardName,
+        firstName: firstName,
+        lastName: lastName,
+        Email: email,
+        phoneNumber: phone,
+        hubspotId: hubspotId,
+        assignedTo: assignedTo,
+        customerType: "non-sap",
+        status: getString(row["Lead Status"]) ? "lead" : "prospect",
+        marketingStatus: marketingStatus,
+        company: getString(row["Associated Company"]),
+        companyId: getString(row["Primary Associated Company ID"]),
+        contactOwnerName: getString(row["Contact owner"]),
+        createdAt: createDate,
+      });
+    }
+
+    console.log(`Processed ${processedContacts.length} valid contacts`);
+
+    // Get all existing customers by email for efficient lookup
+    const allEmails = processedContacts
+      .filter((c) => c.Email)
+      .map((c) => c.Email.toLowerCase());
+    const existingCustomersByEmail = await Customer.find({
+      Email: { $in: allEmails },
+    }).lean();
+
+    const emailToCustomerMap = new Map();
+    existingCustomersByEmail.forEach((customer) => {
+      if (customer.Email) {
+        emailToCustomerMap.set(customer.Email.toLowerCase(), customer);
+      }
+    });
+
+    // Also get existing customers by HubSpot ID
+    const allHubspotIds = processedContacts
+      .filter((c) => c.hubspotId)
+      .map((c) => c.hubspotId);
+    const existingByHubspot = await Customer.find({
+      hubspotId: { $in: allHubspotIds },
+    }).lean();
+
+    const hubspotToCustomerMap = new Map();
+    existingByHubspot.forEach((customer) => {
+      if (customer.hubspotId) {
+        hubspotToCustomerMap.set(customer.hubspotId, customer);
+      }
+    });
+
+    console.log(
+      `Found ${existingCustomersByEmail.length} existing customers by email`
+    );
+    console.log(
+      `Found ${existingByHubspot.length} existing customers by HubSpot ID`
+    );
+
+    // Prepare operations
+    const newCustomers = [];
+    const updateOperations = [];
+    const results = {
+      total: processedContacts.length,
+      newCustomers: 0,
+      updatedAgents: 0,
+      mergedWithSAP: 0,
+      duplicatesSkipped: 0,
+      errors: [],
+    };
+
+    for (const contact of processedContacts) {
+      try {
+        // Check if customer exists by HubSpot ID first
+        let existingCustomer = null;
+        if (contact.hubspotId) {
+          existingCustomer = hubspotToCustomerMap.get(contact.hubspotId);
+        }
+
+        // If not found by HubSpot ID, check by email
+        if (!existingCustomer && contact.Email) {
+          existingCustomer = emailToCustomerMap.get(
+            contact.Email.toLowerCase()
+          );
+        }
+
+        if (existingCustomer) {
+          // Customer exists - only update contact owner if needed
+          if (
+            contact.assignedTo &&
+            existingCustomer.assignedTo?.toString() !==
+              contact.assignedTo.toString()
+          ) {
+            updateOperations.push({
+              updateOne: {
+                filter: { _id: existingCustomer._id },
+                update: {
+                  $set: {
+                    assignedTo: contact.assignedTo,
+                    contactOwnerName: contact.contactOwnerName,
+                  },
+                },
+              },
+            });
+            results.updatedAgents++;
+          }
+
+          // If existing customer is SAP and new contact has different data, count as merged
+          if (existingCustomer.CardCode.startsWith("C")) {
+            results.mergedWithSAP++;
+          } else {
+            results.duplicatesSkipped++;
+          }
+        } else {
+          // New customer
+          newCustomers.push(contact);
+          results.newCustomers++;
+        }
+      } catch (error) {
+        results.errors.push({
+          contact: contact.Email || contact.CardCode,
+          error: error.message,
+        });
+      }
+    }
+
+    console.log(
+      `Prepared ${newCustomers.length} new customers and ${updateOperations.length} updates`
+    );
+
+    // Execute operations in parallel
+    const operationPromises = [];
+
+    // Insert new customers
+    if (newCustomers.length > 0) {
+      operationPromises.push(
+        Customer.insertMany(newCustomers, { ordered: false })
+          .then((result) => ({ insertedCount: result.length }))
+          .catch((error) => {
+            console.error("Insert error:", error);
+            return { insertedCount: 0 };
+          })
+      );
+    }
+
+    // Update existing customers
+    if (updateOperations.length > 0) {
+      operationPromises.push(
+        Customer.bulkWrite(updateOperations, { ordered: false })
+          .then((result) => ({ modifiedCount: result.modifiedCount }))
+          .catch((error) => {
+            console.error("Update error:", error);
+            return { modifiedCount: 0 };
+          })
+      );
+    }
+
+    const operationResults = await Promise.all(operationPromises);
+
+    // Clean up file
+    try {
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error deleting file:", unlinkError);
+    }
+
+    const totalTime = Date.now() - startTime;
+    console.log(`Total processing time: ${totalTime}ms`);
+
+    res.status(200).json({
+      success: true,
+      message: `HubSpot import completed in ${totalTime}ms`,
+      results: {
+        ...results,
+        processingTimeMs: totalTime,
+        recordsPerSecond: Math.round(
+          (processedContacts.length / totalTime) * 1000
+        ),
+      },
+    });
+  } catch (error) {
+    console.error("Fast HubSpot import error:", error);
+
+    // Clean up file
+    try {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error cleaning up file:", unlinkError);
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Error importing HubSpot contacts",
+      error: error.message,
+    });
+  }
+};
+// Replace the previous function with this ultra-fast version
+
+exports.comprehensiveCustomerUpdate = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "Please upload an Excel file",
+      });
+    }
+
+    console.log("Processing file:", req.file.path);
+    const startTime = Date.now();
+
+    let customersData = [];
+    const fileExt = path.extname(req.file.originalname).toLowerCase();
+
+    // Process Excel file
+    if (fileExt === ".xlsx" || fileExt === ".xls") {
+      const workbook = XLSX.readFile(req.file.path);
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      const data = XLSX.utils.sheet_to_json(worksheet);
+
+      console.log(`Extracted ${data.length} rows from Excel file`);
+
+      // Fast data processing - no validation loops
+      customersData = data
+        .map((row) => {
+          const cardCode = (row["BP Code"] || "").toString().trim();
+          if (!cardCode) return null;
+
+          const phone1 = (row["Telephone 1"] || "").toString().trim();
+          const phone2 = (row["Telephone 2"] || "").toString().trim();
+          const balanceStr = (row["Account Balance"] || "0")
+            .toString()
+            .replace(/[^\d.-]/g, "");
+
+          return {
+            CardCode: cardCode,
+            CardName: (row["BP Name"] || "").toString().trim(),
+            Email: (row["E-Mail"] || "").toString().trim(),
+            phoneNumber: phone1,
+            phone2: phone2,
+            outstandingBalance: parseFloat(balanceStr) || 0,
+            prestashopAcc: (row["PRESTASHOP ACC"] || "").toString().trim(),
+            street: (row["Bill-to Street"] || "").toString().trim(),
+            zipCode: (row["Bill-to Postcode"] || "").toString().trim(),
+            city: (row["Bill-to City"] || "").toString().trim(),
+            county: (row["Bill-to County"] || "").toString().trim(),
+            customerType: cardCode.startsWith("C") ? "sap" : "non-sap",
+          };
+        })
+        .filter((customer) => customer !== null);
+
+      console.log(
+        `Processed ${customersData.length} records in ${
+          Date.now() - startTime
+        }ms`
+      );
+    } else {
+      throw new Error("Only Excel files (.xlsx, .xls) are supported");
+    }
+
+    if (customersData.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No valid customer data found",
+      });
+    }
+
+    // Get ALL existing customers in ONE query using projection for speed
+    const existingCustomers = await Customer.find(
+      {
+        CardCode: { $in: customersData.map((c) => c.CardCode) },
+      },
+      {
+        CardCode: 1,
+        Email: 1,
+        phoneNumber: 1,
+        additionalPhoneNumbers: 1,
+        address: 1,
+        outstandingBalance: 1,
+        prestashopAcc: 1,
+        CardName: 1,
+        customerType: 1,
+      }
+    ).lean();
+
+    console.log(
+      `Found ${existingCustomers.length} existing customers in ${
+        Date.now() - startTime
+      }ms`
+    );
+
+    // Create fast lookup map
+    const existingMap = new Map(existingCustomers.map((c) => [c.CardCode, c]));
+
+    // Separate new customers and updates
+    const newCustomers = [];
+    const bulkUpdateOps = [];
+
+    // Fast processing - no complex logic
+    for (const customerData of customersData) {
+      const existing = existingMap.get(customerData.CardCode);
+
+      if (!existing) {
+        // NEW CUSTOMER - simple object creation
+        newCustomers.push({
+          CardCode: customerData.CardCode,
+          CardName: customerData.CardName,
+          Email: customerData.Email,
+          phoneNumber: customerData.phoneNumber,
+          additionalPhoneNumbers: customerData.phone2
+            ? [customerData.phone2]
+            : [],
+          outstandingBalance: customerData.outstandingBalance,
+          prestashopAcc: customerData.prestashopAcc,
+          address: {
+            street: customerData.street,
+            zipCode: customerData.zipCode,
+            city: customerData.city,
+            county: customerData.county,
+            country: "France",
+          },
+          status: "active",
+          customerType: customerData.customerType,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      } else {
+        // EXISTING CUSTOMER - build update object quickly
+        const updateDoc = {
+          CardName: customerData.CardName,
+          outstandingBalance: customerData.outstandingBalance,
+          prestashopAcc: customerData.prestashopAcc,
+          customerType: customerData.customerType,
+          updatedAt: new Date(),
+        };
+
+        // Only update email if customer doesn't have one
+        if (
+          customerData.Email &&
+          (!existing.Email || existing.Email.trim() === "")
+        ) {
+          updateDoc.Email = customerData.Email;
+        }
+
+        // Update phone if different or missing
+        if (
+          customerData.phoneNumber &&
+          customerData.phoneNumber !== existing.phoneNumber
+        ) {
+          updateDoc.phoneNumber = customerData.phoneNumber;
+        }
+
+        // Handle additional phones - simplified logic
+        if (customerData.phone2) {
+          const existingPhones = existing.additionalPhoneNumbers || [];
+          if (
+            !existingPhones.includes(customerData.phone2) &&
+            customerData.phone2 !== existing.phoneNumber
+          ) {
+            updateDoc.additionalPhoneNumbers = [
+              ...existingPhones,
+              customerData.phone2,
+            ];
+          }
+        }
+
+        // Update address - always update all fields
+        updateDoc.address = {
+          street: customerData.street,
+          zipCode: customerData.zipCode,
+          city: customerData.city,
+          county: customerData.county,
+          country: "France",
+        };
+
+        bulkUpdateOps.push({
+          updateOne: {
+            filter: { CardCode: customerData.CardCode },
+            update: { $set: updateDoc },
+          },
+        });
+      }
+    }
+
+    console.log(`Prepared operations in ${Date.now() - startTime}ms`);
+
+    // Execute bulk operations in parallel
+    const results = {
+      total: customersData.length,
+      created: 0,
+      updated: 0,
+      errors: 0,
+    };
+
+    try {
+      // Execute both operations in parallel
+      const [insertResult, updateResult] = await Promise.all([
+        // Bulk insert new customers
+        newCustomers.length > 0
+          ? Customer.insertMany(newCustomers, { ordered: false })
+          : Promise.resolve([]),
+        // Bulk update existing customers
+        bulkUpdateOps.length > 0
+          ? Customer.bulkWrite(bulkUpdateOps, { ordered: false })
+          : Promise.resolve({ modifiedCount: 0 }),
+      ]);
+
+      results.created = Array.isArray(insertResult) ? insertResult.length : 0;
+      results.updated = updateResult.modifiedCount || 0;
+
+      console.log(`Bulk operations completed in ${Date.now() - startTime}ms`);
+    } catch (error) {
+      console.error("Bulk operation error:", error);
+      // Handle partial success
+      if (error.writeErrors) {
+        results.errors = error.writeErrors.length;
+        results.created = newCustomers.length - results.errors;
+      }
+    }
+
+    // Clean up file
+    try {
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error deleting file:", unlinkError);
+    }
+
+    const totalTime = Date.now() - startTime;
+    console.log(`Total processing time: ${totalTime}ms`);
+
+    res.status(200).json({
+      success: true,
+      message: `Fast update completed in ${totalTime}ms: ${results.created} created, ${results.updated} updated`,
+      results: {
+        ...results,
+        processingTimeMs: totalTime,
+        recordsPerSecond: Math.round((customersData.length / totalTime) * 1000),
+      },
+    });
+  } catch (error) {
+    console.error("Fast customer update error:", error);
+
+    // Clean up file
+    try {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error cleaning up file:", unlinkError);
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Error updating customers",
+      error: error.message,
+    });
+  }
+};
+
 // Controller function for checking and adding new customers
 exports.checkAndAddNewCustomers = async (req, res) => {
   try {

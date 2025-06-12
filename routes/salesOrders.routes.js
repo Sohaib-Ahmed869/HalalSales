@@ -3,6 +3,25 @@ const express = require("express");
 const router = express.Router();
 const orderController = require("../controllers/order.controller");
 const { auth } = require("../middleware/auth");
+
+const multer = require("multer");
+
+// Configure multer for file uploads
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 50 * 1024 * 1024, // 50MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || 
+        file.mimetype === 'application/vnd.ms-excel') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only Excel files are allowed'), false);
+    }
+  }
+});
+router.post("/bulk-import", upload.single('file'), orderController.bulkImportSalesOrders);
 // @route   POST /api/orders
 // @desc    Create a new sales order in local DB
 // @access  Private

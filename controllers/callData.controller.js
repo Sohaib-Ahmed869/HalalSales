@@ -92,30 +92,174 @@ const callDataController = {
   // Upload and process CSV file
   uploadCSV: async (req, res) => {
     try {
+      const startTime = Date.now();
+
       if (!req.file) {
         return res.status(400).json({ error: "No file uploaded" });
       }
 
+      console.log("Starting CSV import...");
       const filePath = req.file.path;
 
       // Parse the CSV file
       const rawData = await parseCSV(filePath);
+      console.log(`Parsed ${rawData.length} rows from CSV`);
 
       // Transform data to match our model
       const transformedData = transformData(rawData);
+      console.log(`Transformed ${transformedData.length} records`);
 
-      // Save data to database
-      const savedData = await CallData.insertMany(transformedData, {
-        ordered: false, // Continue processing even if some documents fail
+      let savedCount = 0;
+      let duplicateCount = 0;
+      let errorCount = 0;
+      const errors = [];
+
+      // First, check for existing records to avoid duplicates
+      const recordIds = transformedData
+        .map((record) => record.id)
+        .filter((id) => id);
+      const existingRecords = await CallData.find(
+        { id: { $in: recordIds } },
+        { id: 1 }
+      ).lean();
+
+      const existingIds = new Set(existingRecords.map((record) => record.id));
+      console.log(`Found ${existingIds.size} existing records`);
+
+      // Filter out existing records
+      const newRecords = transformedData.filter((record) => {
+        if (existingIds.has(record.id)) {
+          duplicateCount++;
+          return false;
+        }
+        return true;
       });
+
+      console.log(
+        `${newRecords.length} new records to insert, ${duplicateCount} duplicates skipped`
+      );
+
+      // Process new records in batches
+      const batchSize = 1000;
+
+      for (let i = 0; i < newRecords.length; i += batchSize) {
+        const batch = newRecords.slice(i, i + batchSize);
+
+        try {
+          const result = await CallData.insertMany(batch, {
+            ordered: false, // Continue processing even if some documents fail
+          });
+          savedCount += result.length;
+          console.log(
+            `Batch ${Math.floor(i / batchSize) + 1}: ${
+              result.length
+            } records saved`
+          );
+        } catch (error) {
+          if (error.name === "BulkWriteError") {
+            // Handle bulk write errors
+            const writeErrors = error.writeErrors || [];
+            const insertedCount = error.result?.insertedCount || 0;
+
+            savedCount += insertedCount;
+
+            // Process each error
+            writeErrors.forEach((writeError, index) => {
+              if (writeError.code === 11000) {
+                // This shouldn't happen since we pre-filtered, but just in case
+                duplicateCount++;
+                console.log(`Unexpected duplicate found: ${writeError.errmsg}`);
+              } else {
+                // Other validation or processing errors
+                errorCount++;
+                errors.push({
+                  row: i + (writeError.index || index) + 1,
+                  error: writeError.errmsg || writeError.message,
+                  recordId: batch[writeError.index]?.id || "unknown",
+                });
+              }
+            });
+
+            console.log(
+              `Batch ${
+                Math.floor(i / batchSize) + 1
+              }: ${insertedCount} saved, ${
+                writeErrors.filter((e) => e.code !== 11000).length
+              } errors`
+            );
+          } else {
+            // Non-bulk write error - try individual inserts
+            console.log(`Batch failed, attempting individual inserts...`);
+
+            for (let j = 0; j < batch.length; j++) {
+              try {
+                await CallData.create(batch[j]);
+                savedCount++;
+              } catch (individualError) {
+                if (individualError.code === 11000) {
+                  duplicateCount++;
+                  console.log(
+                    `Duplicate found during individual insert: ${batch[j].id}`
+                  );
+                } else {
+                  errorCount++;
+                  errors.push({
+                    row: i + j + 1,
+                    error: individualError.message,
+                    recordId: batch[j]?.id || "unknown",
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
 
       // Clean up - remove the temporary file
       fs.unlinkSync(filePath);
 
+      const endTime = Date.now();
+      const processingTime = ((endTime - startTime) / 1000).toFixed(2);
+
+      console.log(
+        `CSV import completed: ${savedCount} saved, ${duplicateCount} duplicates, ${errorCount} errors`
+      );
+
       return res.status(200).json({
+        success: true,
         message: "CSV data processed successfully",
-        recordsProcessed: rawData.length,
-        recordsSaved: savedData.length,
+        data: {
+          totalRowsProcessed: rawData.length,
+          recordsTransformed: transformedData.length,
+          recordsSaved: savedCount,
+          duplicatesSkipped: duplicateCount,
+          recordsWithErrors: errorCount,
+          processingTimeSeconds: processingTime,
+          summary: {
+            successRate: `${(
+              (savedCount / transformedData.length) *
+              100
+            ).toFixed(1)}%`,
+            duplicateRate: `${(
+              (duplicateCount / transformedData.length) *
+              100
+            ).toFixed(1)}%`,
+            errorRate: `${((errorCount / transformedData.length) * 100).toFixed(
+              1
+            )}%`,
+          },
+        },
+        // Only include error details if there are errors and the list isn't too long
+        ...(errors.length > 0 &&
+          errors.length <= 10 && {
+            errorDetails: errors,
+          }),
+        // If there are many errors, just show a sample
+        ...(errors.length > 10 && {
+          errorSample: errors.slice(0, 5),
+          totalErrors: errors.length,
+          note: "Showing first 5 errors. Check server logs for complete error list.",
+        }),
       });
     } catch (error) {
       console.error("Error processing CSV:", error);
@@ -126,8 +270,10 @@ const callDataController = {
       }
 
       return res.status(500).json({
+        success: false,
         error: "Error processing CSV file",
         details: error.message,
+        stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
       });
     }
   },
