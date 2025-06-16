@@ -3202,16 +3202,69 @@ exports.getCustomerCallData = async (req, res) => {
       return res.status(404).json({ message: "Customer not found" });
     }
 
-    // Collect and clean all phone numbers
-    let phoneNumbers = [
-      customer.phoneNumber,
-      ...(customer.additionalPhoneNumbers || []),
-    ]
-      .filter((p) => p && typeof p === "string" && p.length >= 6) // Filter out invalid entries
-      .map((p) => p.replace(/[\s+.-]/g, "")); // Clean format
+    // Collect ALL phone numbers from different fields
+    let allPhoneNumbers = [];
+
+    // Add primary phone number
+    if (customer.phoneNumber) {
+      allPhoneNumbers.push(customer.phoneNumber);
+    }
+
+    // Add additional phone numbers (from additionalPhoneNumbers field)
+    if (
+      customer.additionalPhoneNumbers &&
+      Array.isArray(customer.additionalPhoneNumbers)
+    ) {
+      allPhoneNumbers.push(...customer.additionalPhoneNumbers);
+    }
+
+    // Add additional phones (from additionalPhones field if it exists)
+    if (customer.additionalPhones && Array.isArray(customer.additionalPhones)) {
+      allPhoneNumbers.push(...customer.additionalPhones);
+    }
+
+    // Function to normalize phone numbers to core digits for matching
+    const normalizePhoneForMatching = (phone) => {
+      if (!phone || typeof phone !== "string") return null;
+
+      // Remove all non-digit characters
+      let digitsOnly = phone.replace(/[^\d]/g, "");
+
+      // Handle French numbers - normalize to 9 digits (without leading 0)
+      if (digitsOnly.startsWith("33") && digitsOnly.length >= 11) {
+        // +33123456789 -> 123456789
+        return digitsOnly.substring(2);
+      } else if (digitsOnly.startsWith("0") && digitsOnly.length === 10) {
+        // 0123456789 -> 123456789
+        return digitsOnly.substring(1);
+      } else if (digitsOnly.length === 9) {
+        // 123456789 -> 123456789
+        return digitsOnly;
+      }
+
+      return digitsOnly;
+    };
+
+    // Normalize customer phone numbers to core digits
+    const customerCoreNumbers = [];
+
+    allPhoneNumbers.forEach((phone) => {
+      const coreNumber = normalizePhoneForMatching(phone);
+      if (coreNumber && coreNumber.length >= 6) {
+        customerCoreNumbers.push(coreNumber);
+      }
+    });
+
+    // Remove duplicates
+    const uniqueCoreNumbers = [...new Set(customerCoreNumbers)];
+
+    console.log(`Customer ${customerId} phone numbers:`, {
+      original: allPhoneNumbers,
+      coreNumbers: uniqueCoreNumbers,
+    });
 
     // If no valid numbers, return empty response
-    if (phoneNumbers.length === 0) {
+    if (uniqueCoreNumbers.length === 0) {
       return res.status(200).json({
         success: true,
         data: [],
@@ -3237,22 +3290,38 @@ exports.getCustomerCallData = async (req, res) => {
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
-    // Create exact match filter for any of the phone numbers
-    const filter = {
+    // Get all call data to check against customer numbers
+    const allCalls = await CallData.find({
       $and: [
         { fromNumber: { $nin: [null, "", ".", "N/A", "Unknown"] } },
         { toNumber: { $nin: [null, "", ".", "N/A", "Unknown"] } },
-        {
-          $or: phoneNumbers.flatMap((number) => [
-            { fromNumber: number },
-            { toNumber: number },
-          ]),
-        },
       ],
+    })
+      .select("fromNumber toNumber _id")
+      .lean();
+
+    // Find matching calls by normalizing call data phone numbers
+    const matchingCallIds = [];
+
+    allCalls.forEach((call) => {
+      const fromCore = normalizePhoneForMatching(call.fromNumber);
+      const toCore = normalizePhoneForMatching(call.toNumber);
+
+      if (
+        (fromCore && uniqueCoreNumbers.includes(fromCore)) ||
+        (toCore && uniqueCoreNumbers.includes(toCore))
+      ) {
+        matchingCallIds.push(call._id);
+      }
+    });
+
+    const filter = {
+      _id: { $in: matchingCallIds },
     };
 
     // Date range filter
     if (req.query.startDate && req.query.endDate) {
+      filter.$and = filter.$and || [];
       filter.$and.push({
         startTime: {
           $gte: new Date(req.query.startDate),
@@ -3263,15 +3332,22 @@ exports.getCustomerCallData = async (req, res) => {
 
     // Direction filter
     if (req.query.direction && req.query.direction !== "all") {
+      filter.$and = filter.$and || [];
       filter.$and.push({ direction: req.query.direction });
     }
 
     // Call status filter
     if (req.query.status === "missed") {
+      filter.$and = filter.$and || [];
       filter.$and.push({ missed: { $ne: "" } });
     } else if (req.query.status === "answered") {
+      filter.$and = filter.$and || [];
       filter.$and.push({ missed: "" });
     }
+
+    console.log(
+      `Found ${matchingCallIds.length} matching calls for customer ${customerId}`
+    );
 
     // Get paginated call data
     const callData = await CallData.find(filter)
@@ -3334,6 +3410,10 @@ exports.getCustomerCallData = async (req, res) => {
         page,
         limit,
         pages: Math.ceil(total / limit),
+      },
+      debug: {
+        customerPhones: uniqueCoreNumbers,
+        totalMatchingCalls: matchingCallIds.length,
       },
     });
   } catch (error) {

@@ -456,7 +456,7 @@ const callDataController = {
       });
       const missedCalls = await CallData.countDocuments({
         ...filter,
-        missed: { $ne: "" },
+        lastState: "MISSED",
       });
 
       // Duration statistics
@@ -569,6 +569,11 @@ const callDataController = {
         }
       }
 
+      // Add agent name filter for call log view
+      if (req.query.agentName) {
+        filter.userName = req.query.agentName;
+      }
+
       if (req.query.startDate && req.query.endDate) {
         filter.startTime = {
           $gte: new Date(req.query.startDate),
@@ -581,11 +586,17 @@ const callDataController = {
       }
 
       if (req.query.status) {
+        console.log(req.query.status);
         if (req.query.status === "missed") {
-          filter.missed = { $ne: "" };
+          filter.lastState = "MISSED";
         } else if (req.query.status === "answered") {
-          filter.missed = "";
+          filter.lastState = { $ne: "MISSED" };
         }
+      }
+
+      // Add direction filter to the main filter object
+      if (req.query.direction && req.query.direction !== "all") {
+        filter.direction = req.query.direction;
       }
 
       if (req.query.search) {
@@ -598,25 +609,14 @@ const callDataController = {
         ];
       }
 
-      console.log("direction", req.query);
-      // Execute query with pagination
-      let callData =
-        req.query.direction === "all"
-          ? await CallData.find({
-              ...filter,
-            })
-              .sort({ startTime: -1 })
-              .skip(skip)
-              .limit(limit)
-              .lean()
-          : await CallData.find({
-              ...filter,
-              direction: req.query.direction,
-            })
-              .sort({ startTime: -1 })
-              .skip(skip)
-              .limit(limit)
-              .lean();
+      console.log("Final filter:", filter);
+
+      // Execute query with pagination - use single query with complete filter
+      const callData = await CallData.find(filter)
+        .sort({ startTime: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean();
 
       const total = await CallData.countDocuments(filter);
 
@@ -695,7 +695,7 @@ const callDataController = {
       });
       const missedCalls = await CallData.countDocuments({
         ...filter,
-        missed: { $ne: "" },
+        lastState: "MISSED",
       });
 
       // Duration statistics
@@ -748,7 +748,7 @@ const callDataController = {
               $sum: { $cond: [{ $eq: ["$direction", "out"] }, 1, 0] },
             },
             missedCalls: {
-              $sum: { $cond: [{ $eq: ["$missed", "true"] }, 1, 0] },
+              $sum: { $cond: [{ $eq: ["$lastState", "MISSED"] }, 1, 0] },
             },
             totalDuration: { $sum: "$totalDuration" },
             inCallDuration: { $sum: "$inCallDuration" },
@@ -839,10 +839,12 @@ const callDataController = {
         {
           $group: {
             _id: { userID: "$userID", userName: "$userName" },
+
             totalCalls: { $sum: 1 },
             answeredCalls: {
-              $sum: { $cond: [{ $eq: ["$missed", "true"] }, 0, 1] },
+              $sum: { $cond: [{ $eq: ["$lastState", "MISSED"] }, 0, 1] },
             },
+
             totalDuration: { $sum: "$totalDuration" },
             inCallDuration: { $sum: "$inCallDuration" },
             avgCallDuration: { $avg: "$inCallDuration" },
@@ -862,7 +864,7 @@ const callDataController = {
         },
         {
           $project: {
-            _id: 0,
+            _id: "$_id.userID",
             userID: "$_id.userID",
             userName: "$_id.userName",
             totalCalls: 1,
@@ -910,7 +912,7 @@ const callDataController = {
                   $dateToString: { format: "%Y-%m-%d", date: "$startTime" },
                 },
                 direction: 1,
-                missed: 1,
+                lastState: 1, // Change from missed: 1 to lastState: 1
                 inCallDuration: 1,
                 qualityScore: 1,
               },
@@ -920,7 +922,7 @@ const callDataController = {
                 _id: { date: "$date" },
                 calls: { $sum: 1 },
                 answeredCalls: {
-                  $sum: { $cond: [{ $eq: ["$missed", "true"] }, 0, 1] },
+                  $sum: { $cond: [{ $eq: ["$lastState", "MISSED"] }, 0, 1] },
                 },
                 inCallDuration: { $sum: "$inCallDuration" },
                 // Add quality score average for daily trend
@@ -957,6 +959,96 @@ const callDataController = {
       console.error("Error fetching agent performance comparison:", error);
       return res.status(500).json({
         error: "Error fetching agent performance comparison",
+        details: error.message,
+      });
+    }
+  },
+  // Add this new function to callDataController
+  getAgentHourlyData: async (req, res) => {
+    try {
+      const { agentId } = req.params;
+      const { startDate, endDate } = req.query;
+
+      // Find the agent by ID to get their name
+      const agent = await User.findById(agentId);
+      if (!agent) {
+        return res.status(404).json({ error: "Agent not found" });
+      }
+
+      const agentName = `${agent.firstName} ${agent.lastName}`;
+
+      // Set default date range if not provided
+      const endDateTime = endDate ? new Date(endDate) : new Date();
+      const startDateTime = startDate
+        ? new Date(startDate)
+        : new Date(endDateTime.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+      // Filter for the specific agent and date range
+      const filter = {
+        userName: agentName,
+        startTime: {
+          $gte: startDateTime,
+          $lte: endDateTime,
+        },
+      };
+
+      // Aggregate calls by hour
+      const hourlyData = await CallData.aggregate([
+        { $match: filter },
+        {
+          $project: {
+            hour: { $hour: "$startTime" },
+            inCallDuration: 1,
+            qualityScore: 1,
+            lastState: 1,
+          },
+        },
+        {
+          $group: {
+            _id: { hour: "$hour" },
+            calls: { $sum: 1 },
+            duration: { $sum: "$inCallDuration" },
+            totalQualityScore: { $sum: "$qualityScore" },
+            qualityCount: {
+              $sum: { $cond: [{ $gt: ["$qualityScore", 0] }, 1, 0] },
+            },
+            missedCalls: {
+              $sum: { $cond: [{ $eq: ["$lastState", "MISSED"] }, 1, 0] },
+            },
+          },
+        },
+        { $sort: { "_id.hour": 1 } },
+      ]);
+
+      // Create array for all 24 hours
+      const hourlyStats = new Array(24).fill(0).map((_, hour) => {
+        const hourData = hourlyData.find((h) => h._id.hour === hour);
+
+        return {
+          hour,
+          calls: hourData ? hourData.calls : 0,
+          duration: hourData ? hourData.duration : 0,
+          qualityScore:
+            hourData && hourData.qualityCount > 0
+              ? hourData.totalQualityScore / hourData.qualityCount
+              : 0,
+          missedCalls: hourData ? hourData.missedCalls : 0,
+          answeredCalls: hourData ? hourData.calls - hourData.missedCalls : 0,
+        };
+      });
+
+      return res.status(200).json({
+        agentName,
+        hourlyData: hourlyStats,
+        dateRange: {
+          startDate: startDateTime,
+          endDate: endDateTime,
+        },
+      });
+    } catch (error) {
+      console.error("Error fetching agent hourly data:", error);
+      return res.status(500).json({
+        error: "Error fetching agent hourly data",
         details: error.message,
       });
     }

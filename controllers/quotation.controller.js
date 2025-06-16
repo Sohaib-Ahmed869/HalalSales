@@ -122,18 +122,41 @@ exports.getQuotationStats = async (req, res) => {
   try {
     const { fromDate, toDate, salesAgent } = req.query;
 
-    // Build filter query
+    // Build filter query with role-based restrictions
     let query = { IsActive: true };
+
+    // Role-based filtering
+    if (req.user.role === "sales_agent") {
+      // Sales agents can only see their own stats
+      query.salesAgent = req.user._id;
+    } else if (req.user.role === "sales_manager") {
+      // Sales managers can see stats from their team members
+      const teamMembers = await User.find({ manager: req.user._id }).distinct(
+        "_id"
+      );
+      const allAgentIds = [...teamMembers, req.user._id];
+      query.salesAgent = { $in: allAgentIds };
+
+      // If specific sales agent requested, verify they're in the team
+      if (salesAgent) {
+        if (allAgentIds.map((id) => id.toString()).includes(salesAgent)) {
+          query.salesAgent = salesAgent;
+        } else {
+          query.salesAgent = "invalid_agent_id"; // Will return 0 results
+        }
+      }
+    } else if (req.user.role === "admin") {
+      // Admins can see all stats, optionally filtered by sales agent
+      if (salesAgent) {
+        query.salesAgent = salesAgent;
+      }
+    }
 
     if (fromDate && toDate) {
       query.DocDate = {
         $gte: new Date(fromDate),
         $lte: new Date(toDate),
       };
-    }
-
-    if (salesAgent) {
-      query.salesAgent = salesAgent;
     }
 
     // Get total quotations
@@ -152,10 +175,11 @@ exports.getQuotationStats = async (req, res) => {
       approvalStatus: "pending",
     });
 
-    // Calculate conversion rate (you'll need to implement based on your logic)
+    // Calculate conversion rate
     const convertedQuotations = await Quotation.countDocuments({
       ...query,
       ConvertedToOrderDocEntry: { $exists: true },
+      IsActive: false,
     });
 
     const conversionRate =
@@ -180,7 +204,7 @@ exports.getQuotationStats = async (req, res) => {
       error: error.message,
     });
   }
-};
+};  
 
 // Export quotations
 exports.exportQuotations = async (req, res) => {
@@ -509,6 +533,9 @@ exports.getAllQuotations = async (req, res) => {
     const skip = (page - 1) * limit;
 
     console.log("Query parameters for fetching quotations:", req.query);
+    console.log("User role:", req.user.role);
+    console.log("User ID:", req.user._id);
+
     // Base query - only show active quotations by default
     let query = { IsActive: true };
 
@@ -517,15 +544,46 @@ exports.getAllQuotations = async (req, res) => {
       query = {};
     }
 
+    // Role-based filtering
+    if (req.user.role === "sales_agent") {
+      // Sales agents can only see their own quotations
+      query.salesAgent = req.user._id;
+    } else if (req.user.role === "sales_manager") {
+      // Sales managers can see quotations from their team members
+      const teamMembers = await User.find({ manager: req.user._id }).distinct(
+        "_id"
+      );
+      // Include the manager's own quotations if they have any
+      const allAgentIds = [...teamMembers, req.user._id];
+      query.salesAgent = { $in: allAgentIds };
+    }
+    // Admin users can see all quotations (no additional filtering)
+
     // Add filters if provided
     if (req.query.cardCode) {
-      query.CardCode = req.query.cardCode;
+      query.CardCode = { $regex: req.query.cardCode, $options: "i" };
+    }
+
+    if (req.query.search) {
+      const searchRegex = { $regex: req.query.search, $options: "i" };
+      query.$or = [
+        { CardName: searchRegex },
+        { CardCode: searchRegex },
+        { DocNum: req.query.search },
+      ];
     }
 
     if (req.query.status) {
-      query.approvalStatus = req.query.status;
+      if (req.query.status === "converted") {
+        query.ConvertedToOrderDocEntry = { $exists: true };
+        query.IsActive = false;
+      } else if (req.query.status === "cancelled") {
+        query.IsActive = false;
+        query.ConvertedToOrderDocEntry = { $exists: false };
+      } else {
+        query.approvalStatus = req.query.status;
+      }
     }
-
 
     if (req.query.fromDate && req.query.toDate) {
       query.DocDate = {
@@ -545,30 +603,39 @@ exports.getAllQuotations = async (req, res) => {
         $lte: new Date(req.query.toDate),
       };
     }
-    
 
-    if (req.query.salesAgent) {
-      query.salesAgent = req.query.salesAgent;
-    }
-
-    // Filter for current user if sales agent
-    if (req.user.role === "sales_agent") {
-      query.salesAgent = req.user._id;
-    }
-
-    // If sales manager, get all quotations from their agents
-    if (req.user.role === "sales_manager") {
-      const agentIds = await User.find({ manager: req.user._id }).distinct(
+    // Additional sales agent filter for sales managers
+    if (req.query.salesAgent && req.user.role === "sales_manager") {
+      // Verify the requested agent is in their team
+      const teamMembers = await User.find({ manager: req.user._id }).distinct(
         "_id"
       );
-      query.salesAgent = { $in: agentIds };
+      const requestedAgentId = req.query.salesAgent;
+
+      if (
+        teamMembers.map((id) => id.toString()).includes(requestedAgentId) ||
+        requestedAgentId === req.user._id.toString()
+      ) {
+        query.salesAgent = requestedAgentId;
+      } else {
+        // If requesting an agent not in their team, return empty results
+        query.salesAgent = "invalid_agent_id";
+      }
     }
+
+    // Sorting
+    const sortBy = req.query.sortBy || "DocDate";
+    const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
+    const sortOptions = {};
+    sortOptions[sortBy] = sortOrder;
+
+    console.log("Final query:", JSON.stringify(query, null, 2));
 
     const quotations = await Quotation.find(query)
       .populate("salesAgent", "firstName lastName email")
       .skip(skip)
       .limit(limit)
-      .sort({ DocDate: -1 });
+      .sort(sortOptions);
 
     const total = await Quotation.countDocuments(query);
 

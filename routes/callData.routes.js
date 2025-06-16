@@ -40,6 +40,7 @@ const upload = multer({
 // Routes
 router.post("/upload", upload.single("file"), callDataController.uploadCSV);
 router.get("/agent", auth, callDataController.getAgentCallData);
+router.get('/agent/:agentId/hourly', callDataController.getAgentHourlyData);
 
 // Get call statistics for the current authenticated agent
 router.get("/statistics", auth, callDataController.getAgentCallStatistics);

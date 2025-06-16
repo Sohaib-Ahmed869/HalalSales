@@ -510,6 +510,18 @@ exports.getCustomerJourney = async (req, res) => {
       ), // Keep gross for reference
       totalPaidAmount: totalPaidAmountFromLinks,
       outstandingBalance: outstandingBalanceFromLinks,
+      averagePaymentTime: calculateAveragePaymentTime(invoices, paymentLinks),
+      paymentMethods: analyzePaymentMethods(payments),
+      relationshipDuration:
+        firstInteraction && lastInteraction
+          ? Math.ceil(
+              (new Date(lastInteraction) - new Date(firstInteraction)) /
+                (1000 * 60 * 60 * 24)
+            )
+          : 0,
+      firstInteractionDate: firstInteraction,
+      lastInteractionDate: lastInteraction,
+      paymentPatterns: analyzePaymentPatterns(invoices, paymentLinks),
     };
 
     // Calculate quarterly activity
