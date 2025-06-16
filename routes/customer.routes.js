@@ -51,8 +51,22 @@ const upload = multer({
     fileSize: 10 * 1024 * 1024, // 10 MB file size limit
   },
 });
+router.get(
+  "/preview-zero-value",
+  customerController.previewZeroValueAbandonedCarts
+);
 
+// Route for removing zero-value abandoned carts (admin only with multiple safety checks)
+router.delete(
+  "/remove-zero-value",
+  customerController.removeZeroValueAbandonedCarts
+);
 // Add this route to your customer.routes.js file after the existing routes
+router.post(
+  "/assign-from-file",
+  upload.single("file"),
+  customerController.assignCustomersFromFile
+);
 
 router.post(
   "/fast-hubspot-import",

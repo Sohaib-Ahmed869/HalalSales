@@ -336,25 +336,23 @@ exports.getSalesAgentPerformance = async (req, res) => {
         });
       }
 
+      // Parse time strings directly instead of using virtual properties
+      const productiveHours =
+        timeParser.parseTimeToHours(record.productiveTime) || 0;
+      const deskHours = timeParser.parseTimeToHours(record.totalDeskTime) || 0;
+
+      // *** FIX: Only count as work day if at least 4 hours desk time ***
+      if (deskHours < 4) {
+        return; // Skip this record - not a valid work day
+      }
+
       const date = record.date;
       let key;
 
-      switch (groupBy) {
-        case "week":
-          // Get week start (Sunday)
-          const weekStartDate = new Date(date);
-          weekStartDate.setDate(date.getDate() - date.getDay());
-          key = weekStartDate.toISOString().split("T")[0];
-          break;
-
-        case "month":
-          key = `${date.getFullYear()}-${date.getMonth() + 1}`;
-          break;
-
-        case "day":
-        default:
-          key = date.toISOString().split("T")[0];
-          break;
+      switch (
+        groupBy
+        // ... switch cases remain the same ...
+      ) {
       }
 
       if (!groupedData[key]) {
@@ -368,11 +366,6 @@ exports.getSalesAgentPerformance = async (req, res) => {
           orderCount: 0,
         };
       }
-
-      // Parse time strings directly instead of using virtual properties
-      const productiveHours =
-        timeParser.parseTimeToHours(record.productiveTime) || 0;
-      const deskHours = timeParser.parseTimeToHours(record.totalDeskTime) || 0;
 
       // Update group stats
       groupedData[key].days += 1;

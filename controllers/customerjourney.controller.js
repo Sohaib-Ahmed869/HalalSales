@@ -356,9 +356,26 @@ exports.getCustomerJourney = async (req, res) => {
     }, {});
 
     // Create customer journey timeline
+    // Create customer journey timeline
     const timeline = [
       ...invoices.map((invoice) => {
         const netAmount = (invoice.DocTotal || 0) - (invoice.VatSum || 0);
+
+        // Calculate total payments from PaymentLinks for this invoice
+        const paymentLinksForInvoice = paymentLinks.filter(
+          (link) => link.invoiceNumber === invoice.DocNum
+        );
+        const totalPaymentsFromLinks = paymentLinksForInvoice.reduce(
+          (sum, link) => sum + (link.paymentAmount || 0),
+          0
+        );
+
+        // Use the higher of PaidToDate or PaymentLinks total
+        const actualPaidAmount = Math.max(
+          invoice.PaidToDate || 0,
+          totalPaymentsFromLinks
+        );
+
         return {
           type: "invoice",
           date: invoice.DocDate,
@@ -366,11 +383,11 @@ exports.getCustomerJourney = async (req, res) => {
           grossAmount: invoice.DocTotal, // Keep gross for reference
           vatAmount: invoice.VatSum || 0,
           docNum: invoice.DocNum,
-          isPaid: invoice.PaidToDate === invoice.DocTotal,
+          isPaid: actualPaidAmount >= invoice.DocTotal,
           partiallyPaid:
-            invoice.PaidToDate > 0 && invoice.PaidToDate < invoice.DocTotal,
-          paidAmount: invoice.PaidToDate,
-          balance: invoice.DocTotal - invoice.PaidToDate,
+            actualPaidAmount > 0 && actualPaidAmount < invoice.DocTotal,
+          paidAmount: actualPaidAmount,
+          balance: invoice.DocTotal - actualPaidAmount,
           details: invoice,
         };
       }),
@@ -379,8 +396,14 @@ exports.getCustomerJourney = async (req, res) => {
         let paymentMethod = "Unknown";
         if (payment.CashSum > 0) paymentMethod = "Cash";
         else if (payment.TransferSum > 0) paymentMethod = "Bank Transfer";
-        else if (payment.CreditSum) paymentMethod = "Credit Card";
-        else if (payment.CheckSum) paymentMethod = "Check";
+        else if (
+          payment.PaymentCreditCards &&
+          payment.PaymentCreditCards.length > 0
+        )
+          paymentMethod = "Credit Card";
+        else if (payment.PaymentChecks && payment.PaymentChecks.length > 0)
+          paymentMethod = "Check";
+        else if (payment.DocTotal > 0) paymentMethod = "Other";
 
         // Calculate payment total
         const paymentTotal = calculatePaymentTotal(payment);
@@ -443,6 +466,37 @@ exports.getCustomerJourney = async (req, res) => {
     );
 
     // Calculate customer journey metrics
+    // Calculate total paid amount using PaymentLinks data
+    const totalPaidAmountFromLinks = invoices.reduce((sum, inv) => {
+      const paymentLinksForInvoice = paymentLinks.filter(
+        (link) => link.invoiceNumber === inv.DocNum
+      );
+      const totalPaymentsFromLinks = paymentLinksForInvoice.reduce(
+        (linkSum, link) => linkSum + (link.paymentAmount || 0),
+        0
+      );
+      const actualPaidAmount = Math.max(
+        inv.PaidToDate || 0,
+        totalPaymentsFromLinks
+      );
+      return sum + actualPaidAmount;
+    }, 0);
+
+    const outstandingBalanceFromLinks = invoices.reduce((sum, inv) => {
+      const paymentLinksForInvoice = paymentLinks.filter(
+        (link) => link.invoiceNumber === inv.DocNum
+      );
+      const totalPaymentsFromLinks = paymentLinksForInvoice.reduce(
+        (linkSum, link) => linkSum + (link.paymentAmount || 0),
+        0
+      );
+      const actualPaidAmount = Math.max(
+        inv.PaidToDate || 0,
+        totalPaymentsFromLinks
+      );
+      return sum + (inv.DocTotal - actualPaidAmount);
+    }, 0);
+
     const metrics = {
       totalInvoices: invoices.length,
       totalPayments: payments.length,
@@ -454,26 +508,8 @@ exports.getCustomerJourney = async (req, res) => {
         (sum, inv) => sum + (inv.DocTotal || 0),
         0
       ), // Keep gross for reference
-      totalPaidAmount: invoices.reduce(
-        (sum, inv) => sum + (inv.PaidToDate || 0),
-        0
-      ),
-      outstandingBalance: invoices.reduce(
-        (sum, inv) => sum + (inv.DocTotal - inv.PaidToDate),
-        0
-      ),
-      averagePaymentTime: calculateAveragePaymentTime(invoices, paymentLinks),
-      paymentMethods: analyzePaymentMethods(payments),
-      relationshipDuration:
-        firstInteraction && lastInteraction
-          ? Math.ceil(
-              (new Date(lastInteraction) - new Date(firstInteraction)) /
-                (1000 * 60 * 60 * 24)
-            )
-          : 0,
-      firstInteractionDate: firstInteraction,
-      lastInteractionDate: lastInteraction,
-      paymentPatterns: analyzePaymentPatterns(invoices, paymentLinks),
+      totalPaidAmount: totalPaidAmountFromLinks,
+      outstandingBalance: outstandingBalanceFromLinks,
     };
 
     // Calculate quarterly activity

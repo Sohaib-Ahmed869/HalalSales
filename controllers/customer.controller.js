@@ -3551,6 +3551,295 @@ exports.deleteMergedNonSapCustomers = async (req, res) => {
     });
   }
 };
+
+// Controller function for assigning customers to agents from CSV file
+exports.assignCustomersFromFile = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "Please upload a CSV file",
+      });
+    }
+
+    console.log("Processing customer-agent assignment file:", req.file.path);
+    const startTime = Date.now();
+
+    // Read CSV file
+    const csv = require("csv-parser");
+    const data = [];
+
+    // Parse CSV data
+    await new Promise((resolve, reject) => {
+      fs.createReadStream(req.file.path)
+        .pipe(csv())
+        .on("data", (row) => {
+          data.push(row);
+        })
+        .on("end", () => {
+          console.log(`Extracted ${data.length} rows from CSV file`);
+          resolve();
+        })
+        .on("error", (error) => {
+          console.error("CSV parsing error:", error);
+          reject(error);
+        });
+    });
+
+    // Log the first few rows to see the actual structure
+    console.log(
+      "First 3 rows of data:",
+      JSON.stringify(data.slice(0, 3), null, 2)
+    );
+
+    // Log all available column names
+    if (data.length > 0) {
+      console.log("Available columns:", Object.keys(data[0]));
+    }
+
+    // Extract assignments from the data with more flexible column matching
+    const assignments = data
+      .map((row, index) => {
+        // Try different possible column name variations
+        const cardCode = (
+          row["card code"] ||
+          row["CardCode"] ||
+          row["Card Code"] ||
+          row["CARD CODE"] ||
+          row["card_code"] ||
+          ""
+        )
+          .toString()
+          .trim();
+
+        const agentName = (
+          row["agent name"] ||
+          row["AgentName"] ||
+          row["Agent Name"] ||
+          row["AGENT NAME"] ||
+          row["agent_name"] ||
+          ""
+        )
+          .toString()
+          .trim();
+
+        // Log first 5 rows for debugging
+        if (index < 5) {
+          console.log(`Row ${index + 1}:`, {
+            rawRow: row,
+            extractedCardCode: cardCode,
+            extractedAgentName: agentName,
+          });
+        }
+
+        return {
+          cardCode,
+          agentName,
+        };
+      })
+      .filter((item) => item.cardCode && item.agentName);
+
+    console.log(
+      `Found ${assignments.length} valid assignments out of ${data.length} rows`
+    );
+
+    if (assignments.length === 0) {
+      // If no assignments found, provide detailed debugging info
+      console.log(
+        "DEBUG: No assignments found. Let's check the data structure:"
+      );
+
+      if (data.length > 0) {
+        console.log("Sample row keys:", Object.keys(data[0]));
+        console.log("Sample row values:", Object.values(data[0]));
+
+        // Try to auto-detect column names
+        const possibleCardCodeColumns = Object.keys(data[0]).filter(
+          (key) =>
+            key.toLowerCase().includes("card") ||
+            key.toLowerCase().includes("code")
+        );
+        const possibleAgentNameColumns = Object.keys(data[0]).filter(
+          (key) =>
+            key.toLowerCase().includes("agent") ||
+            key.toLowerCase().includes("name")
+        );
+
+        console.log("Possible CardCode columns:", possibleCardCodeColumns);
+        console.log("Possible AgentName columns:", possibleAgentNameColumns);
+      }
+
+      return res.status(400).json({
+        success: false,
+        message: "No valid customer-agent assignments found in the file",
+        debug: {
+          totalRows: data.length,
+          sampleRow: data[0] || null,
+          availableColumns: data.length > 0 ? Object.keys(data[0]) : [],
+        },
+      });
+    }
+
+    // Get all sales agents and create name mapping
+    const salesAgents = await User.find({ role: "sales_agent" }).lean();
+    const agentMapping = new Map();
+
+    salesAgents.forEach((agent) => {
+      const fullName = `${agent.firstName} ${agent.lastName}`
+        .toLowerCase()
+        .trim();
+      const firstName = agent.firstName.toLowerCase().trim();
+      const lastName = agent.lastName.toLowerCase().trim();
+
+      // Map different name variations to agent ID
+      agentMapping.set(fullName, agent._id);
+      agentMapping.set(firstName, agent._id);
+      agentMapping.set(lastName, agent._id);
+
+      // Handle name variations (with/without spaces, different order)
+      agentMapping.set(`${firstName} ${lastName}`, agent._id);
+      agentMapping.set(`${lastName} ${firstName}`, agent._id);
+      agentMapping.set(firstName.replace(/\s+/g, ""), agent._id);
+      agentMapping.set(lastName.replace(/\s+/g, ""), agent._id);
+
+      console.log(`Agent mapping: "${fullName}" -> ${agent._id}`);
+    });
+
+    console.log(`Created agent mapping for ${salesAgents.length} agents`);
+
+    // Get all customer CardCodes from assignments
+    const cardCodes = assignments.map((a) => a.cardCode);
+
+    // Find existing customers
+    const existingCustomers = await Customer.find({
+      CardCode: { $in: cardCodes },
+    }).lean();
+
+    const existingCardCodeMap = new Map();
+    existingCustomers.forEach((customer) => {
+      existingCardCodeMap.set(customer.CardCode, customer._id);
+    });
+
+    console.log(
+      `Found ${existingCustomers.length} existing customers out of ${cardCodes.length} card codes`
+    );
+
+    // Prepare bulk update operations
+    const bulkOperations = [];
+    const results = {
+      total: assignments.length,
+      assigned: 0,
+      customerNotFound: 0,
+      agentNotFound: 0,
+      errors: [],
+    };
+
+    for (const assignment of assignments) {
+      try {
+        // Check if customer exists
+        const customerId = existingCardCodeMap.get(assignment.cardCode);
+        if (!customerId) {
+          results.customerNotFound++;
+          results.errors.push({
+            cardCode: assignment.cardCode,
+            agentName: assignment.agentName,
+            error: "Customer not found",
+          });
+          continue;
+        }
+
+        // Find agent ID
+        const agentName = assignment.agentName.toLowerCase().trim();
+        const agentId = agentMapping.get(agentName);
+
+        if (!agentId) {
+          results.agentNotFound++;
+          results.errors.push({
+            cardCode: assignment.cardCode,
+            agentName: assignment.agentName,
+            error: `Agent not found. Available agents: ${Array.from(
+              agentMapping.keys()
+            ).join(", ")}`,
+          });
+          continue;
+        }
+
+        // Add to bulk operations
+        bulkOperations.push({
+          updateOne: {
+            filter: { _id: customerId },
+            update: {
+              $set: {
+                assignedTo: agentId,
+                updatedAt: new Date(),
+              },
+            },
+          },
+        });
+
+        results.assigned++;
+      } catch (error) {
+        results.errors.push({
+          cardCode: assignment.cardCode,
+          agentName: assignment.agentName,
+          error: error.message,
+        });
+      }
+    }
+
+    // Execute bulk operations
+    if (bulkOperations.length > 0) {
+      console.log(`Executing ${bulkOperations.length} assignment updates`);
+
+      const bulkResult = await Customer.bulkWrite(bulkOperations, {
+        ordered: false,
+      });
+
+      console.log("Bulk update result:", {
+        matchedCount: bulkResult.matchedCount,
+        modifiedCount: bulkResult.modifiedCount,
+      });
+    }
+
+    // Clean up uploaded file
+    try {
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error deleting file:", unlinkError);
+    }
+
+    const totalTime = Date.now() - startTime;
+    console.log(`Assignment completed in ${totalTime}ms`);
+
+    res.status(200).json({
+      success: true,
+      message: `Customer assignment completed in ${totalTime}ms`,
+      results: {
+        ...results,
+        processingTimeMs: totalTime,
+      },
+    });
+  } catch (error) {
+    console.error("Customer assignment error:", error);
+
+    // Clean up file
+    try {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error cleaning up file:", unlinkError);
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Error assigning customers to agents",
+      error: error.message,
+    });
+  }
+};
 exports.updateMissingEmails = async (req, res) => {
   try {
     if (!req.file) {
@@ -3806,6 +4095,233 @@ exports.bulkAssignCustomers = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Server error",
+      error: error.message,
+    });
+  }
+};
+
+// Controller function to remove zero-value abandoned carts
+exports.removeZeroValueAbandonedCarts = async (req, res) => {
+  try {
+    console.log("Starting zero-value abandoned cart removal process...");
+    const startTime = Date.now();
+
+    // Step 1: Find all zero-value abandoned carts with multiple safety checks
+    const zeroValueQuery = {
+      $and: [
+        // Must be abandoned
+        { isAbandoned: true },
+        { status: "abandoned" },
+
+        // Multiple zero-value checks for safety
+        { totalIncludingTaxes: { $lte: 0 } },
+        { totalExcludingTaxes: { $lte: 0 } },
+
+        // Additional safety: check that products array is empty or all products have zero total
+        {
+          $or: [
+            { products: { $size: 0 } }, // Empty products array
+            { products: { $exists: false } }, // No products field
+            {
+              $and: [
+                { products: { $exists: true } },
+                { "products.totalPrice": { $not: { $gt: 0 } } }, // No product has totalPrice > 0
+              ],
+            },
+          ],
+        },
+
+        // Ensure not converted (additional safety)
+        { status: { $ne: "converted" } },
+        { convertedDate: { $exists: false } },
+      ],
+    };
+
+    // Step 2: Count zero-value carts first for logging
+    const zeroValueCount = await Cart.countDocuments(zeroValueQuery);
+    console.log(`Found ${zeroValueCount} zero-value abandoned carts`);
+
+    if (zeroValueCount === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "No zero-value abandoned carts found to remove",
+        results: {
+          totalFound: 0,
+          deleted: 0,
+          processingTimeMs: Date.now() - startTime,
+        },
+      });
+    }
+
+    // Step 3: Get sample records for verification (first 5)
+    const sampleCarts = await Cart.find(zeroValueQuery)
+      .select(
+        "cartId customerEmail totalIncludingTaxes totalExcludingTaxes products status isAbandoned createDate"
+      )
+      .limit(5)
+      .lean();
+
+    console.log("Sample zero-value carts to be deleted:");
+    sampleCarts.forEach((cart, index) => {
+      console.log(
+        `${index + 1}. CartID: ${cart.cartId}, Email: ${
+          cart.customerEmail
+        }, TotalInc: ${cart.totalIncludingTaxes}, TotalExc: ${
+          cart.totalExcludingTaxes
+        }, Products: ${cart.products?.length || 0}, Status: ${
+          cart.status
+        }, Abandoned: ${cart.isAbandoned}`
+      );
+    });
+
+    // Step 4: Additional verification - double-check each cart
+    const verificationCarts = await Cart.find(zeroValueQuery).lean();
+    const safeToDelete = verificationCarts.filter((cart) => {
+      // Triple-check each cart meets all criteria
+      const isAbandoned =
+        cart.isAbandoned === true && cart.status === "abandoned";
+      const hasZeroValue =
+        (cart.totalIncludingTaxes || 0) <= 0 &&
+        (cart.totalExcludingTaxes || 0) <= 0;
+      const hasNoProducts =
+        !cart.products ||
+        cart.products.length === 0 ||
+        cart.products.every((product) => (product.totalPrice || 0) <= 0);
+      const notConverted = cart.status !== "converted" && !cart.convertedDate;
+
+      return isAbandoned && hasZeroValue && hasNoProducts && notConverted;
+    });
+
+    console.log(
+      `Verification: ${safeToDelete.length} out of ${verificationCarts.length} carts are safe to delete`
+    );
+
+    if (safeToDelete.length !== verificationCarts.length) {
+      console.warn(
+        "WARNING: Some carts failed verification. Aborting deletion for safety."
+      );
+      return res.status(400).json({
+        success: false,
+        message: "Some carts failed safety verification. Deletion aborted.",
+        results: {
+          totalFound: verificationCarts.length,
+          safeToDelete: safeToDelete.length,
+          failedVerification: verificationCarts.length - safeToDelete.length,
+        },
+      });
+    }
+
+    // Step 5: Perform the deletion with the verified IDs
+    const idsToDelete = safeToDelete.map((cart) => cart._id);
+
+    console.log(
+      `Proceeding to delete ${idsToDelete.length} verified zero-value abandoned carts...`
+    );
+
+    const deleteResult = await Cart.deleteMany({
+      _id: { $in: idsToDelete },
+    });
+
+    console.log(
+      `Deletion completed. Deleted ${deleteResult.deletedCount} carts.`
+    );
+
+    // Step 6: Final verification - ensure we didn't delete anything we shouldn't have
+    const remainingCount = await Cart.countDocuments(zeroValueQuery);
+    if (remainingCount > 0) {
+      console.warn(
+        `WARNING: ${remainingCount} zero-value carts still remain after deletion`
+      );
+    }
+
+    const totalTime = Date.now() - startTime;
+
+    res.status(200).json({
+      success: true,
+      message: `Successfully removed ${deleteResult.deletedCount} zero-value abandoned carts`,
+      results: {
+        totalFound: zeroValueCount,
+        deleted: deleteResult.deletedCount,
+        remainingZeroValueCarts: remainingCount,
+        processingTimeMs: totalTime,
+        sampleDeletedCarts: sampleCarts.map((cart) => ({
+          cartId: cart.cartId,
+          customerEmail: cart.customerEmail,
+          totalValue: cart.totalIncludingTaxes,
+          productsCount: cart.products?.length || 0,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error("Error removing zero-value abandoned carts:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error removing zero-value abandoned carts",
+      error: error.message,
+    });
+  }
+};
+
+// Alternative function for dry-run (preview what would be deleted without actually deleting)
+exports.previewZeroValueAbandonedCarts = async (req, res) => {
+  try {
+    console.log("Starting zero-value abandoned cart preview...");
+
+    const zeroValueQuery = {
+      $and: [
+        { isAbandoned: true },
+        { status: "abandoned" },
+        { totalIncludingTaxes: { $lte: 0 } },
+        { totalExcludingTaxes: { $lte: 0 } },
+        {
+          $or: [
+            { products: { $size: 0 } },
+            { products: { $exists: false } },
+            {
+              $and: [
+                { products: { $exists: true } },
+                { "products.totalPrice": { $not: { $gt: 0 } } },
+              ],
+            },
+          ],
+        },
+        { status: { $ne: "converted" } },
+        { convertedDate: { $exists: false } },
+      ],
+    };
+
+    const count = await Cart.countDocuments(zeroValueQuery);
+
+    const sampleCarts = await Cart.find(zeroValueQuery)
+      .select(
+        "cartId customerEmail totalIncludingTaxes totalExcludingTaxes products status isAbandoned createDate"
+      )
+      .limit(20)
+      .sort({ createDate: -1 })
+      .lean();
+
+    res.status(200).json({
+      success: true,
+      message: `Found ${count} zero-value abandoned carts that would be deleted`,
+      results: {
+        totalCount: count,
+        sampleCarts: sampleCarts.map((cart) => ({
+          cartId: cart.cartId,
+          customerEmail: cart.customerEmail,
+          totalIncludingTaxes: cart.totalIncludingTaxes,
+          totalExcludingTaxes: cart.totalExcludingTaxes,
+          productsCount: cart.products?.length || 0,
+          status: cart.status,
+          isAbandoned: cart.isAbandoned,
+          createDate: cart.createDate,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error("Error previewing zero-value abandoned carts:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error previewing zero-value abandoned carts",
       error: error.message,
     });
   }

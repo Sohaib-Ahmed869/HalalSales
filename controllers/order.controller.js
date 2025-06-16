@@ -532,10 +532,7 @@ exports.createOrder = async (req, res) => {
     // Save to local database
     await newOrder.save();
 
-    // Update customer target
-    const updatedTarget =
-      await customerTargetController.updateCustomerTargetProgress(newOrder);
-
+   
     // NEW CODE: Push to SAP automatically
     console.log("Automatically pushing new order to SAP...");
     const sapResult = await pushOrderToSAPInternal(newOrder);
