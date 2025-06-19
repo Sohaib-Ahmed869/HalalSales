@@ -47,10 +47,10 @@ router.post("/importSalesAgents", auth, authController.importSalesAgents);
 router.put("/setTarget/:id", auth, authController.setTarget);
 
 // Routes
-router.get("/users/:id/salesperformance", authController.getSalesPerformance);
+router.get("/users/:id/salesperformance",auth, authController.getSalesPerformance);
 router.get("/users/:id/targethistory",auth, authController.getTargetHistory);
-router.post("/users/:id/settarget", authController.setMonthlyTarget);
-router.get("/dashboard/sales", authController.getSalesDashboard);
+router.post("/users/:id/settarget", auth,authController.setMonthlyTarget);
+router.get("/dashboard/sales",auth, authController.getSalesDashboard);
 router.get(
   "/users/:id/salesperformance",
   auth,

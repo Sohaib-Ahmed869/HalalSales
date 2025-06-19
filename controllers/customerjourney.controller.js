@@ -613,24 +613,40 @@ const analyzePaymentMethods = (payments) => {
     }
 
     // Check for Credit Card payments
-    if (payment.PaymentCreditCards && payment.PaymentCreditCards.length > 0) {
+    if (
+      (payment.PaymentCreditCards && payment.PaymentCreditCards.length > 0) ||
+      payment.CreditSum > 0
+    ) {
       const method = "Credit Card";
-      const amount = payment.PaymentCreditCards.reduce(
-        (sum, card) => sum + (card.CreditSum || 0),
-        0
-      );
+      let amount = 0;
+      if (payment.PaymentCreditCards) {
+        amount = payment.PaymentCreditCards.reduce(
+          (sum, card) => sum + (card.CreditSum || 0),
+          0
+        );
+      } else {
+        amount = payment.CreditSum || 0;
+      }
       methodAmounts[method] = (methodAmounts[method] || 0) + amount;
       methodCounts[method] = (methodCounts[method] || 0) + 1;
       methodsDetected++;
     }
 
     // Check for Check payments
-    if (payment.PaymentChecks && payment.PaymentChecks.length > 0) {
+    if (
+      (payment.PaymentChecks && payment.PaymentChecks.length > 0) ||
+      payment.CheckSum > 0
+    ) {
       const method = "Check";
-      const amount = payment.PaymentChecks.reduce(
-        (sum, check) => sum + (check.CheckSum || 0),
-        0
-      );
+      let amount = 0;
+      if (payment.PaymentChecks) {
+        amount = payment.PaymentChecks.reduce(
+          (sum, check) => sum + (check.CheckSum || 0),
+          0
+        );
+      } else {
+        amount = payment.CheckSum || 0;
+      }
       methodAmounts[method] = (methodAmounts[method] || 0) + amount;
       methodCounts[method] = (methodCounts[method] || 0) + 1;
       methodsDetected++;
@@ -1431,6 +1447,7 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
           ],
 
           // Customer value segments
+          // Customer value segments
           valueSegments: [
             {
               $bucket: {
@@ -1449,6 +1466,15 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
                   count: { $sum: 1 },
                   totalRevenue: { $sum: "$totalSpent" },
                   averageRevenue: { $avg: "$totalSpent" },
+                  customers: {
+                    $push: {
+                      cardCode: "$_id",
+                      customerName: "$customerName",
+                      totalSpent: "$totalSpent",
+                      invoiceCount: "$invoiceCount",
+                      outstandingBalance: "$outstandingBalance",
+                    },
+                  },
                 },
               },
             },
@@ -1627,78 +1653,120 @@ exports.getInvoicesBySegment = async (req, res) => {
   try {
     const { minAmount, maxAmount, startDate, endDate } = req.query;
 
-    // Build the query filter
-    const filter = {};
-
-    // Add amount range filter
-    if (minAmount !== undefined && maxAmount !== undefined) {
-      filter.DocTotal = {
-        $gte: parseFloat(minAmount),
-        $lte:
-          parseFloat(maxAmount) === Infinity
-            ? Number.MAX_VALUE
-            : parseFloat(maxAmount),
-      };
-    } else if (minAmount !== undefined) {
-      filter.DocTotal = { $gte: parseFloat(minAmount) };
-    } else if (maxAmount !== undefined && parseFloat(maxAmount) !== Infinity) {
-      filter.DocTotal = { $lte: parseFloat(maxAmount) };
-    }
+    // Build match stage for pipeline
+    const matchStage = {};
 
     // Add date range filter if provided
     if (startDate && endDate) {
-      filter.DocDate = {
+      matchStage.DocDate = {
         $gte: new Date(startDate),
         $lte: new Date(endDate),
       };
     } else if (startDate) {
-      filter.DocDate = { $gte: new Date(startDate) };
+      matchStage.DocDate = { $gte: new Date(startDate) };
     } else if (endDate) {
-      filter.DocDate = { $lte: new Date(endDate) };
+      matchStage.DocDate = { $lte: new Date(endDate) };
     }
 
-    // Fetch the invoices with pagination
-    const invoices = await Invoice.find(filter)
-      .sort({ DocDate: -1 })
-      .limit(100) // Limit results to prevent overwhelming response
-      .lean();
+    // Build aggregation pipeline
+    const pipeline = [];
 
-    // Calculate totals for the fetched invoices
-    const totalAmount = invoices.reduce(
-      (sum, invoice) => sum + (invoice.DocTotal || 0),
+    // Add initial match stage if we have date filters
+    if (Object.keys(matchStage).length > 0) {
+      pipeline.push({ $match: matchStage });
+    }
+
+    pipeline.push(
+      // Group by customer
+      {
+        $group: {
+          _id: "$CardCode",
+          customerName: { $first: "$CardName" },
+          invoiceCount: { $sum: 1 },
+          totalSpent: { $sum: "$DocTotal" },
+          totalPaid: { $sum: "$PaidToDate" },
+          firstInvoice: { $min: "$DocDate" },
+          lastInvoice: { $max: "$DocDate" },
+        },
+      },
+      // Add calculated fields
+      {
+        $addFields: {
+          outstandingBalance: { $subtract: ["$totalSpent", "$totalPaid"] },
+          averageOrderValue: { $divide: ["$totalSpent", "$invoiceCount"] },
+        },
+      }
+    );
+
+    // Add amount range filter for customers
+    if (minAmount !== undefined && maxAmount !== undefined) {
+      const maxAmountValue =
+        parseFloat(maxAmount) === Infinity
+          ? Number.MAX_VALUE
+          : parseFloat(maxAmount);
+      pipeline.push({
+        $match: {
+          totalSpent: {
+            $gte: parseFloat(minAmount),
+            $lte: maxAmountValue,
+          },
+        },
+      });
+    } else if (minAmount !== undefined) {
+      pipeline.push({
+        $match: { totalSpent: { $gte: parseFloat(minAmount) } },
+      });
+    } else if (maxAmount !== undefined && parseFloat(maxAmount) !== Infinity) {
+      pipeline.push({
+        $match: { totalSpent: { $lte: parseFloat(maxAmount) } },
+      });
+    }
+
+    // Sort by total spent descending and limit results
+    pipeline.push({ $sort: { totalSpent: -1 } }, { $limit: 100 });
+
+    // Execute the pipeline
+    const customers = await Invoice.aggregate(pipeline);
+
+    // Calculate totals
+    const totalCustomers = customers.length;
+    const totalRevenue = customers.reduce(
+      (sum, customer) => sum + (customer.totalSpent || 0),
       0
     );
-    const totalPaid = invoices.reduce(
-      (sum, invoice) => sum + (invoice.PaidToDate || 0),
+    const totalInvoices = customers.reduce(
+      (sum, customer) => sum + (customer.invoiceCount || 0),
       0
     );
-
-    // Add payment status to each invoice
-    const enrichedInvoices = invoices.map((invoice) => ({
-      ...invoice,
-      paid: invoice.PaidToDate === invoice.DocTotal,
-      partiallyPaid:
-        invoice.PaidToDate > 0 && invoice.PaidToDate < invoice.DocTotal,
-      outstanding: invoice.DocTotal - invoice.PaidToDate,
-    }));
 
     return res.status(200).json({
       success: true,
       data: {
-        invoices: enrichedInvoices,
+        customers: customers.map((customer) => ({
+          cardCode: customer._id,
+          customerName: customer.customerName,
+          invoiceCount: customer.invoiceCount,
+          totalSpent: customer.totalSpent,
+          totalPaid: customer.totalPaid,
+          outstandingBalance: customer.outstandingBalance,
+          averageOrderValue: customer.averageOrderValue,
+          firstInvoice: customer.firstInvoice,
+          lastInvoice: customer.lastInvoice,
+        })),
         summary: {
-          count: invoices.length,
-          totalAmount,
-          totalPaid,
-          outstanding: totalAmount - totalPaid,
+          totalCustomers,
+          totalRevenue,
+          totalInvoices,
+          averageSpendPerCustomer:
+            totalCustomers > 0 ? totalRevenue / totalCustomers : 0,
         },
       },
     });
   } catch (error) {
-    console.error("Error fetching invoices by segment:", error);
+    console.error("Error fetching customers by segment:", error);
     return res.status(500).json({
       success: false,
-      message: "Failed to fetch invoices by segment",
+      message: "Failed to fetch customers by segment",
       error: error.message,
     });
   }

@@ -72,6 +72,10 @@ const TaskSchema = new Schema({
     type: Number, // This should match the DocEntry type in your Quotation model
     ref: "Quotation",
   },
+  relatedAbandonedCart: {
+  type: Schema.Types.ObjectId,
+  ref: "Cart",
+},
 });
 
 // Update the updatedAt timestamp on save

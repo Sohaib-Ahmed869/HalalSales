@@ -517,6 +517,36 @@ const OrderSchema = new Schema(
     },
     Document_ApprovalRequests: [DocumentApprovalRequestSchema],
     DocumentLines: [DocumentLineSchema],
+    // Add these fields to the SalesOrder schema
+    OriginatingQuotation: Number,
+    CancelReason: String,
+    CancelDate: Date,
+
+    // SAP Integration fields
+    SyncedWithSAP: {
+      type: Boolean,
+      default: false,
+    },
+    SAPDocEntry: Number,
+    LocalStatus: {
+      type: String,
+      enum: ["Created", "Synced", "SyncFailed"],
+      default: "Created",
+    },
+    SyncErrors: String,
+    LastSyncAttempt: Date,
+    SAPSyncDisabled: {
+      type: Boolean,
+      default: false,
+    },
+
+    // Payment link integration
+    Payment_id: String,
+    Link_sent: {
+      type: Boolean,
+      default: false,
+    },
+    payment_status: String,
   },
   {
     timestamps: true,

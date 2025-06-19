@@ -9,6 +9,9 @@ const taskController = require("../controllers/task.controller");
 // Get all tasks (filtered by role permissions)
 router.get("/", auth, taskController.getTasks);
 
+// Add this route in your task routes file
+router.post("/cart/:cartId", auth, taskController.createTaskFromCart);
+
 router.post('/approve-quotation/:id', auth, taskController.approveQuotation);
 
 router.get("/agent/:agentId", auth, taskController.getAgentTasks);

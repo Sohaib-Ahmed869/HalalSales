@@ -305,12 +305,35 @@ exports.getCustomerTargetsDashboard = async (req, res) => {
     if (req.user.role === "sales_agent") {
       query.salesAgent = req.user._id;
     } else if (req.user.role === "sales_manager") {
-      const agentIds = await User.find({ manager: req.user._id }).distinct(
-        "_id"
-      );
+      // Get only agents managed by this sales manager
+      const agentIds = await User.find({
+        manager: req.user._id,
+        role: "sales_agent",
+      }).distinct("_id");
+
+      if (agentIds.length === 0) {
+        return res.status(200).json({
+          success: true,
+          data: {
+            summary: {
+              totalTargets: 0,
+              activeTargets: 0,
+              completedTargets: 0,
+              expiredTargets: 0,
+              totalTargetAmount: 0,
+              totalAchievedAmount: 0,
+              overallAchievementRate: 0,
+            },
+            closeToDeadline: [],
+            highestAchieving: [],
+            lowestAchieving: [],
+          },
+        });
+      }
+
       query.salesAgent = { $in: agentIds };
     }
-
+    222;
     if (req.query.salesAgentId) {
       query.salesAgent = req.query.salesAgentId;
     }
@@ -433,6 +456,219 @@ exports.getCustomerTargetsDashboard = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error generating dashboard",
+      error: error.message,
+    });
+  }
+};
+
+// Get sales manager specific dashboard with team performance
+exports.getSalesManagerDashboard = async (req, res) => {
+  try {
+    // Get all agents under this sales manager
+    let managedAgentsQuery = { role: "sales_agent" };
+
+    if (req.user.role === "sales_manager") {
+      // Sales manager can only see their managed agents
+      managedAgentsQuery.manager = req.user._id;
+    } else if (req.user.role === "admin") {
+      // Admin can see all agents - no additional filter needed
+      // managedAgentsQuery remains as { role: "sales_agent" }
+    } else {
+      // For other roles, return empty result
+      managedAgentsQuery._id = null; // This will return no results
+    }
+
+    const managedAgents = await User.find(managedAgentsQuery).select(
+      "firstName lastName email target"
+    );
+
+    if (managedAgents.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          summary: {
+            totalAgents: 0,
+            totalTargets: 0,
+            activeTargets: 0,
+            completedTargets: 0,
+            totalTargetAmount: 0,
+            totalAchievedAmount: 0,
+            overallAchievementRate: 0,
+          },
+          agentPerformance: [],
+          teamTargets: [],
+          recentActivity: [],
+        },
+      });
+    }
+
+    const agentIds = managedAgents.map((agent) => agent._id);
+
+    // Get all targets for managed agents
+    const allTargets = await CustomerTarget.find({
+      salesAgent: { $in: agentIds },
+    }).populate("salesAgent", "firstName lastName email");
+
+    // Calculate achievements for all targets
+    const targetsWithAchievements = await Promise.all(
+      allTargets.map(async (target) => {
+        const achievement = await calculateTargetAchievement(target);
+        const targetObj = target.toObject();
+        targetObj.achievedAmount = achievement.achievedAmount;
+        targetObj.achievementRate = achievement.achievementRate;
+        targetObj.invoiceCount = achievement.invoiceCount;
+        return targetObj;
+      })
+    );
+
+    // Calculate team performance by agent
+    const agentPerformance = managedAgents.map((agent) => {
+      const agentTargets = targetsWithAchievements.filter(
+        (t) => t.salesAgent._id.toString() === agent._id.toString()
+      );
+
+      const activeTargets = agentTargets.filter((t) => t.status === "active");
+      const completedTargets = agentTargets.filter(
+        (t) =>
+          t.status === "completed" ||
+          (t.achievementRate >= 100 && !t.isRecurring)
+      );
+
+      const totalTargetAmount = agentTargets.reduce(
+        (sum, t) => sum + t.targetAmount,
+        0
+      );
+      const totalAchievedAmount = agentTargets.reduce(
+        (sum, t) => sum + t.achievedAmount,
+        0
+      );
+      const achievementRate =
+        totalTargetAmount > 0
+          ? (totalAchievedAmount / totalTargetAmount) * 100
+          : 0;
+
+      // Get targets close to deadline (within 7 days)
+      const now = new Date();
+      const sevenDaysLater = new Date(now);
+      sevenDaysLater.setDate(now.getDate() + 7);
+
+      const urgentTargets = activeTargets.filter((t) => {
+        const deadline = new Date(t.currentPeriodEnd || t.deadline);
+        return deadline >= now && deadline <= sevenDaysLater;
+      });
+
+      return {
+        agent: {
+          _id: agent._id,
+          name: `${agent.firstName} ${agent.lastName}`,
+          email: agent.email,
+          baseTarget: agent.target,
+        },
+        metrics: {
+          totalTargets: agentTargets.length,
+          activeTargets: activeTargets.length,
+          completedTargets: completedTargets.length,
+          urgentTargets: urgentTargets.length,
+          totalTargetAmount: parseFloat(totalTargetAmount.toFixed(2)),
+          totalAchievedAmount: parseFloat(totalAchievedAmount.toFixed(2)),
+          achievementRate: parseFloat(achievementRate.toFixed(2)),
+        },
+        recentTargets: activeTargets
+          .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+          .slice(0, 3)
+          .map((t) => ({
+            id: t._id,
+            customer: t.cardName,
+            targetAmount: t.targetAmount,
+            achievedAmount: t.achievedAmount,
+            achievementRate: t.achievementRate,
+            deadline: t.currentPeriodEnd || t.deadline,
+          })),
+      };
+    });
+
+    // Overall team summary
+    const totalTargets = targetsWithAchievements.length;
+    const activeTargets = targetsWithAchievements.filter(
+      (t) => t.status === "active"
+    ).length;
+    const completedTargets = targetsWithAchievements.filter(
+      (t) =>
+        t.status === "completed" || (t.achievementRate >= 100 && !t.isRecurring)
+    ).length;
+    const totalTargetAmount = targetsWithAchievements.reduce(
+      (sum, t) => sum + t.targetAmount,
+      0
+    );
+    const totalAchievedAmount = targetsWithAchievements.reduce(
+      (sum, t) => sum + t.achievedAmount,
+      0
+    );
+    const overallAchievementRate =
+      totalTargetAmount > 0
+        ? (totalAchievedAmount / totalTargetAmount) * 100
+        : 0;
+
+    // Recent activity (last 10 targets created/updated)
+    const recentActivity = targetsWithAchievements
+      .sort(
+        (a, b) =>
+          new Date(b.updatedAt || b.createdAt) -
+          new Date(a.updatedAt || a.createdAt)
+      )
+      .slice(0, 10)
+      .map((t) => ({
+        id: t._id,
+        customer: t.cardName,
+        agent: `${t.salesAgent.firstName} ${t.salesAgent.lastName}`,
+        targetAmount: t.targetAmount,
+        achievedAmount: t.achievedAmount,
+        achievementRate: t.achievementRate,
+        status: t.status,
+        lastUpdated: t.updatedAt || t.createdAt,
+      }));
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        summary: {
+          totalAgents: managedAgents.length,
+          totalTargets,
+          activeTargets,
+          completedTargets,
+          totalTargetAmount: parseFloat(totalTargetAmount.toFixed(2)),
+          totalAchievedAmount: parseFloat(totalAchievedAmount.toFixed(2)),
+          overallAchievementRate: parseFloat(overallAchievementRate.toFixed(2)),
+        },
+        agentPerformance: agentPerformance.sort(
+          (a, b) => b.metrics.achievementRate - a.metrics.achievementRate
+        ),
+        teamTargets: targetsWithAchievements
+          .filter((t) => t.status === "active")
+          .sort(
+            (a, b) =>
+              new Date(a.currentPeriodEnd || a.deadline) -
+              new Date(b.currentPeriodEnd || b.deadline)
+          )
+          .slice(0, 20)
+          .map((t) => ({
+            id: t._id,
+            customer: t.cardName,
+            agent: `${t.salesAgent.firstName} ${t.salesAgent.lastName}`,
+            targetAmount: t.targetAmount,
+            achievedAmount: t.achievedAmount,
+            achievementRate: t.achievementRate,
+            deadline: t.currentPeriodEnd || t.deadline,
+            status: t.status,
+          })),
+        recentActivity,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching sales manager dashboard:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching sales manager dashboard",
       error: error.message,
     });
   }

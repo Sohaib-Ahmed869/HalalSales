@@ -32,4 +32,6 @@ router.get(
   dashboardController.getSalesAgentDashboard
 );
 
+router.get("/team-calls", auth, dashboardController.getTeamRecentCalls);
+
 module.exports = router;

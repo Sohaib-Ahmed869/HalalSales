@@ -10,6 +10,240 @@ const {
   checkBusinessPartnerExists,
 } = require("../utils/sapB1Integration");
 const XLSX = require("xlsx");
+
+// Add these to orderController.js
+
+const nodemailer = require("nodemailer");
+const axios = require("axios");
+require("dotenv").config();
+
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: process.env.SMTP_PORT,
+  secure: true,
+  auth: {
+    user: process.env.SMTP_USER,
+    email: process.env.SMTP_EMAIL,
+    pass: process.env.SMTP_PASSWORD,
+  },
+});
+
+// Generate payment link for sales order
+exports.generatePaymentLinkForOrder = async (req, res) => {
+  try {
+    const { docNum } = req.params;
+    const { email } = req.body;
+
+    const order = await SalesOrder.findOne({ DocNum: docNum });
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        error: "Sales order not found",
+      });
+    }
+
+    const customer_account_info = [
+      {
+        unique_account_identifier: order.CardCode,
+      },
+    ];
+
+    const customer_account_info_2 =
+      '{"payment_history_simple":' +
+      JSON.stringify(customer_account_info) +
+      "}";
+
+    const account_info = Buffer.from(customer_account_info_2).toString(
+      "base64"
+    );
+
+    const paymentLinkRequest = {
+      reference: `SO-${order.DocNum}`,
+      amount: {
+        value: Math.round(order.DocTotal * 100),
+        currency: order.DocCurrency || "EUR",
+      },
+      description: `Payment for Sales Order #${order.DocNum}`,
+      countryCode: "FR",
+      merchantAccount: process.env.ADYEN_MERCHANT_ACCOUNT,
+      shopperReference: order.CardCode,
+      additionalData: {
+        "openinvoicedata.merchantData": account_info,
+      },
+      company: {
+        name: order.CardName,
+      },
+      shopperEmail: email,
+      lineItems: order.DocumentLines.map((line) => ({
+        id: line.LineNum,
+        quantity: line.Quantity,
+        amountIncludingTax: Math.round(line.PriceAfterVAT * 100),
+        amountExcludingTax: Math.round(line.Price * 100),
+        taxAmount: Math.round((line.PriceAfterVAT - line.Price) * 100),
+        taxPercentage: Math.round(
+          (line.PriceAfterVAT / line.Price - 1) * 10000
+        ),
+        description: line.ItemDescription,
+      })),
+    };
+
+    const response = await axios.post(
+      `${process.env.ADYEN_API_BASE_URL}/paymentLinks`,
+      paymentLinkRequest,
+      {
+        headers: {
+          "X-API-KEY": process.env.ADYEN_API_KEY,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const paymentLink = response.data.url;
+    const paymentId = response.data.id;
+    const expiryDate = new Date(response.data.expiresAt).toISOString();
+
+    order.Payment_id = paymentId;
+    order.Link_sent = true;
+
+    // Create line items table for email
+    const lineItemsHtml = order.DocumentLines.map(
+      (line) => `
+      <tr>
+        <td style="border: 1px solid #ddd; padding: 8px;">${line.ItemCode}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">${
+          line.ItemDescription
+        }</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">${line.Quantity}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">€${line.Price.toFixed(
+          2
+        )}</td>
+        <td style="border: 1px solid #ddd; padding: 8px;">€${line.LineTotal.toFixed(
+          2
+        )}</td>
+      </tr>
+    `
+    ).join("");
+
+    const emailHtml = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <h2 style="color: #333;">Demande de Paiement pour la Commande n°${
+        order.DocNum
+      }</h2>
+      <p>Chère ${order.CardName},</p>
+      <p>Veuillez trouver ci-dessous le lien de paiement pour votre commande :</p>
+      
+      <div style="margin: 20px 0; padding: 15px; background-color: #f8f9fa; border-radius: 5px;">
+        <a href="${paymentLink}" style="display: inline-block; padding: 12px 24px; background-color: #007bff; color: white; text-decoration: none; border-radius: 4px; font-weight: bold;">
+          Cliquez ici pour effectuer votre paiement
+        </a>
+      </div>
+      
+      <p><strong>Le lien de paiement expirera le ${
+        expiryDate.split("T")[0]
+      }.</strong></p>
+      
+      <h3 style="color: #333;">Détails de la commande :</h3>
+      <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+        <thead>
+          <tr style="background-color: #f8f9fa;">
+            <th style="border: 1px solid #ddd; padding: 12px; text-align: left;">Code Article</th>
+            <th style="border: 1px solid #ddd; padding: 12px; text-align: left;">Description</th>
+            <th style="border: 1px solid #ddd; padding: 12px; text-align: left;">Quantité</th>
+            <th style="border: 1px solid #ddd; padding: 12px; text-align: left;">Prix Unitaire</th>
+            <th style="border: 1px solid #ddd; padding: 12px; text-align: left;">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${lineItemsHtml}
+        </tbody>
+        <tfoot>
+          <tr style="font-weight: bold; background-color: #f8f9fa;">
+            <td colspan="4" style="border: 1px solid #ddd; padding: 12px; text-align: right;">Total de la commande :</td>
+            <td style="border: 1px solid #ddd; padding: 12px;">€${order.DocTotal.toFixed(
+              2
+            )}</td>
+          </tr>
+        </tfoot>
+      </table>
+      
+      <p>Si vous avez des questions concernant cette commande, n'hésitez pas à nous contacter.</p>
+      <p>Cordialement,<br>L'équipe Halal Food Service</p>
+    </div>
+    `;
+
+    await transporter.sendMail({
+      from: process.env.SMTP_EMAIL,
+      to: email,
+      subject: `Payment Link for Sales Order #${order.DocNum}`,
+      html: emailHtml,
+    });
+
+    await order.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Payment link generated and sent successfully",
+      paymentLink,
+    });
+  } catch (error) {
+    console.error("Error in generatePaymentLinkForOrder:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to generate payment link",
+      details: error.message,
+    });
+  }
+};
+
+// Get payment update for sales order
+exports.getUpdateOnPaymentLinkForOrder = async (req, res) => {
+  try {
+    const { docNum } = req.params;
+    const order = await SalesOrder.findOne({ DocNum: docNum });
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        error: "Sales order not found",
+      });
+    }
+
+    if (!order.Payment_id) {
+      return res.status(400).json({
+        success: false,
+        error: "No payment link found for this order",
+      });
+    }
+
+    const response = await axios.get(
+      `${process.env.ADYEN_API_BASE_URL}/paymentLinks/${order.Payment_id}`,
+      {
+        headers: {
+          "X-API-KEY": process.env.ADYEN_API_KEY,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const paymentStatus = response.data.status;
+    order.payment_status = paymentStatus;
+    await order.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Payment status updated successfully",
+      paymentStatus,
+      paymentData: response.data,
+    });
+  } catch (error) {
+    console.error("Error in getUpdateOnPaymentLinkForOrder:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to update payment status",
+      details: error.message,
+    });
+  }
+};
 exports.bulkImportSalesOrders = async (req, res) => {
   try {
     if (!req.file) {
@@ -532,7 +766,6 @@ exports.createOrder = async (req, res) => {
     // Save to local database
     await newOrder.save();
 
-   
     // NEW CODE: Push to SAP automatically
     console.log("Automatically pushing new order to SAP...");
     const sapResult = await pushOrderToSAPInternal(newOrder);

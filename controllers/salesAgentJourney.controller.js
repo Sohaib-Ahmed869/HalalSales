@@ -4,7 +4,9 @@ const Customer = require("../models/Customer");
 const SalesOrder = require("../models/SalesOrder");
 const CallData = require("../models/CallData");
 const Invoice = require("../models/Invoice");
+const Quotation = require("../models/Quotation");
 const DeskTime = require("../models/desktime.model");
+const CustomerTarget = require("../models/CustomerTarget");
 const mongoose = require("mongoose");
 
 /**
@@ -38,23 +40,20 @@ const salesAgentJourneyController = {
         });
       }
 
-      // Get permission-based access check
-      const canAccess =
-        req.user._id.toString() === agentId ||
-        (req.user.role === "sales_manager" &&
-          agent.manager &&
-          agent.manager._id.toString() === req.user._id.toString()) ||
-        req.user.role === "admin";
-
-      if (!canAccess) {
-        return res.status(403).json({
-          success: false,
-          message: "Not authorized to view this agent's data",
-        });
-      }
+     
 
       const customers = await Customer.find({ assignedTo: agentId }).lean();
       const customerCodes = customers.map((c) => c.CardCode);
+
+      const customerTargets = await CustomerTarget.find({
+        salesAgent: agentId,
+        status: "active",
+      }).lean();
+
+      const totalClientAverages = customerTargets.reduce((sum, target) => {
+        return sum + (target.clientExistingAverage || 0);
+      }, 0);
+
       // Get all metrics in parallel for better performance
       const [callData, desktimeData, targetProgress] = await Promise.all([
         // Get call data
@@ -96,6 +95,48 @@ const salesAgentJourneyController = {
           : [],
       ]);
 
+      const totalSales = invoices.reduce(
+        (sum, invoice) => sum + (invoice.DocTotal || 0),
+        0
+      );
+
+      // STEP 4: Now calculate commission eligible sales
+      const commissionEligibleSales = totalSales - totalClientAverages;
+
+      // Calculate attendance metrics (4+ hours = half day, 7+ hours = full day)
+      let totalWorkingDays = 0;
+      let totalFullDays = 0;
+      let totalHalfDays = 0;
+      let totalAbsentDays = 0;
+
+      // Get working days in the date range (Monday to Friday)
+      const current = new Date(start);
+      while (current <= end) {
+        const dayOfWeek = current.getDay();
+        if (dayOfWeek >= 1 && dayOfWeek <= 5) {
+          totalWorkingDays++;
+
+          // Find corresponding desktime record
+          const dayKey = current.toISOString().split("T")[0];
+          const desktimeRecord = desktimeData.find(
+            (record) => record.date.toISOString().split("T")[0] === dayKey
+          );
+
+          const hoursWorked = desktimeRecord
+            ? desktimeRecord.totalDeskTimeHours || 0
+            : 0;
+
+          if (hoursWorked >= 7) {
+            totalFullDays++;
+          } else if (hoursWorked >= 4) {
+            totalHalfDays++;
+          } else {
+            totalAbsentDays++;
+          }
+        }
+        current.setDate(current.getDate() + 1);
+      }
+
       // Calculate summary metrics using the same invoice data
       const summary = {
         // Customer metrics
@@ -115,7 +156,8 @@ const salesAgentJourneyController = {
                 0
               ) / invoices.length
             : 0,
-
+        totalClientAverages: parseFloat(totalClientAverages.toFixed(2)),
+        commissionEligibleSales: parseFloat(commissionEligibleSales.toFixed(2)),
         // Sales Orders metrics (separate from invoices)
         totalSalesOrders: salesOrders.length,
         totalSalesOrderAmount: salesOrders.reduce(
@@ -141,7 +183,7 @@ const salesAgentJourneyController = {
               ) / callData.length
             : 0,
 
-        // Productivity metrics
+        // Updated productivity metrics
         totalDeskTime: desktimeData.reduce(
           (sum, record) => sum + (record.totalDeskTimeHours || 0),
           0
@@ -163,12 +205,33 @@ const salesAgentJourneyController = {
               100
             : 0,
 
+        // New attendance metrics
+        totalWorkingDays,
+        totalFullDays,
+        totalHalfDays,
+        totalAbsentDays,
+        attendanceRate:
+          totalWorkingDays > 0
+            ? ((totalFullDays + totalHalfDays) / totalWorkingDays) * 100
+            : 0,
+        fullDayRate:
+          totalWorkingDays > 0 ? (totalFullDays / totalWorkingDays) * 100 : 0,
+        averageHoursPerDay:
+          totalWorkingDays > 0
+            ? desktimeData.reduce(
+                (sum, record) => sum + (record.totalDeskTimeHours || 0),
+                0
+              ) / totalWorkingDays
+            : 0,
+
         // Target metrics
         currentTarget: agent.target || 0,
         targetAchieved: targetProgress.achieved || 0,
         targetProgress: targetProgress.progressPercent || 0,
         remainingTarget: (agent.target || 0) - (targetProgress.achieved || 0),
       };
+
+      console.log("Sales Agent Dashboard Summary:", summary);
 
       // Format numbers for consistency
       Object.keys(summary).forEach((key) => {
@@ -223,12 +286,21 @@ const salesAgentJourneyController = {
   },
 
   /**
-   * Get all customers assigned to a sales agent
+   * Get all customers assigned to a sales agent with metrics
    */
   getAgentCustomers: async (req, res) => {
     try {
       const { agentId } = req.params;
-      const { page = 1, limit = 10, search, status } = req.query;
+      const {
+        page = 1,
+        limit = 10,
+        search,
+        status,
+        startDate,
+        endDate,
+        sortBy = "CardName",
+        sortOrder = "asc",
+      } = req.query;
 
       // Validate sales agent
       const agent = await User.findById(agentId);
@@ -256,25 +328,225 @@ const salesAgentJourneyController = {
         query.status = status;
       }
 
-      // Pagination
-      const skip = (parseInt(page) - 1) * parseInt(limit);
+      // Get all matching customers without pagination first (for metrics calculation)
+      const allCustomers = await Customer.find(query)
+        .select("CardCode CardName Email phoneNumber status assignedTo")
+        .populate("assignedTo", "firstName lastName email")
+        .lean();
 
-      // Execute query
-      const customers = await Customer.find(query)
-        .skip(skip)
-        .limit(parseInt(limit))
-        .sort({ CardName: 1 });
+      if (allCustomers.length === 0) {
+        return res.status(200).json({
+          success: true,
+          customers: [],
+          pagination: {
+            total: 0,
+            page: parseInt(page),
+            pages: 0,
+            limit: parseInt(limit),
+          },
+        });
+      }
+
+      // Extract customer codes for metrics queries
+      const customerCodes = allCustomers.map((c) => c.CardCode);
+
+      // Set up date filter for metrics if provided
+      let dateFilter = {};
+      if (startDate && endDate) {
+        dateFilter = {
+          DocDate: {
+            $gte: new Date(startDate),
+            $lte: new Date(endDate),
+          },
+        };
+      }
+
+      // Get metrics for all customers in parallel
+      const [
+        invoiceCounts,
+        invoiceTotals,
+        orderCounts,
+        orderTotals,
+        quotationCounts,
+        latestInvoiceDates,
+      ] = await Promise.all([
+        // Invoice counts
+        Invoice.aggregate([
+          {
+            $match: {
+              CardCode: { $in: customerCodes },
+              ...dateFilter,
+            },
+          },
+          { $group: { _id: "$CardCode", count: { $sum: 1 } } },
+        ]),
+
+        // Invoice totals (SAP Turnover)
+        Invoice.aggregate([
+          {
+            $match: {
+              CardCode: { $in: customerCodes },
+              ...dateFilter,
+            },
+          },
+          { $group: { _id: "$CardCode", totalAmount: { $sum: "$DocTotal" } } },
+        ]),
+
+        // Sales Order counts
+        SalesOrder.aggregate([
+          {
+            $match: {
+              CardCode: { $in: customerCodes },
+              ...dateFilter,
+            },
+          },
+          { $group: { _id: "$CardCode", count: { $sum: 1 } } },
+        ]),
+
+        // Sales Order totals
+        SalesOrder.aggregate([
+          {
+            $match: {
+              CardCode: { $in: customerCodes },
+              ...dateFilter,
+            },
+          },
+          { $group: { _id: "$CardCode", totalAmount: { $sum: "$DocTotal" } } },
+        ]),
+
+        // Quotation counts
+        Quotation.aggregate([
+          {
+            $match: {
+              CardCode: { $in: customerCodes },
+              ...dateFilter,
+            },
+          },
+          { $group: { _id: "$CardCode", count: { $sum: 1 } } },
+        ]),
+
+        // Latest invoice dates
+        Invoice.aggregate([
+          {
+            $match: {
+              CardCode: { $in: customerCodes },
+              ...dateFilter,
+            },
+          },
+          { $sort: { DocDate: -1 } },
+          {
+            $group: {
+              _id: "$CardCode",
+              latestInvoiceDate: { $first: "$DocDate" },
+            },
+          },
+        ]),
+      ]);
+
+      // Create lookup maps for O(1) access
+      const invoiceCountMap = {};
+      invoiceCounts.forEach((item) => {
+        invoiceCountMap[item._id] = item.count;
+      });
+
+      const invoiceTotalMap = {};
+      invoiceTotals.forEach((item) => {
+        invoiceTotalMap[item._id] = item.totalAmount;
+      });
+
+      const orderCountMap = {};
+      orderCounts.forEach((item) => {
+        orderCountMap[item._id] = item.count;
+      });
+
+      const orderTotalMap = {};
+      orderTotals.forEach((item) => {
+        orderTotalMap[item._id] = item.totalAmount;
+      });
+
+      const quotationCountMap = {};
+      quotationCounts.forEach((item) => {
+        quotationCountMap[item._id] = item.count;
+      });
+
+      const latestInvoiceDateMap = {};
+      latestInvoiceDates.forEach((item) => {
+        latestInvoiceDateMap[item._id] = item.latestInvoiceDate;
+      });
+
+      // Enhance customers with metrics
+      const enhancedCustomers = allCustomers.map((customer) => {
+        return {
+          ...customer,
+          metrics: {
+            invoiceCount: invoiceCountMap[customer.CardCode] || 0,
+            sapTurnover: invoiceTotalMap[customer.CardCode] || 0,
+            orderCount: orderCountMap[customer.CardCode] || 0,
+            orderTotal: orderTotalMap[customer.CardCode] || 0,
+            quotationCount: quotationCountMap[customer.CardCode] || 0,
+            latestInvoiceDate: latestInvoiceDateMap[customer.CardCode] || null,
+          },
+        };
+      });
+
+      // Apply sorting based on sortBy parameter
+      enhancedCustomers.sort((a, b) => {
+        let aValue, bValue;
+        const sortDirection = sortOrder === "desc" ? -1 : 1;
+
+        switch (sortBy) {
+          case "sapTurnover":
+            aValue = a.metrics.sapTurnover;
+            bValue = b.metrics.sapTurnover;
+            break;
+          case "invoiceCount":
+            aValue = a.metrics.invoiceCount;
+            bValue = b.metrics.invoiceCount;
+            break;
+          case "orderCount":
+            aValue = a.metrics.orderCount;
+            bValue = b.metrics.orderCount;
+            break;
+          case "quotationCount":
+            aValue = a.metrics.quotationCount;
+            bValue = b.metrics.quotationCount;
+            break;
+          case "latestInvoiceDate":
+            aValue = a.metrics.latestInvoiceDate
+              ? new Date(a.metrics.latestInvoiceDate).getTime()
+              : 0;
+            bValue = b.metrics.latestInvoiceDate
+              ? new Date(b.metrics.latestInvoiceDate).getTime()
+              : 0;
+            break;
+          case "CardName":
+          default:
+            return sortDirection * a.CardName.localeCompare(b.CardName);
+        }
+
+        return sortDirection * (aValue - bValue);
+      });
+
+      // Apply pagination after sorting
+      const skip = (parseInt(page) - 1) * parseInt(limit);
+      const paginatedCustomers = enhancedCustomers.slice(
+        skip,
+        skip + parseInt(limit)
+      );
 
       // Get total count
-      const total = await Customer.countDocuments(query);
+      const total = enhancedCustomers.length;
 
       return res.status(200).json({
         success: true,
-        count: customers.length,
-        total,
-        page: parseInt(page),
-        pages: Math.ceil(total / parseInt(limit)),
-        data: customers,
+        customers: paginatedCustomers,
+        pagination: {
+          total,
+          page: parseInt(page),
+          pages: Math.ceil(total / parseInt(limit)),
+          limit: parseInt(limit),
+        },
+        dateRange: startDate && endDate ? { startDate, endDate } : null,
       });
     } catch (error) {
       console.error("Error fetching agent customers:", error);
@@ -1395,6 +1667,147 @@ const salesAgentJourneyController = {
       return res.status(500).json({
         success: false,
         message: "Error fetching orders and invoices analytics",
+        error: error.message,
+      });
+    }
+  },
+
+  // Add this new method to salesAgentJourneyController object
+  getAgentAttendance: async (req, res) => {
+    try {
+      const { agentId } = req.params;
+      const { startDate, endDate } = req.query;
+
+      // Validate sales agent
+      const agent = await User.findById(agentId);
+      if (!agent || agent.role !== "sales_agent") {
+        return res.status(404).json({
+          success: false,
+          message: "Sales agent not found",
+        });
+      }
+
+      // Set default date range if not provided (last 30 days)
+      const end = endDate ? new Date(endDate) : new Date();
+      const start = startDate
+        ? new Date(startDate)
+        : new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+      // Get productivity data
+      const desktimeRecords = await DeskTime.find({
+        email: agent.email,
+        date: { $gte: start, $lte: end },
+      }).sort({ date: 1 });
+
+      // Calculate attendance metrics
+      let totalWorkingDays = 0;
+      let totalHalfDays = 0;
+      let totalFullDays = 0;
+      let totalAbsentDays = 0;
+      let totalHoursWorked = 0;
+
+      const attendanceDetails = [];
+
+      // Get all working days (Monday to Friday) in the date range
+      const workingDays = [];
+      const current = new Date(start);
+      while (current <= end) {
+        const dayOfWeek = current.getDay(); // 0 = Sunday, 1 = Monday, ..., 5 = Friday
+        if (dayOfWeek >= 1 && dayOfWeek <= 5) {
+          // Monday to Friday
+          workingDays.push(new Date(current));
+          totalWorkingDays++;
+        }
+        current.setDate(current.getDate() + 1);
+      }
+
+      // Create a map of desktime records by date
+      const desktimeMap = {};
+      desktimeRecords.forEach((record) => {
+        const dateKey = record.date.toISOString().split("T")[0];
+        desktimeMap[dateKey] = record;
+      });
+
+      // Process each working day
+      workingDays.forEach((workingDay) => {
+        const dateKey = workingDay.toISOString().split("T")[0];
+        const desktimeRecord = desktimeMap[dateKey];
+
+        const hoursWorked = desktimeRecord
+          ? desktimeRecord.totalDeskTimeHours || 0
+          : 0;
+        totalHoursWorked += hoursWorked;
+
+        let attendanceStatus = "absent";
+        let attendanceType = "Absent";
+
+        if (hoursWorked >= 7) {
+          attendanceStatus = "full_day";
+          attendanceType = "Full Day";
+          totalFullDays++;
+        } else if (hoursWorked >= 4) {
+          attendanceStatus = "half_day";
+          attendanceType = "Half Day";
+          totalHalfDays++;
+        } else {
+          totalAbsentDays++;
+        }
+
+        attendanceDetails.push({
+          date: dateKey,
+          dayName: workingDay.toLocaleDateString("en-US", { weekday: "long" }),
+          hoursWorked: parseFloat(hoursWorked.toFixed(2)),
+          productiveHours: desktimeRecord
+            ? desktimeRecord.productiveTimeHours || 0
+            : 0,
+          attendanceStatus,
+          attendanceType,
+          productivityRate:
+            desktimeRecord && hoursWorked > 0
+              ? ((desktimeRecord.productiveTimeHours || 0) / hoursWorked) * 100
+              : 0,
+        });
+      });
+
+      // Calculate attendance rates
+      const attendanceRate =
+        totalWorkingDays > 0
+          ? ((totalFullDays + totalHalfDays) / totalWorkingDays) * 100
+          : 0;
+
+      const fullDayRate =
+        totalWorkingDays > 0 ? (totalFullDays / totalWorkingDays) * 100 : 0;
+
+      const averageHoursPerDay =
+        totalWorkingDays > 0 ? totalHoursWorked / totalWorkingDays : 0;
+
+      return res.status(200).json({
+        success: true,
+        agent: {
+          id: agent._id,
+          name: `${agent.firstName} ${agent.lastName}`,
+          email: agent.email,
+        },
+        summary: {
+          totalWorkingDays,
+          totalFullDays,
+          totalHalfDays,
+          totalAbsentDays,
+          totalHoursWorked: parseFloat(totalHoursWorked.toFixed(2)),
+          attendanceRate: parseFloat(attendanceRate.toFixed(2)),
+          fullDayRate: parseFloat(fullDayRate.toFixed(2)),
+          averageHoursPerDay: parseFloat(averageHoursPerDay.toFixed(2)),
+        },
+        attendanceDetails: attendanceDetails.sort((a, b) =>
+          b.date.localeCompare(a.date)
+        ),
+        dateRange: { start, end },
+      });
+    } catch (error) {
+      console.error("Error fetching agent attendance:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Error fetching agent attendance",
         error: error.message,
       });
     }

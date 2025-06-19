@@ -546,6 +546,53 @@ const OrderSchema = new Schema(
       type: Boolean,
       default: true,
     },
+    // Add these fields to the Quotation schema
+    ConvertedToOrderDocEntry: Number,
+    ConvertedDate: Date,
+    DuplicatedFrom: Number,
+    CancelReason: String,
+    CancelDate: Date,
+    OriginatingQuotation: Number,
+
+    // SAP Integration fields
+    SyncedWithSAP: {
+      type: Boolean,
+      default: false,
+    },
+    SAPDocEntry: Number,
+    LocalStatus: {
+      type: String,
+      enum: ["Created", "Synced", "SyncFailed"],
+      default: "Created",
+    },
+    SyncErrors: String,
+    LastSyncAttempt: Date,
+    SAPSyncDisabled: {
+      type: Boolean,
+      default: false,
+    },
+
+    // Payment link integration
+    Payment_id: String,
+    Link_sent: {
+      type: Boolean,
+      default: false,
+    },
+    payment_status: String,
+
+    // Additional fields
+    rejectedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    rejectedDate: Date,
+    rejectionReason: String,
+    approvedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    approvedDate: Date,
+    approvalComments: String,
   },
   {
     timestamps: true,

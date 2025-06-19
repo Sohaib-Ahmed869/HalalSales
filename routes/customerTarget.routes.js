@@ -4,6 +4,13 @@ const router = express.Router();
 const customerTargetController = require("../controllers/customerTarget.controller");
 const { auth, checkRole, updateLastLogin } = require("../middleware/auth");
 
+// Get sales manager dashboard - specific for sales managers
+router.get(
+  "/sales-manager/dashboard",
+  auth,
+  checkRole(["sales_manager", "admin"]),
+  customerTargetController.getSalesManagerDashboard
+);
 // Create a new customer target - Admin and Sales Manager only
 router.post(
   "/",

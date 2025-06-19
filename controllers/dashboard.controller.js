@@ -2,9 +2,11 @@
 const User = require("../models/User");
 const CallData = require("../models/CallData");
 const SalesOrder = require("../models/SalesOrder");
+const Invoice = require("../models/Invoice");
 const mongoose = require("mongoose");
 
 // Get all dashboard data for a sales manager in a single request
+// controllers/dashboardController.js
 exports.getSalesManagerDashboard = async (req, res) => {
   try {
     const managerId = req.user._id;
@@ -16,10 +18,11 @@ exports.getSalesManagerDashboard = async (req, res) => {
       ? new Date(startDate)
       : new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
 
-    // Get all sales agents managed by this manager
+    // Get only sales agents managed by this manager
     const salesAgents = await User.find({
       role: "sales_agent",
       deactivated: false,
+      manager: managerId,
     }).select("-password");
 
     if (!salesAgents.length) {
@@ -46,10 +49,98 @@ exports.getSalesManagerDashboard = async (req, res) => {
 
     const agentIds = salesAgents.map((agent) => agent._id);
 
-    // Get call data for all agents
+    // **FIX 1: Get actual sales from Invoice collection**
+    const salesQuery = {
+      DocDate: { $gte: start, $lte: end },
+      salesAgent: { $in: agentIds }, // Filter by team agents
+    };
+
+    // Get all invoices for the team
+    const invoices = await Invoice.find(salesQuery)
+      .sort({ DocDate: -1 })
+      .lean();
+
+    // **FIX 2: Calculate actual achievement from invoices**
+    const agentSalesMap = {};
+    let totalTeamSales = 0;
+
+    // Initialize agent sales tracking
+    agentIds.forEach((agentId) => {
+      agentSalesMap[agentId.toString()] = {
+        totalSales: 0,
+        invoiceCount: 0,
+        recentInvoices: [],
+      };
+    });
+
+    // Process invoices and calculate sales per agent
+    invoices.forEach((invoice) => {
+      const agentIdStr = invoice.salesAgent.toString();
+      if (agentSalesMap[agentIdStr]) {
+        agentSalesMap[agentIdStr].totalSales += invoice.DocTotal || 0;
+        agentSalesMap[agentIdStr].invoiceCount += 1;
+        agentSalesMap[agentIdStr].recentInvoices.push(invoice);
+        totalTeamSales += invoice.DocTotal || 0;
+      }
+    });
+
+    // **FIX 3: Update agents with actual achievement data**
+    const updatedAgents = salesAgents.map((agent) => {
+      const agentSales = agentSalesMap[agent._id.toString()] || {
+        totalSales: 0,
+        invoiceCount: 0,
+      };
+      return {
+        ...agent.toObject(),
+        targetAchieved: agentSales.totalSales, // Use actual sales from invoices
+        achievementRate:
+          agent.target > 0 ? (agentSales.totalSales / agent.target) * 100 : 0,
+        invoiceCount: agentSales.invoiceCount,
+      };
+    });
+
+    // **FIX 4: Calculate proper monthly sales data**
+    const monthlySalesMap = {};
+
+    invoices.forEach((invoice) => {
+      const date = new Date(invoice.DocDate);
+      const monthKey = `${date.getFullYear()}-${String(
+        date.getMonth() + 1
+      ).padStart(2, "0")}`;
+      const monthLabel = date.toLocaleDateString("en-US", {
+        month: "short",
+        year: "numeric",
+      });
+
+      if (!monthlySalesMap[monthKey]) {
+        monthlySalesMap[monthKey] = {
+          month: monthLabel,
+          sales: 0,
+          invoiceCount: 0,
+          date: new Date(date.getFullYear(), date.getMonth(), 1),
+        };
+      }
+
+      monthlySalesMap[monthKey].sales += invoice.DocTotal || 0;
+      monthlySalesMap[monthKey].invoiceCount += 1;
+    });
+
+    // Sort and format monthly sales data
+    const monthlySales = Object.values(monthlySalesMap)
+      .sort((a, b) => a.date - b.date)
+      .slice(-6) // Last 6 months
+      .map((item) => ({
+        month: item.month,
+        sales: Math.round(item.sales),
+        invoiceCount: item.invoiceCount,
+      }));
+
+    // **FIX 5: Get call data for team**
+    const teamPhones = salesAgents.map((agent) => agent.phone).filter(Boolean);
+
     const callDataQuery = {
       startTime: { $gte: start, $lte: end },
-      phone: { $in: salesAgents.map((agent) => agent.phone) },
+      ...(teamPhones.length > 0 ? { phone: { $in: teamPhones } } : {}),
     };
 
     // Get today's calls
@@ -76,139 +167,91 @@ exports.getSalesManagerDashboard = async (req, res) => {
         ? Math.round(callDurationStats[0].avgDuration || 0)
         : 0;
 
-    // Get recent calls
-    const recentCalls = await CallData.find(callDataQuery)
-      .sort({ startTime: -1 })
-      .limit(5)
-      .lean();
-
-    // Get sales orders for all agents
-    const salesQuery = {
-      DocDate: { $gte: start, $lte: end },
-      salesAgent: { $in: agentIds },
-    };
-
-    const salesOrders = await SalesOrder.find(salesQuery)
-      .sort({ DocDate: -1 })
-      .lean();
-
-    // Calculate monthly sales data
-    const monthlySalesMap = {};
-
-    salesOrders.forEach((order) => {
-      const date = new Date(order.DocDate);
-      const month = date.toLocaleString("default", { month: "short" });
-      const year = date.getFullYear();
-      const key = `${month}-${year}`;
-
-      if (!monthlySalesMap[key]) {
-        monthlySalesMap[key] = {
-          month,
-          year,
-          sales: 0,
-        };
-      }
-
-      monthlySalesMap[key].sales += order.DocTotal || 0;
-    });
-
-    const monthlySales = Object.values(monthlySalesMap)
-      .sort((a, b) => {
-        // Sort by year and month
-        if (a.year !== b.year) return a.year - b.year;
-
-        const months = [
-          "Jan",
-          "Feb",
-          "Mar",
-          "Apr",
-          "May",
-          "Jun",
-          "Jul",
-          "Aug",
-          "Sep",
-          "Oct",
-          "Nov",
-          "Dec",
-        ];
-        return months.indexOf(a.month) - months.indexOf(b.month);
-      })
-      .slice(-6); // Last 6 months
-
-    // Calculate channel distribution
-    const channelData = await SalesOrder.aggregate([
+    // **FIX 6: Calculate channel distribution from actual invoices**
+    const channelData = await Invoice.aggregate([
       { $match: salesQuery },
       {
         $group: {
-          _id: "$U_Channel", // Assuming this field exists for tracking channels
+          _id: { $ifNull: ["$U_Channel", "Direct"] },
           value: { $sum: 1 },
+          totalAmount: { $sum: "$DocTotal" },
         },
       },
     ]);
 
-    // Normalize channel data
     const salesByChannel = channelData.map((channel) => ({
-      channel: channel._id || "Direct", // Default to Direct if not specified
+      channel: channel._id,
       value: channel.value,
+      amount: channel.totalAmount,
     }));
 
-    // If no channel data is found, provide some default data
-    if (salesByChannel.length === 0) {
-      const directSalesCount = await SalesOrder.countDocuments(salesQuery);
-      if (directSalesCount > 0) {
-        salesByChannel.push({ channel: "Direct", value: directSalesCount });
-      }
-    }
-
-    // Calculate team performance metrics
-    const totalTargets = salesAgents.reduce(
+    // **FIX 7: Calculate team performance metrics properly**
+    const totalTargets = updatedAgents.reduce(
       (sum, agent) => sum + (agent.target || 0),
       0
     );
-    const totalAchieved = salesAgents.reduce(
-      (sum, agent) => sum + (agent.targetAchieved || 0),
-      0
-    );
+    const totalAchieved = totalTeamSales; // Use actual sales total
     const targetAchievementRate =
       totalTargets > 0 ? (totalAchieved / totalTargets) * 100 : 0;
 
-    // Get top performers (by achievement rate)
-    const topPerformers = [...salesAgents]
-      .filter((agent) => agent.target && agent.target > 0) // Only include agents with targets
-      .sort((a, b) => {
-        const aRate = (a.targetAchieved || 0) / (a.target || 1);
-        const bRate = (b.targetAchieved || 0) / (b.target || 1);
-        return bRate - aRate;
-      })
-      .slice(0, 3);
+    // **FIX 8: Get top performers based on actual achievement**
+    const topPerformers = [...updatedAgents]
+      .filter((agent) => agent.target && agent.target > 0)
+      .sort((a, b) => b.achievementRate - a.achievementRate)
+      .slice(0, 3)
+      .map((agent) => ({
+        _id: agent._id,
+        firstName: agent.firstName,
+        lastName: agent.lastName,
+        target: agent.target,
+        achieved: agent.targetAchieved,
+        achievementRate: agent.achievementRate,
+        invoiceCount: agent.invoiceCount,
+      }));
 
     // Get agents needing improvement
-    const needImprovement = [...salesAgents]
-      .filter((agent) => agent.target && agent.target > 0) // Only include agents with targets
-      .sort((a, b) => {
-        const aRate = (a.targetAchieved || 0) / (a.target || 1);
-        const bRate = (b.targetAchieved || 0) / (b.target || 1);
-        return aRate - bRate;
-      })
-      .slice(0, 3);
+    const needImprovement = [...updatedAgents]
+      .filter((agent) => agent.target && agent.target > 0)
+      .sort((a, b) => a.achievementRate - b.achievementRate)
+      .slice(0, 3)
+      .map((agent) => ({
+        _id: agent._id,
+        firstName: agent.firstName,
+        lastName: agent.lastName,
+        target: agent.target,
+        achieved: agent.targetAchieved,
+        achievementRate: agent.achievementRate,
+        invoiceCount: agent.invoiceCount,
+      }));
+
+    // **FIX 9: Get recent calls for the team**
+    const recentCalls = await CallData.find(callDataQuery)
+      .sort({ startTime: -1 })
+      .limit(10)
+      .lean();
 
     res.status(200).json({
       success: true,
       data: {
-        agents: salesAgents,
+        agents: updatedAgents,
         teamPerformance: {
-          totalTargets,
-          totalAchieved,
-          targetAchievementRate,
+          totalTargets: Math.round(totalTargets),
+          totalAchieved: Math.round(totalAchieved),
+          targetAchievementRate: Math.round(targetAchievementRate * 100) / 100,
           callsToday,
           avgCallDuration,
           monthlySales,
           topPerformers,
           needImprovement,
           salesByChannel,
+          totalInvoices: invoices.length,
+          avgDealSize:
+            invoices.length > 0
+              ? Math.round(totalTeamSales / invoices.length)
+              : 0,
         },
-        recentCalls,
-        salesData: monthlySales,
+        recentCalls: recentCalls.slice(0, 5), // Limit to 5 for UI
+        salesData: monthlySales, // This is the corrected monthly data
       },
     });
   } catch (error) {
@@ -216,6 +259,102 @@ exports.getSalesManagerDashboard = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error fetching dashboard data",
+      error: error.message,
+    });
+  }
+};
+
+// Get recent calls for sales manager's team
+exports.getTeamRecentCalls = async (req, res) => {
+  try {
+    const managerId = req.user._id;
+    const limit = parseInt(req.query.limit) || 10;
+
+    // Get team members
+    const salesAgents = await User.find({
+      role: "sales_agent",
+      deactivated: false,
+      manager: managerId,
+    }).select("phone firstName lastName");
+
+    if (!salesAgents.length) {
+      return res.status(200).json({
+        success: true,
+        data: [],
+      });
+    }
+
+    const teamPhones = salesAgents.map((agent) => agent.phone).filter(Boolean);
+    const phoneToAgentMap = {};
+
+    salesAgents.forEach((agent) => {
+      if (agent.phone) {
+        phoneToAgentMap[agent.phone] = `${agent.firstName} ${agent.lastName}`;
+      }
+    });
+
+    // Get recent calls
+    const recentCalls = await CallData.find({
+      phone: { $in: teamPhones },
+    })
+      .sort({ startTime: -1 })
+      .limit(limit)
+      .lean();
+
+    // Add agent names to calls
+    const callsWithAgentNames = recentCalls.map((call) => ({
+      ...call,
+      agentName: phoneToAgentMap[call.phone] || "Unknown Agent",
+    }));
+
+    res.status(200).json({
+      success: true,
+      data: callsWithAgentNames,
+    });
+  } catch (error) {
+    console.error("Error fetching team calls:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching team calls",
+      error: error.message,
+    });
+  }
+};
+
+// Add a new endpoint to get team members for sales manager
+exports.getTeamMembers = async (req, res) => {
+  try {
+    const managerId = req.user._id;
+
+    // Check if user is a sales manager
+    if (req.user.role !== "sales_manager" && req.user.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied. Only sales managers can view team members.",
+      });
+    }
+
+    // For admin, get all sales agents; for sales manager, get only their team
+    const query = {
+      role: "sales_agent",
+      deactivated: false,
+    };
+
+    if (req.user.role === "sales_manager") {
+      query.manager = managerId;
+    }
+
+    const teamMembers = await User.find(query).select("-password");
+
+    res.status(200).json({
+      success: true,
+      data: teamMembers,
+    });
+  } catch (error) {
+    console.error("Error fetching team members:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching team members",
       error: error.message,
     });
   }

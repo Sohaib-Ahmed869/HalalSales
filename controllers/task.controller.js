@@ -3,6 +3,7 @@ const Task = require("../models/Task");
 const Lead = require("../models/Lead");
 const User = require("../models/User");
 const Quotation = require("../models/Quotation");
+const NotificationService = require("../utils/notificationService");
 const {
   uploadToS3,
   generateSignedUrl,
@@ -300,6 +301,13 @@ exports.createTask = async (req, res) => {
 
     await task.save();
 
+    if (task.assignedTo.toString() !== req.user._id.toString()) {
+      await NotificationService.createTaskAssignedNotification(
+        task,
+        req.user._id
+      );
+    }
+
     // Add task to lead's tasks array if leadId is provided
     if (leadId) {
       await Lead.findByIdAndUpdate(leadId, {
@@ -346,6 +354,8 @@ exports.updateTask = async (req, res) => {
         message: "Task not found",
       });
     }
+
+    const previousAssignee = task.assignedTo;
 
     // Check permissions - different role-based access control
     const isCreator = task.createdBy.toString() === req.user._id.toString();
@@ -488,6 +498,24 @@ exports.updateTask = async (req, res) => {
       .populate("createdBy", "firstName lastName email role")
       .populate("leadId", "fullName email company");
 
+    if (
+      updateFields.assignedTo &&
+      updateFields.assignedTo !== previousAssignee.toString()
+    ) {
+      // Task was reassigned
+      await NotificationService.createTaskUpdatedNotification(
+        updatedTask,
+        req.user._id,
+        previousAssignee
+      );
+    } else if (updateFields.status) {
+      // Status was changed
+      await NotificationService.createTaskStatusNotification(
+        updatedTask,
+        req.user._id,
+        updateFields.status
+      );
+    }
     res.json({
       success: true,
       message: "Task updated successfully",
@@ -575,6 +603,12 @@ exports.approveOrRejectTask = async (req, res) => {
       .populate("assignedTo", "firstName lastName email role")
       .populate("createdBy", "firstName lastName email role")
       .populate("leadId", "fullName email company");
+
+    await NotificationService.createTaskStatusNotification(
+      updatedTask,
+      req.user._id,
+      action === "approve" ? "approved" : "rejected"
+    );
 
     res.json({
       success: true,
@@ -1188,6 +1222,97 @@ exports.approveQuotation = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error processing quotation approval",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Create task from abandoned cart
+ */
+exports.createTaskFromCart = async (req, res) => {
+  try {
+    const { cartId } = req.params;
+    const { title, description, dueDate, priority, type, assignedTo } =
+      req.body;
+
+    // Validate required fields
+    if (!title || !dueDate) {
+      return res.status(400).json({
+        success: false,
+        message: "Title and due date are required",
+      });
+    }
+
+    // Check if cart exists
+    const Cart = require("../models/Cart"); // Add this import at the top
+    const cart = await Cart.findById(cartId);
+    if (!cart) {
+      return res.status(404).json({
+        success: false,
+        message: "Abandoned cart not found",
+      });
+    }
+
+    // Validate assigned user exists and has proper role
+    if (assignedTo) {
+      const assignedUser = await User.findById(assignedTo);
+      if (!assignedUser) {
+        return res.status(404).json({
+          success: false,
+          message: "Assigned user not found",
+        });
+      }
+
+      if (
+        !["sales_agent", "sales_manager", "admin"].includes(assignedUser.role)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Tasks can only be assigned to sales agents, sales managers, or admins",
+        });
+      }
+    }
+
+    // Create new task
+    const task = new Task({
+      title,
+      description:
+        description ||
+        `Follow up on abandoned cart for ${cart.customerName} (${
+          cart.customerEmail
+        }) - Cart Value: €${cart.totalIncludingTaxes?.toFixed(2)}`,
+      dueDate,
+      priority: priority || "medium",
+      type: type || "follow-up",
+      status: "pending",
+      assignedTo: assignedTo || req.user._id,
+      createdBy: req.user._id,
+      relatedAbandonedCart: cartId,
+    });
+
+    await task.save();
+
+    // Return the created task with populated fields
+    const createdTask = await Task.findById(task._id)
+      .populate("assignedTo", "firstName lastName email role")
+      .populate("createdBy", "firstName lastName email role")
+      .populate(
+        "relatedAbandonedCart",
+        "cartId customerName customerEmail totalIncludingTaxes"
+      );
+
+    return res.status(201).json({
+      success: true,
+      message: "Task created successfully from abandoned cart",
+      data: createdTask,
+    });
+  } catch (error) {
+    console.error("Error creating task from cart:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error creating task from abandoned cart",
       error: error.message,
     });
   }

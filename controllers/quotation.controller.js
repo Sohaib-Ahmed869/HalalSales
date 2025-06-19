@@ -12,6 +12,287 @@ const {
 } = require("../utils/sapB1Integration");
 const Customer = require("../models/Customer");
 
+// Add these functions to quotation.controller.js
+
+const nodemailer = require("nodemailer");
+const axios = require("axios");
+require("dotenv").config();
+
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: process.env.SMTP_PORT,
+  secure: true,
+  auth: {
+    user: process.env.SMTP_USER,
+    email: process.env.SMTP_EMAIL,
+    pass: process.env.SMTP_PASSWORD,
+  },
+});
+
+// Generate payment link for quotation
+exports.generatePaymentLinkForQuotation = async (req, res) => {
+  try {
+    const { docNum } = req.params;
+    const { email } = req.body;
+
+    const quotation = await Quotation.findOne({ DocNum: docNum });
+    if (!quotation) {
+      return res.status(404).json({
+        success: false,
+        error: "Quotation not found",
+      });
+    }
+
+    const customer_account_info = [
+      {
+        unique_account_identifier: quotation.CardCode,
+      },
+    ];
+
+    const customer_account_info_2 =
+      '{"payment_history_simple":' +
+      JSON.stringify(customer_account_info) +
+      "}";
+
+    const account_info = Buffer.from(customer_account_info_2).toString(
+      "base64"
+    );
+
+    const paymentLinkRequest = {
+      reference: `QT-${quotation.DocNum}`,
+      amount: {
+        value: Math.round(quotation.DocTotal * 100),
+        currency: quotation.DocCurrency || "EUR",
+      },
+      description: `Payment for Quotation #${quotation.DocNum}`,
+      countryCode: "FR",
+      merchantAccount: process.env.ADYEN_MERCHANT_ACCOUNT,
+      shopperReference: quotation.CardCode,
+      additionalData: {
+        "openinvoicedata.merchantData": account_info,
+      },
+      company: {
+        name: quotation.CardName,
+      },
+      shopperEmail: email,
+      lineItems: quotation.DocumentLines.map((line) => ({
+        id: line.LineNum,
+        quantity: line.Quantity,
+        amountIncludingTax: Math.round(line.PriceAfterVAT * 100),
+        amountExcludingTax: Math.round(line.Price * 100),
+        taxAmount: Math.round((line.PriceAfterVAT - line.Price) * 100),
+        taxPercentage: Math.round(
+          (line.PriceAfterVAT / line.Price - 1) * 10000
+        ),
+        description: line.ItemDescription,
+      })),
+    };
+
+    const response = await axios.post(
+      `${process.env.ADYEN_API_BASE_URL}/paymentLinks`,
+      paymentLinkRequest,
+      {
+        headers: {
+          "X-API-KEY": process.env.ADYEN_API_KEY,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const paymentLink = response.data.url;
+    const paymentId = response.data.id;
+    const expiryDate = new Date(response.data.expiresAt).toISOString();
+
+    quotation.Payment_id = paymentId;
+    quotation.Link_sent = true;
+
+    // Comprehensive email template matching the sales order format
+    const emailHtml = `
+    <h2>Demande de Paiement pour le Devis n°${quotation.DocNum}</h2>
+    <p>Chère ${quotation.CardName},</p>
+    <p>Veuillez trouver ci-dessous le lien de paiement pour votre devis :</p>
+    <p><a href="${paymentLink}">Cliquez ici pour effectuer votre paiement</a></p>
+    <p style="font-weight: bold;">Si vous souhaitez effectuer le paiement après 30 jours, veuillez choisir l'option « Payer par facture pour les entreprises » et remplir les informations requises.</p>
+    <p>Le lien de paiement expirera le ${expiryDate.split("T")[0]}.</p>
+    <h3>Détails du devis :</h3>
+    <table style="border-collapse: collapse; width: 100%;">
+    <thead>
+    <tr style="background-color: #f3f4f6;">
+    <th style="padding: 8px; border: 1px solid #ddd;">Article</th>
+    <th style="padding: 8px; border: 1px solid #ddd;">Quantité</th>
+    <th style="padding: 8px; border: 1px solid #ddd;">Prix</th>
+    <th style="padding: 8px; border: 1px solid #ddd;">Total</th>
+    </tr>
+    </thead>
+    <tbody>
+    ${quotation.DocumentLines.map(
+      (line) => `
+      <tr>
+      <td style="padding: 8px; border: 1px solid #ddd;">${
+        line.ItemDescription
+      }</td>
+      <td style="padding: 8px; border: 1px solid #ddd;">${line.Quantity}</td>
+      <td style="padding: 8px; border: 1px solid #ddd;">${new Intl.NumberFormat(
+        "fr-FR",
+        {
+          style: "currency",
+          currency: quotation.DocCurrency || "EUR",
+        }
+      ).format(line.Price)}</td>
+      <td style="padding: 8px; border: 1px solid #ddd;">${new Intl.NumberFormat(
+        "fr-FR",
+        {
+          style: "currency",
+          currency: quotation.DocCurrency || "EUR",
+        }
+      ).format(line.LineTotal)}</td>
+      </tr>
+      `
+    ).join("")}
+    </tbody>
+    <tfoot>
+    <tr style="background-color: #f3f4f6;">
+    <td colspan="3" style="padding: 8px; border: 1px solid #ddd;"><strong>Total</strong></td>
+    <td style="padding: 8px; border: 1px solid #ddd;"><strong>${new Intl.NumberFormat(
+      "fr-FR",
+      {
+        style: "currency",
+        currency: quotation.DocCurrency || "EUR",
+      }
+    ).format(quotation.DocTotal)}</strong></td>
+    </tr>
+    </tfoot>
+    </table>
+    <p>Si vous avez des questions, n'hésitez pas à nous contacter.</p>
+    <p>Merci pour votre confiance !</p>
+
+    <hr />
+
+    <h2>Payment Request for Quotation #${quotation.DocNum}</h2>
+    <p>Dear ${quotation.CardName},</p>
+    <p>Please find below the payment link for your quotation:</p>
+    <p><a href="${paymentLink}">Click here to make your payment</a></p>
+    <p style="font-weight: bold;">If you want to proceed with payment after 30 days, please choose the option "Pay by Invoice for Businesses" and proceed to fill out the required information.</p>
+    <p>The payment link will expire on ${expiryDate.split("T")[0]}.</p>
+    <h3>Quotation Details:</h3>
+    <table style="border-collapse: collapse; width: 100%;">
+    <thead>
+    <tr style="background-color: #f3f4f6;">
+    <th style="padding: 8px; border: 1px solid #ddd;">Item</th>
+    <th style="padding: 8px; border: 1px solid #ddd;">Quantity</th>
+    <th style="padding: 8px; border: 1px solid #ddd;">Price</th>
+    <th style="padding: 8px; border: 1px solid #ddd;">Total</th>
+    </tr>
+    </thead>
+    <tbody>
+    ${quotation.DocumentLines.map(
+      (line) => `
+      <tr>
+      <td style="padding: 8px; border: 1px solid #ddd;">${
+        line.ItemDescription
+      }</td>
+      <td style="padding: 8px; border: 1px solid #ddd;">${line.Quantity}</td>
+      <td style="padding: 8px; border: 1px solid #ddd;">${new Intl.NumberFormat(
+        "en-US",
+        {
+          style: "currency",
+          currency: quotation.DocCurrency || "USD",
+        }
+      ).format(line.Price)}</td>
+      <td style="padding: 8px; border: 1px solid #ddd;">${new Intl.NumberFormat(
+        "en-US",
+        {
+          style: "currency",
+          currency: quotation.DocCurrency || "USD",
+        }
+      ).format(line.LineTotal)}</td>
+      </tr>
+      `
+    ).join("")}
+    </tbody>
+    <tfoot>
+    <tr style="background-color: #f3f4f6;">
+    <td colspan="3" style="padding: 8px; border: 1px solid #ddd;"><strong>Total</strong></td>
+    <td style="padding: 8px; border: 1px solid #ddd;"><strong>${new Intl.NumberFormat(
+      "en-US",
+      {
+        style: "currency",
+        currency: quotation.DocCurrency || "USD",
+      }
+    ).format(quotation.DocTotal)}</strong></td>
+    </tr>
+    </tfoot>
+    </table>
+    <p>If you have any questions, please don't hesitate to contact us.</p>
+    <p>Thank you for your business!</p>
+`;
+
+    await transporter.sendMail({
+      from: process.env.SMTP_EMAIL,
+      to: email,
+      subject: `Payment Link for Quotation #${quotation.DocNum}`,
+      html: emailHtml,
+    });
+
+    await quotation.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Payment link generated and sent successfully",
+      paymentLink,
+    });
+  } catch (error) {
+    console.error("Error in generatePaymentLinkForQuotation:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to generate payment link",
+      details: error.message,
+    });
+  }
+};
+
+// Get payment update for quotation
+exports.getUpdateOnPaymentLinkForQuotation = async (req, res) => {
+  try {
+    const { docNum } = req.params;
+    const quotation = await Quotation.findOne({ DocNum: docNum });
+
+    if (!quotation) {
+      return res.status(404).json({
+        success: false,
+        error: "Quotation not found",
+      });
+    }
+
+    const response = await axios.get(
+      `${process.env.ADYEN_API_BASE_URL}/paymentLinks/${quotation.Payment_id}`,
+      {
+        headers: {
+          "X-API-KEY": process.env.ADYEN_API_KEY,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const paymentStatus = response.data.status;
+    quotation.payment_status = paymentStatus;
+    await quotation.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Payment status updated successfully",
+      paymentStatus,
+    });
+  } catch (error) {
+    console.error("Error in getUpdateOnPaymentLinkForQuotation:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to update payment status",
+      details: error.message,
+    });
+  }
+};
+
 // Helper function to update sales agent stats
 async function updateSalesAgentAchievement(salesAgentId, order) {
   const agent = await User.findById(salesAgentId);
@@ -204,7 +485,7 @@ exports.getQuotationStats = async (req, res) => {
       error: error.message,
     });
   }
-};  
+};
 
 // Export quotations
 exports.exportQuotations = async (req, res) => {

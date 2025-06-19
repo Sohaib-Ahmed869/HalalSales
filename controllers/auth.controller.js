@@ -323,7 +323,21 @@ exports.getUsers = async (req, res) => {
       query.role = role;
     }
 
-    
+    // Apply role-based filtering
+    if (req.user.role === "admin") {
+      // Admin can see all users (no additional filtering)
+    } else if (req.user.role === "sales_manager") {
+      // Sales manager can only see their own team members (sales agents assigned to them)
+      if (role === "sales_agent" || !role) {
+        query.manager = req.user._id;
+      } else {
+        // If requesting other roles (like sales_manager), return empty array
+        return res.json([]);
+      }
+    } else {
+      // Other roles should not access this endpoint
+      return res.status(403).json({ message: "Access denied" });
+    }
 
     const users = await User.find(query)
       .select("-password")
@@ -678,7 +692,6 @@ exports.importSalesAgents = async (req, res) => {
 exports.setTarget = async (req, res) => {
   try {
     const { target } = req.body;
-
     const { id } = req.params;
 
     // Check if user exists
@@ -692,68 +705,103 @@ exports.setTarget = async (req, res) => {
       // Admin can update any user
     } else if (req.user.role === "sales_manager") {
       // Sales manager can only update their sales agents
+      if (userToUpdate.manager?.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ message: "Access denied" });
+      }
     } else {
-      // Sales agents cannot update other users
       return res.status(403).json({ message: "Access denied" });
     }
 
-    // Build update object
-    const updatedFields = {};
-    if (target) updatedFields.target = target;
-
-    // Update user
-    const updated = await User.findByIdAndUpdate(
-      id,
-      { $set: updatedFields },
-      { new: true, runValidators: true }
-    )
-      .select("-password")
-      .populate("createdBy", "firstName lastName email")
-      .populate("manager", "firstName lastName email");
+    // Update the base target (this can be used as default for new CustomerTargets)
+    userToUpdate.target = target;
+    await userToUpdate.save();
 
     res.json({
-      message: "User updated successfully",
-      user: updated,
+      message:
+        "Base target updated successfully. Create specific customer targets for detailed tracking.",
+      user: {
+        id: userToUpdate._id,
+        firstName: userToUpdate.firstName,
+        lastName: userToUpdate.lastName,
+        target: userToUpdate.target,
+      },
     });
   } catch (error) {
     console.error("User update error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
-
 exports.getSalesPerformance = async (req, res) => {
   try {
     const { id } = req.params;
-    const { month, year } = req.query;
+    const { startDate, endDate } = req.query;
 
-    // Permission checks...
-
-    const user = await User.findById(id).populate({
-      path: "salesHistory.orders",
-      select: "DocEntry DocNum DocTotal DocDate CardCode",
-    });
-
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
+    // Permission checks
+    if (req.user.role === "sales_agent" && req.user._id.toString() !== id) {
+      return res.status(403).json({ message: "Access denied" });
     }
 
-    // Filter by month/year if provided
-    let salesData = user.salesHistory;
-    if (month && year) {
-      salesData = salesData.filter(
-        (entry) => entry.month === month && entry.year === parseInt(year)
-      );
+    const user = await User.findById(id);
+    if (!user || user.role !== "sales_agent") {
+      return res.status(404).json({ message: "Sales agent not found" });
     }
+
+    // Import CustomerTarget model
+    const CustomerTarget = require("../models/CustomerTarget");
+
+    // Get customer targets for this agent
+    const targets = await CustomerTarget.find({ salesAgent: id })
+      .populate("salesAgent", "firstName lastName")
+      .sort({ currentPeriodEnd: -1 });
+
+    // Calculate achievements for each target
+    const {
+      calculateTargetAchievement,
+    } = require("./customerTarget.controller");
+
+    const targetsWithAchievements = await Promise.all(
+      targets.map(async (target) => {
+        const achievement = await calculateTargetAchievement(target);
+        return {
+          ...target.toObject(),
+          achievedAmount: achievement.achievedAmount,
+          achievementRate: achievement.achievementRate,
+          invoiceCount: achievement.invoiceCount,
+        };
+      })
+    );
+
+    // Calculate overall performance
+    const totalTargetAmount = targetsWithAchievements.reduce(
+      (sum, t) => sum + t.targetAmount,
+      0
+    );
+    const totalAchievedAmount = targetsWithAchievements.reduce(
+      (sum, t) => sum + t.achievedAmount,
+      0
+    );
+    const overallAchievementRate =
+      totalTargetAmount > 0
+        ? (totalAchievedAmount / totalTargetAmount) * 100
+        : 0;
 
     res.json({
       user: {
         firstName: user.firstName,
         lastName: user.lastName,
         email: user.email,
+        baseTarget: user.target,
       },
-      salesData,
+      performance: {
+        totalTargets: targetsWithAchievements.length,
+        totalTargetAmount,
+        totalAchievedAmount,
+        overallAchievementRate: parseFloat(overallAchievementRate.toFixed(2)),
+      },
+      targets: targetsWithAchievements,
     });
   } catch (error) {
+    console.error("Error fetching sales performance:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
@@ -761,8 +809,82 @@ exports.getSalesPerformance = async (req, res) => {
 exports.getTargetHistory = async (req, res) => {
   try {
     const { id } = req.params;
-    // Similar to getSalesPerformance but for target history
+    const { year, period } = req.query;
+
+    // Permission checks
+    if (req.user.role === "sales_agent" && req.user._id.toString() !== id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    const agent = await User.findById(id).select("-password");
+    if (!agent || agent.role !== "sales_agent") {
+      return res.status(404).json({ message: "Sales agent not found" });
+    }
+
+    const CustomerTarget = require("../models/CustomerTarget");
+
+    // Build query
+    const query = { salesAgent: id };
+    if (year) {
+      const yearInt = parseInt(year);
+      query.$or = [
+        {
+          currentPeriodStart: {
+            $gte: new Date(yearInt, 0, 1),
+            $lt: new Date(yearInt + 1, 0, 1),
+          },
+        },
+        {
+          currentPeriodEnd: {
+            $gte: new Date(yearInt, 0, 1),
+            $lt: new Date(yearInt + 1, 0, 1),
+          },
+        },
+      ];
+    }
+    if (period) {
+      query.period = period;
+    }
+
+    const targets = await CustomerTarget.find(query).sort({
+      currentPeriodStart: -1,
+    });
+
+    // Calculate achievements
+    const {
+      calculateTargetAchievement,
+    } = require("./customerTarget.controller");
+
+    const targetsWithAchievements = await Promise.all(
+      targets.map(async (target) => {
+        const achievement = await calculateTargetAchievement(target);
+        return {
+          id: target._id,
+          customer: target.cardName,
+          period: target.period,
+          targetAmount: target.targetAmount,
+          achievedAmount: achievement.achievedAmount,
+          achievementRate: achievement.achievementRate,
+          periodStart: target.currentPeriodStart,
+          periodEnd: target.currentPeriodEnd,
+          status: target.status,
+          isRecurring: target.isRecurring,
+        };
+      })
+    );
+
+    res.json({
+      agent: {
+        _id: agent._id,
+        firstName: agent.firstName,
+        lastName: agent.lastName,
+        email: agent.email,
+        baseTarget: agent.target,
+      },
+      targetHistory: targetsWithAchievements,
+    });
   } catch (error) {
+    console.error("Error fetching target history:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
@@ -841,30 +963,112 @@ exports.getSalesDashboard = async (req, res) => {
     }
 
     const salesAgents = await User.find(query)
-      .select(
-        "firstName lastName email target targetAchieved salesHistory targetHistory"
-      )
+      .select("firstName lastName email target")
       .populate("manager", "firstName lastName email");
 
-    // Calculate aggregated statistics
-    const dashboardData = {
-      totalAgents: salesAgents.length,
-      totalSales: 0,
-      totalOrders: 0,
-      topPerformers: [],
-      monthlySummary: [],
-      agentPerformance: [],
-    };
+    const CustomerTarget = require("../models/CustomerTarget");
+    const {
+      calculateTargetAchievement,
+    } = require("./customerTarget.controller");
 
-    // Process agent data to build dashboard statistics
-    // This can be complex depending on your exact requirements
+    // Calculate performance for each agent
+    const agentPerformance = await Promise.all(
+      salesAgents.map(async (agent) => {
+        // Get active targets for this agent
+        const targets = await CustomerTarget.find({
+          salesAgent: agent._id,
+          status: "active",
+        });
+
+        // Calculate total achievement across all targets
+        let totalTargetAmount = 0;
+        let totalAchievedAmount = 0;
+        let totalTargets = targets.length;
+
+        for (const target of targets) {
+          const achievement = await calculateTargetAchievement(target);
+          totalTargetAmount += target.targetAmount;
+          totalAchievedAmount += achievement.achievedAmount;
+        }
+
+        const achievementRate =
+          totalTargetAmount > 0
+            ? (totalAchievedAmount / totalTargetAmount) * 100
+            : 0;
+
+        return {
+          _id: agent._id,
+          name: `${agent.firstName} ${agent.lastName}`,
+          email: agent.email,
+          totalTargets,
+          totalTargetAmount,
+          totalAchievedAmount,
+          achievementRate: parseFloat(achievementRate.toFixed(2)),
+          manager: agent.manager
+            ? `${agent.manager.firstName} ${agent.manager.lastName}`
+            : "None",
+        };
+      })
+    );
+
+    // Sort by achievement rate
+    agentPerformance.sort((a, b) => b.achievementRate - a.achievementRate);
+
+    // Calculate summary statistics
+    const totalAgents = salesAgents.length;
+    const totalTargetAmount = agentPerformance.reduce(
+      (sum, agent) => sum + agent.totalTargetAmount,
+      0
+    );
+    const totalAchievedAmount = agentPerformance.reduce(
+      (sum, agent) => sum + agent.totalAchievedAmount,
+      0
+    );
+    const avgAchievementRate =
+      totalAgents > 0
+        ? agentPerformance.reduce(
+            (sum, agent) => sum + agent.achievementRate,
+            0
+          ) / totalAgents
+        : 0;
+
+    // Top and bottom performers
+    const topPerformers = agentPerformance.slice(0, 5).map((agent) => ({
+      name: agent.name,
+      achievementRate: agent.achievementRate,
+      achieved: agent.totalAchievedAmount,
+    }));
+
+    const bottomPerformers =
+      totalAgents > 5
+        ? agentPerformance
+            .slice(-5)
+            .reverse()
+            .map((agent) => ({
+              name: agent.name,
+              achievementRate: agent.achievementRate,
+              achieved: agent.totalAchievedAmount,
+            }))
+        : [];
+
+    const dashboardData = {
+      summary: {
+        totalAgents,
+        totalTargetAmount,
+        totalAchievedAmount,
+        avgAchievementRate: parseFloat(avgAchievementRate.toFixed(2)),
+      },
+      topPerformers,
+      bottomPerformers,
+      agentPerformance,
+    };
 
     res.json(dashboardData);
   } catch (error) {
+    console.error("Error fetching sales dashboard:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
-
 exports.getTargetHistory = async (req, res) => {
   try {
     const { id } = req.params;
@@ -1121,7 +1325,6 @@ exports.getAgentOrdersByMonth = async (req, res) => {
 
     const orders = await SalesOrder.find({
       salesAgent: id,
-      
     }).sort({ DocDate: -1 });
 
     res.json({

@@ -14,18 +14,6 @@ router.use(auth);
  */
 router.get(
   "/:agentId/dashboard",
-  (req, res, next) => {
-    // Allow agent to view own dashboard, or managers/admins to view any dashboard
-    if (
-      req.user._id.toString() === req.params.agentId ||
-      req.user.role === "admin" ||
-      (req.user.role === "sales_manager" &&
-        req.user._id.toString() === req.user.manager?.toString())
-    ) {
-      return next();
-    }
-    return res.status(403).json({ message: "Access denied" });
-  },
   salesAgentJourneyController.getDashboard
 );
 
@@ -98,6 +86,13 @@ router.get(
   "/:agentId/invoices",
   auth,
   salesAgentJourneyController.getAgentInvoices
+);
+
+// Add this route after the existing routes
+router.get(
+  "/:agentId/attendance",
+  checkRole(["admin", "sales_manager", "sales_agent"]),
+  salesAgentJourneyController.getAgentAttendance
 );
 
 // Get combined orders and invoices analytics
