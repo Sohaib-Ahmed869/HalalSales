@@ -324,7 +324,7 @@ exports.getUsers = async (req, res) => {
     }
 
     // Apply role-based filtering
-    if (req.user.role === "admin") {
+    if (req.user.role === "admin" || req.user.role === "sales_agent") {
       // Admin can see all users (no additional filtering)
     } else if (req.user.role === "sales_manager") {
       // Sales manager can only see their own team members (sales agents assigned to them)

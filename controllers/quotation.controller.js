@@ -54,6 +54,44 @@ exports.generatePaymentLinkForQuotation = async (req, res) => {
       JSON.stringify(customer_account_info) +
       "}";
 
+    // Find the customer for PDF generation
+    const customer = await Customer.findOne({
+      CardCode: quotation.CardCode,
+    });
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        error: `Customer with CardCode ${quotation.CardCode} not found`,
+      });
+    }
+
+    const customerForTemplate = {
+      CardName: customer.CardName || "Customer",
+      street: customer.address?.street || customer.Address || "",
+      city: customer.address?.city || customer.City || "",
+      zipCode: customer.address?.zipCode || customer.ZipCode || "",
+      Country: customer.Country || "",
+      Phone: customer.Phone || customer.Telephone || "",
+    };
+
+    // Generate PDF
+    let pdfBuffer;
+    try {
+      const pdfGenerator = require("../utils/pdfGenerator");
+      pdfBuffer = await pdfGenerator.generateQuotationPDF(
+        quotation,
+        customerForTemplate
+      );
+      console.log(`PDF generated successfully: ${pdfBuffer.length} bytes`);
+    } catch (pdfError) {
+      console.error("Error generating PDF:", pdfError);
+      return res.status(500).json({
+        success: false,
+        error: `Error generating PDF: ${pdfError.message}`,
+      });
+    }
+
     const account_info = Buffer.from(customer_account_info_2).toString(
       "base64"
     );
@@ -232,6 +270,14 @@ exports.generatePaymentLinkForQuotation = async (req, res) => {
       to: email,
       subject: `Payment Link for Quotation #${quotation.DocNum}`,
       html: emailHtml,
+      attachments: [
+        {
+          filename: `Devis_HFS_${quotation.DocNum}.pdf`,
+          content: pdfBuffer,
+          contentType: "application/pdf",
+          encoding: "binary",
+        },
+      ],
     });
 
     await quotation.save();

@@ -1640,7 +1640,7 @@ exports.getCustomersPaginated = async (req, res) => {
     // Get all matching customers without pagination for sorting by metrics
     let customers = await Customer.find({ ...query })
       .select(
-        "CardCode CardName Email phoneNumber status assignedTo TotalSales LastPurchaseDate"
+        "CardCode CardName Email phoneNumber status assignedTo TotalSales LastPurchaseDate notes"
       )
       .populate("assignedTo", "firstName lastName email")
       .lean();
@@ -1894,7 +1894,7 @@ exports.getCustomersPaginated2 = async (req, res) => {
     // Get all matching customers without pagination for sorting by metrics
     let customers = await Customer.find({ ...query, status: "active" })
       .select(
-        "CardCode CardName Email phoneNumber status assignedTo TotalSales LastPurchaseDate"
+        "CardCode CardName Email phoneNumber status assignedTo TotalSales LastPurchaseDate notes"
       )
       .populate("assignedTo", "firstName lastName email")
       .lean();
