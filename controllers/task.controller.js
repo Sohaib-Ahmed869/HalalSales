@@ -164,7 +164,7 @@ exports.getTasks = async (req, res) => {
       .populate("assignedTo", "firstName lastName email role")
       .populate("createdBy", "firstName lastName email role")
       .populate("leadId", "fullName email company")
-      .sort({ dueDate: 1, priority: -1 })
+      .sort({ createdAt: 1, priority: -1 })
       .lean();
 
     return res.status(200).json({
@@ -691,7 +691,7 @@ exports.getAgentTasks = async (req, res) => {
     const tasks = await Task.find(query)
       .populate("leadId", "fullName email company")
       .populate("createdBy", "firstName lastName email role")
-      .sort({ dueDate: 1, priority: -1 })
+      .sort({ createdAt: 1, priority: -1 })
       .lean();
 
     return res.status(200).json({
@@ -751,7 +751,7 @@ exports.getMyTasks = async (req, res) => {
     const tasks = await Task.find(query)
       .populate("leadId", "fullName email company")
       .populate("createdBy", "firstName lastName email role")
-      .sort({ dueDate: 1, priority: -1 })
+      .sort({ createdAt: 1, priority: -1 })
       .lean();
 
     // Get task counts by status for statistics
@@ -832,7 +832,7 @@ exports.getCreatedTasks = async (req, res) => {
     const tasks = await Task.find(query)
       .populate("assignedTo", "firstName lastName email role")
       .populate("leadId", "fullName email company")
-      .sort({ dueDate: 1, priority: -1 })
+      .sort({ createdAt: 1, priority: -1 })
       .lean();
 
     // Get task counts by status for statistics
@@ -1293,6 +1293,14 @@ exports.createTaskFromCart = async (req, res) => {
     });
 
     await task.save();
+
+    // create notification for assigned user
+    if (task.assignedTo.toString() !== req.user._id.toString()) {
+      await NotificationService.createTaskAssignedNotification(
+        task,
+        req.user._id
+      );
+    }
 
     // Return the created task with populated fields
     const createdTask = await Task.findById(task._id)

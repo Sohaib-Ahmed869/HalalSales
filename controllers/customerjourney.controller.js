@@ -397,12 +397,16 @@ exports.getCustomerJourney = async (req, res) => {
         if (payment.CashSum > 0) paymentMethod = "Cash";
         else if (payment.TransferSum > 0) paymentMethod = "Bank Transfer";
         else if (
-          payment.PaymentCreditCards &&
-          payment.PaymentCreditCards.length > 0
+          (payment.PaymentChecks && payment.PaymentChecks.length > 0) ||
+          payment.CheckSum > 0
+        )
+          paymentMethod = "Check";
+        else if (
+          (payment.PaymentCreditCards &&
+            payment.PaymentCreditCards.length > 0) ||
+          payment.CreditSum > 0
         )
           paymentMethod = "Credit Card";
-        else if (payment.PaymentChecks && payment.PaymentChecks.length > 0)
-          paymentMethod = "Check";
         else if (payment.DocTotal > 0) paymentMethod = "Other";
 
         // Calculate payment total
@@ -1217,9 +1221,12 @@ exports.getCustomerInteractionTimeline = async (req, res) => {
               ? "Cash"
               : payment.TransferSum > 0
               ? "Bank Transfer"
-              : payment.PaymentCreditCards?.length > 0
+              : (payment.PaymentCreditCards &&
+                  payment.PaymentCreditCards.length > 0) ||
+                payment.CreditSum > 0
               ? "Credit Card"
-              : payment.PaymentChecks?.length > 0
+              : (payment.PaymentChecks && payment.PaymentChecks.length > 0) ||
+                payment.CheckSum > 0
               ? "Check"
               : "Unknown",
           relatedInvoices:
