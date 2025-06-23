@@ -1149,9 +1149,7 @@ exports.convertToOrder = async (req, res) => {
     // Save the new order
     await newOrder.save();
 
-    // Update customer target
-    const updatedTarget =
-      await customerTargetController.updateCustomerTargetProgress(newOrder);
+   
 
     // Mark quotation as inactive (converted)
     quotation.IsActive = false;
@@ -1174,7 +1172,7 @@ exports.convertToOrder = async (req, res) => {
         },
         message:
           "Quotation successfully converted to order and synced with SAP",
-        targetUpdated: updatedTarget ? true : false,
+      
         sapSync: {
           success: true,
           SAPDocEntry: sapResult.SAPDocEntry,
