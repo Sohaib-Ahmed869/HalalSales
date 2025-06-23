@@ -51,6 +51,12 @@ const upload = multer({
     fileSize: 10 * 1024 * 1024, // 10 MB file size limit
   },
 });
+
+router.get(
+  "/get-customer-email/:cardCode",
+  auth,
+  customerController.getCustomerEmailByCode
+)
 router.get(
   "/preview-zero-value",
   customerController.previewZeroValueAbandonedCarts

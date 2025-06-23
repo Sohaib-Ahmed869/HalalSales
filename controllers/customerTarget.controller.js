@@ -465,7 +465,7 @@ exports.getCustomerTargetsDashboard = async (req, res) => {
 exports.getSalesManagerDashboard = async (req, res) => {
   try {
     // Get all agents under this sales manager
-    let managedAgentsQuery = { role: "sales_agent" };
+    let managedAgentsQuery = { role: "sales_agent", deactivated: false };
 
     if (req.user.role === "sales_manager") {
       // Sales manager can only see their managed agents
@@ -478,8 +478,13 @@ exports.getSalesManagerDashboard = async (req, res) => {
       managedAgentsQuery._id = null; // This will return no results
     }
 
-    const managedAgents = await User.find(managedAgentsQuery).select(
-      "firstName lastName email target"
+    const managedAgents = await User.find(
+      {
+        role: "sales_agent",
+        deactivated: false,
+      }
+    ).select(
+      "firstName lastName email target deactivated"
     );
 
     if (managedAgents.length === 0) {

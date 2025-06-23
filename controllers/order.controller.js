@@ -65,6 +65,11 @@ exports.generatePaymentLinkForOrder = async (req, res) => {
       },
       description: `Payment for Sales Order #${order.DocNum}`,
       countryCode: "FR",
+      allowedPaymentMethods: [
+        "klarna",
+        "card", // This is for card payments
+        "sepadirectdebit", // This is for bank transfer/SEPA
+      ],
       merchantAccount: process.env.ADYEN_MERCHANT_ACCOUNT,
       shopperReference: order.CardCode,
       additionalData: {
@@ -732,7 +737,7 @@ exports.createOrder = async (req, res) => {
     // Calculate today's date for DocDate and DocDueDate
     const today = new Date();
 
-    const salesAgentName = req.user.firstName + " " + req.user.lastName;
+    const salesAgentName = "The order was put up by" + req.user.firstName + " " + req.user.lastName + ". ";
 
     // Create the new order
     const newOrder = new SalesOrder({
@@ -776,7 +781,6 @@ exports.createOrder = async (req, res) => {
         success: true,
         data: newOrder,
         message: "Order created successfully and synced with SAP",
-        targetUpdated: updatedTarget ? true : false,
         sapSync: {
           success: true,
           SAPDocEntry: sapResult.SAPDocEntry,

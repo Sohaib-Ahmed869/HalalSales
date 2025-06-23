@@ -54,13 +54,17 @@ exports.getTasks = async (req, res) => {
     }
 
     // NEW: Add date range filter
+    // NEW: Add date range filter
     if (startDate || endDate) {
       query.dueDate = {};
       if (startDate) {
         query.dueDate.$gte = new Date(startDate);
       }
       if (endDate) {
-        query.dueDate.$lte = new Date(endDate);
+        // Change this line to include the end of the day
+        const endOfDay = new Date(endDate);
+        endOfDay.setHours(23, 59, 59, 999);
+        query.dueDate.$lte = endOfDay;
       }
     }
 
@@ -738,13 +742,17 @@ exports.getMyTasks = async (req, res) => {
     }
 
     // NEW: Add date range filter
+    // NEW: Add date range filter
     if (startDate || endDate) {
       query.dueDate = {};
       if (startDate) {
         query.dueDate.$gte = new Date(startDate);
       }
       if (endDate) {
-        query.dueDate.$lte = new Date(endDate);
+        // Change this line to include the end of the day
+        const endOfDay = new Date(endDate);
+        endOfDay.setHours(23, 59, 59, 999);
+        query.dueDate.$lte = endOfDay;
       }
     }
     // Get tasks
@@ -819,13 +827,17 @@ exports.getCreatedTasks = async (req, res) => {
     }
 
     // NEW: Add date range filter
+    // NEW: Add date range filter
     if (startDate || endDate) {
       query.dueDate = {};
       if (startDate) {
         query.dueDate.$gte = new Date(startDate);
       }
       if (endDate) {
-        query.dueDate.$lte = new Date(endDate);
+        // Change this line to include the end of the day
+        const endOfDay = new Date(endDate);
+        endOfDay.setHours(23, 59, 59, 999);
+        query.dueDate.$lte = endOfDay;
       }
     }
     // Get tasks

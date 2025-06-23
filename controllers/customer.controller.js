@@ -1212,6 +1212,29 @@ exports.updateCustomer = async (req, res) => {
   }
 };
 
+exports.getCustomerEmailByCode = async (req, res) => {
+  try {
+    const { cardCode } = req.params;
+    if (!cardCode) {
+      return res.status(400).json({ message: "CardCode is required" });
+    }
+    // Find customer by CardCode
+    const customer = await Customer.find({ CardCode: cardCode })
+      .select("Email")
+      .lean();
+
+    console.log("Customer found:", customer);
+
+    if (!customer || customer.length === 0) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+    // Return the email of the customer
+    res.json({ email: customer[0].Email });
+  } catch (error) {
+    console.error("Error fetching customer email:", error);
+  }
+};
+
 // Import customers from SAP or external source
 exports.importCustomers = async (req, res) => {
   try {

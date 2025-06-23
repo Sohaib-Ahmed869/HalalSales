@@ -109,6 +109,11 @@ exports.generatePaymentLinkForQuotation = async (req, res) => {
       additionalData: {
         "openinvoicedata.merchantData": account_info,
       },
+      allowedPaymentMethods: [
+        "klarna",
+        "card", // This is for card payments
+        "sepadirectdebit", // This is for bank transfer/SEPA
+      ],
       company: {
         name: quotation.CardName,
       },
@@ -1122,9 +1127,24 @@ exports.convertToOrder = async (req, res) => {
       });
     }
 
+    const userId = req.user._id;
+    // user name
+    const userName = req.user.firstName + " " + req.user.lastName;
+
     // Generate DocEntry for the new order
     const lastOrder = await SalesOrder.findOne().sort({ DocEntry: -1 });
     const newDocEntry = lastOrder ? lastOrder.DocEntry + 1 : 1;
+
+    const salesAgentName =
+      "This order was created from a quotation by " +
+      userName +
+      " (Quotation ID: " +
+      quotation.DocEntry +
+      "). With the payment status " +
+      quotation.payment_status +
+      " (" +
+      quotation.Payment_id +
+      "). ";
 
     // Create the sales order from the quotation data
     const newOrder = new SalesOrder({
@@ -1144,12 +1164,11 @@ exports.convertToOrder = async (req, res) => {
       salesAgent: quotation.salesAgent,
       // Reference to original quotation
       OriginatingQuotation: quotation.DocEntry,
+      U_Notes: salesAgentName,
     });
 
     // Save the new order
     await newOrder.save();
-
-   
 
     // Mark quotation as inactive (converted)
     quotation.IsActive = false;
@@ -1172,7 +1191,7 @@ exports.convertToOrder = async (req, res) => {
         },
         message:
           "Quotation successfully converted to order and synced with SAP",
-      
+
         sapSync: {
           success: true,
           SAPDocEntry: sapResult.SAPDocEntry,

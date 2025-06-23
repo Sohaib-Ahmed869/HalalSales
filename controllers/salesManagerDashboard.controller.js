@@ -2,8 +2,21 @@
 const User = require("../models/User");
 const Customer = require("../models/Customer");
 const Invoice = require("../models/Invoice");
+const SalesOrder = require("../models/SalesOrder");
+const Quotation = require("../models/Quotation");
 const CallData = require("../models/CallData");
 const mongoose = require("mongoose");
+
+/**
+ * Helper function to get agent name by customer code
+ */
+function getAgentNameByCustomerCode(cardCode, customerToAgentMap, teamMembers) {
+  const agentId = customerToAgentMap[cardCode];
+  if (!agentId) return "Unassigned";
+
+  const agent = teamMembers.find((a) => a._id.toString() === agentId);
+  return agent ? `${agent.firstName} ${agent.lastName}` : "Unknown";
+}
 
 const salesManagerDashboardController = {
   /**
@@ -53,32 +66,65 @@ const salesManagerDashboardController = {
       const customerCodes = teamCustomers.map((c) => c.CardCode);
 
       // Execute all data fetching in parallel
-      const [invoices, callData, teamPerformanceData] = await Promise.all([
-        // Get invoices for team's customers
-        customerCodes.length > 0
-          ? Invoice.find({
-              CardCode: { $in: customerCodes },
-              DocDate: { $gte: start, $lte: end },
-            }).lean()
-          : [],
+      // Execute all data fetching in parallel
+      const [invoices, salesOrders, quotations, callData, teamPerformanceData] =
+        await Promise.all([
+          // Get invoices for team's customers
+          customerCodes.length > 0
+            ? Invoice.find({
+                CardCode: { $in: customerCodes },
+                DocDate: { $gte: start, $lte: end },
+              }).lean()
+            : [],
 
-        // Get call data for team
-        getTeamCallData(teamMembers, start, end),
+          // Get sales orders for team's customers
+          customerCodes.length > 0
+            ? SalesOrder.find({
+                CardCode: { $in: customerCodes },
+                DocDate: { $gte: start, $lte: end },
+              }).lean()
+            : [],
 
-        // Calculate individual team member performance
-        calculateTeamPerformance(teamMemberIds, customerCodes, start, end),
-      ]);
+          // Get quotations for team's customers
+          customerCodes.length > 0
+            ? Quotation.find({
+                CardCode: { $in: customerCodes },
+                DocDate: { $gte: start, $lte: end },
+              }).lean()
+            : [],
+
+          // Get call data for team
+          getTeamCallData(teamMembers, start, end),
+
+          // Calculate individual team member performance
+          calculateTeamPerformance(teamMemberIds, customerCodes, start, end),
+        ]);
 
       // Calculate summary metrics
-      const summary = calculateSummaryMetrics(teamMembers, invoices, callData);
+      const summary = calculateSummaryMetrics(
+        teamMembers,
+        invoices,
+        salesOrders,
+        quotations,
+        callData
+      );
 
       // Calculate charts data
-      const charts = calculateChartsData(invoices, callData, start, end);
+      const charts = calculateChartsData(
+        invoices,
+        salesOrders,
+        quotations,
+        callData,
+        start,
+        end
+      );
 
+      // Get recent activities
       // Get recent activities
       const activities = await getRecentActivities(
         teamMemberIds,
         customerCodes,
+        teamCustomers,
         start,
         end
       );
@@ -102,9 +148,19 @@ const salesManagerDashboardController = {
               : 0,
           customersCount: memberPerf.customersCount || 0,
           invoicesCount: memberPerf.invoicesCount || 0,
+          salesOrdersCount: memberPerf.salesOrdersCount || 0,
+          salesOrdersAmount: memberPerf.salesOrdersAmount || 0,
+          quotationsCount: memberPerf.quotationsCount || 0,
+          quotationsAmount: memberPerf.quotationsAmount || 0,
           callsCount: memberPerf.callsCount || 0,
           lastActivity: memberPerf.lastActivity || null,
         };
+      });
+
+      // Create customer to agent mapping for attribution
+      const customerToAgentMap = {};
+      teamCustomers.forEach((customer) => {
+        customerToAgentMap[customer.CardCode] = customer.assignedTo.toString();
       });
 
       res.status(200).json({
@@ -118,6 +174,39 @@ const salesManagerDashboardController = {
           activities,
           charts,
           dateRange: { start, end },
+          // Add new data for orders and quotations
+          recentOrders: salesOrders
+            .sort((a, b) => new Date(b.DocDate) - new Date(a.DocDate))
+            .slice(0, 10)
+            .map((o) => ({
+              id: o._id,
+              docNum: o.DocNum,
+              customer: o.CardName,
+              agent: getAgentNameByCustomerCode(
+                o.CardCode,
+                customerToAgentMap,
+                teamMembers
+              ),
+              amount: o.DocTotal,
+              date: o.DocDate,
+              status: o.DocumentStatus,
+            })),
+          recentQuotations: quotations
+            .sort((a, b) => new Date(b.DocDate) - new Date(a.DocDate))
+            .slice(0, 10)
+            .map((q) => ({
+              id: q._id,
+              docNum: q.DocNum,
+              customer: q.CardName,
+              agent: getAgentNameByCustomerCode(
+                q.CardCode,
+                customerToAgentMap,
+                teamMembers
+              ),
+              amount: q.DocTotal,
+              date: q.DocDate,
+              status: q.DocumentStatus,
+            })),
         },
       });
     } catch (error) {
@@ -319,14 +408,27 @@ async function calculateTeamPerformance(
 
   console.log("Customer to Agent Map:", customerAgentMap);
 
-  const invoices = await Invoice.find({
-    CardCode: { $in: customerCodes },
-    DocDate: { $gte: startDate, $lte: endDate },
-  }).lean();
+  // Get all data in parallel
+  const [invoices, salesOrders, quotations, callData] = await Promise.all([
+    Invoice.find({
+      CardCode: { $in: customerCodes },
+      DocDate: { $gte: startDate, $lte: endDate },
+    }).lean(),
 
-  const callData = await CallData.find({
-    startTime: { $gte: startDate, $lte: endDate },
-  }).lean();
+    SalesOrder.find({
+      CardCode: { $in: customerCodes },
+      DocDate: { $gte: startDate, $lte: endDate },
+    }).lean(),
+
+    Quotation.find({
+      CardCode: { $in: customerCodes },
+      DocDate: { $gte: startDate, $lte: endDate },
+    }).lean(),
+
+    CallData.find({
+      startTime: { $gte: startDate, $lte: endDate },
+    }).lean(),
+  ]);
 
   // Group data by agent
   const agentPerformance = {};
@@ -337,6 +439,10 @@ async function calculateTeamPerformance(
       agentId,
       totalSales: 0,
       invoicesCount: 0,
+      salesOrdersCount: 0,
+      salesOrdersAmount: 0,
+      quotationsCount: 0,
+      quotationsAmount: 0,
       customersCount: 0,
       callsCount: 0,
       lastActivity: null,
@@ -363,6 +469,47 @@ async function calculateTeamPerformance(
     }
   });
 
+  // Process sales orders
+  salesOrders.forEach((order) => {
+    const agentId = customerAgentMap[order.CardCode];
+    if (agentId) {
+      const agentIdStr = agentId.toString();
+      if (agentPerformance[agentIdStr]) {
+        agentPerformance[agentIdStr].salesOrdersCount += 1;
+        agentPerformance[agentIdStr].salesOrdersAmount += order.DocTotal || 0;
+
+        const orderDate = new Date(order.DocDate);
+        if (
+          !agentPerformance[agentIdStr].lastActivity ||
+          orderDate > agentPerformance[agentIdStr].lastActivity
+        ) {
+          agentPerformance[agentIdStr].lastActivity = orderDate;
+        }
+      }
+    }
+  });
+
+  // Process quotations
+  quotations.forEach((quotation) => {
+    const agentId = customerAgentMap[quotation.CardCode];
+    if (agentId) {
+      const agentIdStr = agentId.toString();
+      if (agentPerformance[agentIdStr]) {
+        agentPerformance[agentIdStr].quotationsCount += 1;
+        agentPerformance[agentIdStr].quotationsAmount +=
+          quotation.DocTotal || 0;
+
+        const quotationDate = new Date(quotation.DocDate);
+        if (
+          !agentPerformance[agentIdStr].lastActivity ||
+          quotationDate > agentPerformance[agentIdStr].lastActivity
+        ) {
+          agentPerformance[agentIdStr].lastActivity = quotationDate;
+        }
+      }
+    }
+  });
+
   // Calculate unique customers per agent
   const agentCustomers = {};
   customerToAgent.forEach((customer) => {
@@ -384,7 +531,13 @@ async function calculateTeamPerformance(
 /**
  * Calculate summary metrics
  */
-function calculateSummaryMetrics(teamMembers, invoices, callData) {
+function calculateSummaryMetrics(
+  teamMembers,
+  invoices,
+  salesOrders,
+  quotations,
+  callData
+) {
   const totalTarget = teamMembers.reduce(
     (sum, member) => sum + (member.target || 0),
     0
@@ -401,6 +554,36 @@ function calculateSummaryMetrics(teamMembers, invoices, callData) {
   const callsToday = callData.filter(
     (call) => new Date(call.startTime) >= today
   ).length;
+
+  // Calculate orders metrics
+  const totalOrdersAmount = salesOrders.reduce(
+    (sum, order) => sum + (order.DocTotal || 0),
+    0
+  );
+
+  const ordersThisMonth = salesOrders.filter((o) => {
+    const orderDate = new Date(o.DocDate);
+    const now = new Date();
+    return (
+      orderDate.getMonth() === now.getMonth() &&
+      orderDate.getFullYear() === now.getFullYear()
+    );
+  });
+
+  // Calculate quotations metrics
+  const totalQuotationsAmount = quotations.reduce(
+    (sum, quotation) => sum + (quotation.DocTotal || 0),
+    0
+  );
+
+  const quotationsThisMonth = quotations.filter((q) => {
+    const quotationDate = new Date(q.DocDate);
+    const now = new Date();
+    return (
+      quotationDate.getMonth() === now.getMonth() &&
+      quotationDate.getFullYear() === now.getFullYear()
+    );
+  });
 
   return {
     teamSize: teamMembers.length,
@@ -419,17 +602,37 @@ function calculateSummaryMetrics(teamMembers, invoices, callData) {
             ) / callData.length
           )
         : 0,
+    // New metrics for orders and quotations
+    totalOrders: salesOrders.length,
+    totalOrdersAmount: Math.round(totalOrdersAmount),
+    ordersThisMonth: ordersThisMonth.length,
+    ordersThisMonthAmount: Math.round(
+      ordersThisMonth.reduce((sum, o) => sum + (o.DocTotal || 0), 0)
+    ),
+    totalQuotations: quotations.length,
+    totalQuotationsAmount: Math.round(totalQuotationsAmount),
+    quotationsThisMonth: quotationsThisMonth.length,
+    quotationsThisMonthAmount: Math.round(
+      quotationsThisMonth.reduce((sum, q) => sum + (q.DocTotal || 0), 0)
+    ),
   };
 }
 
 /**
  * Calculate chart data
  */
-function calculateChartsData(invoices, callData, startDate, endDate) {
-  // Monthly sales trend
-  const monthlySales = {};
-  const monthlyInvoices = {};
+function calculateChartsData(
+  invoices,
+  salesOrders,
+  quotations,
+  callData,
+  startDate,
+  endDate
+) {
+  // Monthly trends for all three types
+  const monthlyData = {};
 
+  // Process invoices
   invoices.forEach((invoice) => {
     const date = new Date(invoice.DocDate);
     const monthKey = `${date.getFullYear()}-${String(
@@ -440,26 +643,90 @@ function calculateChartsData(invoices, callData, startDate, endDate) {
       year: "numeric",
     });
 
-    if (!monthlySales[monthKey]) {
-      monthlySales[monthKey] = {
+    if (!monthlyData[monthKey]) {
+      monthlyData[monthKey] = {
         month: monthLabel,
         sales: 0,
+        orders: 0,
+        quotations: 0,
         invoices: 0,
+        ordersCount: 0,
+        quotationsCount: 0,
         date: new Date(date.getFullYear(), date.getMonth(), 1),
       };
     }
 
-    monthlySales[monthKey].sales += invoice.DocTotal || 0;
-    monthlySales[monthKey].invoices += 1;
+    monthlyData[monthKey].sales += invoice.DocTotal || 0;
+    monthlyData[monthKey].invoices += 1;
   });
 
-  const salesTrend = Object.values(monthlySales)
+  // Process sales orders
+  salesOrders.forEach((order) => {
+    const date = new Date(order.DocDate);
+    const monthKey = `${date.getFullYear()}-${String(
+      date.getMonth() + 1
+    ).padStart(2, "0")}`;
+    const monthLabel = date.toLocaleDateString("en-US", {
+      month: "short",
+      year: "numeric",
+    });
+
+    if (!monthlyData[monthKey]) {
+      monthlyData[monthKey] = {
+        month: monthLabel,
+        sales: 0,
+        orders: 0,
+        quotations: 0,
+        invoices: 0,
+        ordersCount: 0,
+        quotationsCount: 0,
+        date: new Date(date.getFullYear(), date.getMonth(), 1),
+      };
+    }
+
+    monthlyData[monthKey].orders += order.DocTotal || 0;
+    monthlyData[monthKey].ordersCount += 1;
+  });
+
+  // Process quotations
+  quotations.forEach((quotation) => {
+    const date = new Date(quotation.DocDate);
+    const monthKey = `${date.getFullYear()}-${String(
+      date.getMonth() + 1
+    ).padStart(2, "0")}`;
+    const monthLabel = date.toLocaleDateString("en-US", {
+      month: "short",
+      year: "numeric",
+    });
+
+    if (!monthlyData[monthKey]) {
+      monthlyData[monthKey] = {
+        month: monthLabel,
+        sales: 0,
+        orders: 0,
+        quotations: 0,
+        invoices: 0,
+        ordersCount: 0,
+        quotationsCount: 0,
+        date: new Date(date.getFullYear(), date.getMonth(), 1),
+      };
+    }
+
+    monthlyData[monthKey].quotations += quotation.DocTotal || 0;
+    monthlyData[monthKey].quotationsCount += 1;
+  });
+
+  const combinedTrend = Object.values(monthlyData)
     .sort((a, b) => a.date - b.date)
     .slice(-6) // Last 6 months
     .map((item) => ({
       month: item.month,
       sales: Math.round(item.sales),
+      orders: Math.round(item.orders),
+      quotations: Math.round(item.quotations),
       invoices: item.invoices,
+      ordersCount: item.ordersCount,
+      quotationsCount: item.quotationsCount,
     }));
 
   // Daily calls trend (last 7 days)
@@ -489,7 +756,7 @@ function calculateChartsData(invoices, callData, startDate, endDate) {
   const callsTrend = Object.values(dailyCalls).slice(-7);
 
   return {
-    salesTrend,
+    salesTrend: combinedTrend,
     callsTrend,
   };
 }
@@ -500,31 +767,108 @@ function calculateChartsData(invoices, callData, startDate, endDate) {
 async function getRecentActivities(
   teamMemberIds,
   customerCodes,
+  teamCustomers,
   startDate,
   endDate
 ) {
   const activities = [];
 
-  // Get recent invoices
+  // Create customer to agent mapping
+  const customerToAgentMap = {};
+  teamCustomers.forEach((customer) => {
+    customerToAgentMap[customer.CardCode] = customer.assignedTo;
+  });
+
+  // Get team members for name lookup
+  const teamMembers = await User.find({
+    _id: { $in: teamMemberIds },
+  })
+    .select("firstName lastName")
+    .lean();
+
+  const agentNameMap = {};
+  teamMembers.forEach((member) => {
+    agentNameMap[
+      member._id.toString()
+    ] = `${member.firstName} ${member.lastName}`;
+  });
+
   if (customerCodes.length > 0) {
+    // Get recent invoices
     const recentInvoices = await Invoice.find({
       CardCode: { $in: customerCodes },
       DocDate: { $gte: startDate, $lte: endDate },
     })
       .sort({ DocDate: -1 })
-      .limit(10)
+      .limit(5)
       .lean();
 
     recentInvoices.forEach((invoice) => {
+      const agentId = customerToAgentMap[invoice.CardCode];
+      const agentName = agentId ? agentNameMap[agentId.toString()] : "Unknown";
+
       activities.push({
         type: "invoice",
         date: invoice.DocDate,
         title: `Invoice #${invoice.DocNum} created`,
         description: `${invoice.CardName} - ${formatCurrency(
           invoice.DocTotal
-        )}`,
+        )} by ${agentName}`,
         amount: invoice.DocTotal,
         customer: invoice.CardName,
+        agent: agentName,
+      });
+    });
+
+    // Get recent sales orders
+    const recentOrders = await SalesOrder.find({
+      CardCode: { $in: customerCodes },
+      DocDate: { $gte: startDate, $lte: endDate },
+    })
+      .sort({ DocDate: -1 })
+      .limit(5)
+      .lean();
+
+    recentOrders.forEach((order) => {
+      const agentId = customerToAgentMap[order.CardCode];
+      const agentName = agentId ? agentNameMap[agentId.toString()] : "Unknown";
+
+      activities.push({
+        type: "order",
+        date: order.DocDate,
+        title: `Sales Order #${order.DocNum} created`,
+        description: `${order.CardName} - ${formatCurrency(
+          order.DocTotal
+        )} by ${agentName}`,
+        amount: order.DocTotal,
+        customer: order.CardName,
+        agent: agentName,
+      });
+    });
+
+    // Get recent quotations
+    const recentQuotations = await Quotation.find({
+      CardCode: { $in: customerCodes },
+      DocDate: { $gte: startDate, $lte: endDate },
+    })
+      .sort({ DocDate: -1 })
+      .limit(5)
+      .lean();
+
+    recentQuotations.forEach((quotation) => {
+      const agentId = customerToAgentMap[quotation.CardCode];
+      const agentName = agentId ? agentNameMap[agentId.toString()] : "Unknown";
+
+      activities.push({
+        type: "quotation",
+        date: quotation.DocDate,
+        title: `Quotation #${quotation.DocNum} created`,
+        description: `${quotation.CardName} - ${formatCurrency(
+          quotation.DocTotal
+        )} by ${agentName}`,
+        amount: quotation.DocTotal,
+        customer: quotation.CardName,
+        agent: agentName,
       });
     });
   }

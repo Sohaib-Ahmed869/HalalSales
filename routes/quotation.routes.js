@@ -5,8 +5,14 @@ const quotationController = require("../controllers/quotation.controller");
 const { auth } = require("../middleware/auth");
 
 // Add these routes to your quotationRoutes.js file
-router.post('/:docNum/generate-payment-link', quotationController.generatePaymentLinkForQuotation);
-router.get('/:docNum/payment-status', quotationController.getUpdateOnPaymentLinkForQuotation);
+router.post(
+  "/:docNum/generate-payment-link",
+  quotationController.generatePaymentLinkForQuotation
+);
+router.get(
+  "/:docNum/payment-status",
+  quotationController.getUpdateOnPaymentLinkForQuotation
+);
 // @route   GET /api/quotations/stats
 // @desc    Get quotation statistics
 // @access  Private (Admin only)
