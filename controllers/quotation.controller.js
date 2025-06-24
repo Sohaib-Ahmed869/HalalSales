@@ -109,11 +109,7 @@ exports.generatePaymentLinkForQuotation = async (req, res) => {
       additionalData: {
         "openinvoicedata.merchantData": account_info,
       },
-      allowedPaymentMethods: [
-        "klarna",
-        "card", // This is for card payments
-        "sepadirectdebit", // This is for bank transfer/SEPA
-      ],
+      
       company: {
         name: quotation.CardName,
       },

@@ -65,11 +65,7 @@ exports.generatePaymentLinkForOrder = async (req, res) => {
       },
       description: `Payment for Sales Order #${order.DocNum}`,
       countryCode: "FR",
-      allowedPaymentMethods: [
-        "klarna",
-        "card", // This is for card payments
-        "sepadirectdebit", // This is for bank transfer/SEPA
-      ],
+      
       merchantAccount: process.env.ADYEN_MERCHANT_ACCOUNT,
       shopperReference: order.CardCode,
       additionalData: {
