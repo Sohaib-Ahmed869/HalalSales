@@ -109,7 +109,7 @@ exports.generatePaymentLinkForQuotation = async (req, res) => {
       additionalData: {
         "openinvoicedata.merchantData": account_info,
       },
-      
+
       company: {
         name: quotation.CardName,
       },
@@ -302,7 +302,9 @@ exports.generatePaymentLinkForQuotation = async (req, res) => {
 exports.getUpdateOnPaymentLinkForQuotation = async (req, res) => {
   try {
     const { docNum } = req.params;
+    console.log(`Checking payment link status for quotation: ${docNum}`);
     const quotation = await Quotation.findOne({ DocNum: docNum });
+    console.log(`Found quotation:`, quotation);
 
     if (!quotation) {
       return res.status(404).json({
@@ -320,6 +322,8 @@ exports.getUpdateOnPaymentLinkForQuotation = async (req, res) => {
         },
       }
     );
+
+    console.log(`Payment link status for ${docNum}:`, response.data);
 
     const paymentStatus = response.data.status;
     quotation.payment_status = paymentStatus;
@@ -781,6 +785,16 @@ exports.createQuotation = async (req, res) => {
     // Calculate today's date
     const today = new Date();
 
+    // CRITICAL FIX: Process document lines to ensure price list consistency
+    const priceList = req.body.PriceList || "2"; // Default to Prix Livraison
+    const processedDocumentLines = req.body.DocumentLines.map((line) => ({
+      ...line,
+      // CRITICAL FIX: Ensure each line has the price list info
+      PriceList: priceList,
+      // Ensure line total is calculated correctly
+      LineTotal: (line.Quantity || 0) * (line.Price || 0),
+    }));
+
     // Create the new quotation
     const newQuotation = new Quotation({
       ...req.body,
@@ -795,16 +809,20 @@ exports.createQuotation = async (req, res) => {
       SyncedWithSAP: false,
       LocalStatus: "Created",
       salesAgent: salesAgentId,
-      IsActive: true, // Mark as active by default
+      IsActive: true,
+
+      // CRITICAL FIX: Ensure price list is set at quotation level
+      PriceList: priceList,
+
+      // CRITICAL FIX: Use processed document lines
+      DocumentLines: processedDocumentLines,
     });
 
     // Calculate totals if not provided
     if (!newQuotation.DocTotal) {
       let total = 0;
       for (const line of newQuotation.DocumentLines) {
-        const lineTotal = line.Quantity * line.Price;
-        line.LineTotal = lineTotal;
-        total += lineTotal;
+        total += line.LineTotal || 0;
       }
       newQuotation.DocTotal = total;
     }
@@ -835,8 +853,9 @@ exports.createQuotation = async (req, res) => {
       // Link the task to the quotation
       newQuotation.approvalTask = task._id;
       newQuotation.approvalStatus = "pending";
-      await newQuotation.save();
     }
+
+    await newQuotation.save();
 
     res.status(201).json({
       success: true,
@@ -1124,7 +1143,6 @@ exports.convertToOrder = async (req, res) => {
     }
 
     const userId = req.user._id;
-    // user name
     const userName = req.user.firstName + " " + req.user.lastName;
 
     // Generate DocEntry for the new order
@@ -1142,10 +1160,22 @@ exports.convertToOrder = async (req, res) => {
       quotation.Payment_id +
       "). ";
 
+    // FIXED: Ensure price list is properly transferred
+    const quotationData = quotation.toObject();
+
+    // Process document lines to ensure price list consistency
+    const processedDocumentLines = quotationData.DocumentLines.map((line) => ({
+      ...line,
+      // CRITICAL FIX: Ensure each line has the correct price list
+      PriceList: quotationData.PriceList || "2", // Default to Prix Livraison if not set
+      // Ensure line total is recalculated
+      LineTotal: (line.Quantity || 0) * (line.Price || 0),
+    }));
+
     // Create the sales order from the quotation data
     const newOrder = new SalesOrder({
       // Copy all fields from quotation except specific fields that need to be fresh
-      ...quotation.toObject(),
+      ...quotationData,
       DocEntry: newDocEntry,
       DocNum: newDocEntry,
       CreationDate: new Date(),
@@ -1154,10 +1184,19 @@ exports.convertToOrder = async (req, res) => {
       DocDueDate: req.body.DocDueDate || new Date(),
       SyncedWithSAP: false,
       LocalStatus: "Created",
+
+      // CRITICAL FIX: Ensure price list is set at order level
+      PriceList: quotationData.PriceList || "2",
+
+      // CRITICAL FIX: Use processed document lines with price list info
+      DocumentLines: processedDocumentLines,
+
       // Override with any additional data from the request body
       ...req.body,
+
       // Ensure we keep the original references
       salesAgent: quotation.salesAgent,
+
       // Reference to original quotation
       OriginatingQuotation: quotation.DocEntry,
       U_Notes: salesAgentName,
@@ -1187,7 +1226,6 @@ exports.convertToOrder = async (req, res) => {
         },
         message:
           "Quotation successfully converted to order and synced with SAP",
-
         sapSync: {
           success: true,
           SAPDocEntry: sapResult.SAPDocEntry,
@@ -1212,7 +1250,6 @@ exports.convertToOrder = async (req, res) => {
           status: "Converted",
         },
         message: "Quotation converted to order but failed to sync with SAP",
-        targetUpdated: updatedTarget ? true : false,
         sapSync: {
           success: false,
           error: sapResult.error,

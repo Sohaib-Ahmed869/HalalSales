@@ -126,31 +126,40 @@ exports.checkBusinessPartnerExists = async (cardCode) => {
   }
 };
 
-// Format a local order for SAP B1 format - MINIMAL approach
 exports.formatOrderForSAP = async (order) => {
-  // Instead of removing fields, let's build a new object with only what SAP needs
   const today = new Date();
 
-  // Create minimal SAP order with only required fields
+  // Create SAP order with price list information
   const sapOrder = {
     CardCode: order.CardCode,
     DocDate: order.DocDate || today,
     DocDueDate: order.DocDueDate || today,
     Comments: order.Comments || "",
     U_Notes: order.U_Notes || "",
+
+    // CRITICAL FIX: Include price list at document level
+    PriceList: parseInt(order.PriceList) || 2, // Default to Prix Livraison (2)
+
     DocumentLines: [],
   };
 
-  // Only include the necessary fields for each line item
+  // Process document lines with price list information
   if (order.DocumentLines && Array.isArray(order.DocumentLines)) {
-    sapOrder.DocumentLines = order.DocumentLines.map((line) => {
-      return {
+    sapOrder.DocumentLines = order.DocumentLines.map((line, index) => {
+      const sapLine = {
         ItemCode: line.ItemCode,
         Quantity: Number(line.Quantity || 0),
         Price: Number(line.Price || 0),
-        // Include description if available
         ItemDescription: line.ItemDescription || "",
+
+        // CRITICAL FIX: Include price list for each line
+        PriceList: parseInt(line.PriceList || order.PriceList) || 2,
+
+        // Optional: Include line number for tracking
+        LineNum: index,
       };
+
+      return sapLine;
     });
   }
 
@@ -159,21 +168,17 @@ exports.formatOrderForSAP = async (order) => {
     sapOrder.U_SalesAgentId = order.salesAgent.toString();
   }
 
-  // Log what we're sending
-  console.log(
-    "Minimal SAP order:",
-    JSON.stringify(
-      {
-        CardCode: sapOrder.CardCode,
-        DocDate: sapOrder.DocDate,
-        DocDueDate: sapOrder.DocDueDate,
-        LineCount: sapOrder.DocumentLines.length,
-        SampleLine: sapOrder.DocumentLines[0],
-      },
-      null,
-      2
-    )
-  );
+  // Log detailed information for debugging
+  console.log("SAP Order with Price List:", {
+    CardCode: sapOrder.CardCode,
+    PriceList: sapOrder.PriceList,
+    DocumentLines: sapOrder.DocumentLines.map((line) => ({
+      ItemCode: line.ItemCode,
+      Price: line.Price,
+      PriceList: line.PriceList,
+      Quantity: line.Quantity,
+    })),
+  });
 
   return sapOrder;
 };
