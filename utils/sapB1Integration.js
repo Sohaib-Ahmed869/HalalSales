@@ -138,7 +138,7 @@ exports.formatOrderForSAP = async (order) => {
     U_Notes: order.U_Notes || "",
 
     // CRITICAL FIX: Include price list at document level
-    PriceList: parseInt(order.PriceList) || 2, // Default to Prix Livraison (2)
+    PriceList: order.PriceList ? parseInt(order.PriceList, 10) : 2,
 
     DocumentLines: [],
   };
@@ -149,11 +149,16 @@ exports.formatOrderForSAP = async (order) => {
       const sapLine = {
         ItemCode: line.ItemCode,
         Quantity: Number(line.Quantity || 0),
-        Price: Number(line.Price || 0),
+        UnitPrice: Number(line.Price || 0),
         ItemDescription: line.ItemDescription || "",
 
         // CRITICAL FIX: Include price list for each line
-        PriceList: parseInt(line.PriceList || order.PriceList) || 2,
+        // CORRECT - proper fallback chain
+        PriceList: line.PriceList
+          ? parseInt(line.PriceList, 10)
+          : order.PriceList
+          ? parseInt(order.PriceList, 10)
+          : 2,
 
         // Optional: Include line number for tracking
         LineNum: index,
@@ -174,7 +179,7 @@ exports.formatOrderForSAP = async (order) => {
     PriceList: sapOrder.PriceList,
     DocumentLines: sapOrder.DocumentLines.map((line) => ({
       ItemCode: line.ItemCode,
-      Price: line.Price,
+      UnitPrice: line.UnitPrice,
       PriceList: line.PriceList,
       Quantity: line.Quantity,
     })),

@@ -35,6 +35,10 @@ const DocumentLineSchema = new Schema({
   VendorNum: String,
   SerialNum: String,
   WarehouseCode: String,
+  PriceList: {
+    type: Number,
+    default: 2, // Default to Prix Livraison (2)
+  },
   SalesPersonCode: Number,
   CommisionPercent: Number,
   TreeType: String,
@@ -481,6 +485,10 @@ const OrderSchema = new Schema(
     UpdateTime: String,
     CreateQRCodeFrom: String,
     PriceMode: String,
+    PriceList: {
+      type: Number,
+      default: 2, // Default to Prix Livraison (2)
+    },
     ShipFrom: String,
     CommissionTrade: String,
     CommissionTradeReturn: String,

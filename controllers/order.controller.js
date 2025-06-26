@@ -65,7 +65,7 @@ exports.generatePaymentLinkForOrder = async (req, res) => {
       },
       description: `Payment for Sales Order #${order.DocNum}`,
       countryCode: "FR",
-      
+
       merchantAccount: process.env.ADYEN_MERCHANT_ACCOUNT,
       shopperReference: order.CardCode,
       additionalData: {
@@ -679,6 +679,16 @@ exports.createOrder = async (req, res) => {
       });
     }
 
+    console.log("Request body PriceList:", req.body.PriceList);
+    console.log("Full request body:", {
+      PriceList: req.body.PriceList,
+      CardCode: req.body.CardCode,
+      DocumentLines: req.body.DocumentLines?.map((line) => ({
+        ItemCode: line.ItemCode,
+        PriceList: line.PriceList,
+      })),
+    });
+
     const salesAgentId = req.user._id;
 
     // Validate that at least one document line exists
@@ -727,17 +737,43 @@ exports.createOrder = async (req, res) => {
     }
 
     // Generate DocEntry (you might want to use a more sophisticated method)
+    const orderPriceList = req.body.PriceList || "2"; // Default to Prix Livraison
+
+    // Process document lines to ensure price list is set on each line
+    const processedDocumentLines = req.body.DocumentLines.map((line) => ({
+      ...line,
+      // CRITICAL FIX: Ensure each line has the price list info
+      PriceList: line.PriceList
+        ? parseInt(line.PriceList, 10)
+        : parseInt(orderPriceList, 10),
+      // Ensure line total is calculated correctly
+      LineTotal: (line.Quantity || 0) * (line.Price || 0),
+    }));
+
+    console.log(processedDocumentLines)
+
+    // Replace the original DocumentLines with processed ones
+    req.body.DocumentLines = processedDocumentLines;
+    // ✅ END OF NEW CODE BLOCK
+
+    // Generate DocEntry (you might want to use a more sophisticated method)
     const lastOrder = await SalesOrder.findOne().sort({ DocEntry: -1 });
     const newDocEntry = lastOrder ? lastOrder.DocEntry + 1 : 1;
 
     // Calculate today's date for DocDate and DocDueDate
     const today = new Date();
 
-    const salesAgentName = "The order was put up by" + req.user.firstName + " " + req.user.lastName + ". ";
+    const salesAgentName =
+      "The order was put up by" +
+      req.user.firstName +
+      " " +
+      req.user.lastName +
+      ". ";
 
     // Create the new order
     const newOrder = new SalesOrder({
       ...req.body,
+      PriceList: req.body.PriceList,
       DocEntry: newDocEntry,
       DocNum: newDocEntry, // Consider separate numbering if needed
       DocType: req.body.DocType || "dDocument_Items",
@@ -752,6 +788,8 @@ exports.createOrder = async (req, res) => {
       salesAgent: salesAgentId,
       U_Notes: salesAgentName,
     });
+
+    console.log("Creating new order:", newOrder);
 
     // Calculate totals if not provided
     if (!newOrder.DocTotal) {
