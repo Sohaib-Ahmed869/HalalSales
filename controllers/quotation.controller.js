@@ -1150,15 +1150,18 @@ exports.convertToOrder = async (req, res) => {
     const lastOrder = await SalesOrder.findOne().sort({ DocEntry: -1 });
     const newDocEntry = lastOrder ? lastOrder.DocEntry + 1 : 1;
 
+    const paymentStatus = quotation.payment_status || "not paid";
+    const paymentId = quotation.Payment_id || "no payment link";
+
     const salesAgentName =
       "This order was created from a quotation by " +
       userName +
       " (Quotation ID: " +
       quotation.DocEntry +
       "). With the payment status " +
-      quotation.payment_status +
+      paymentStatus +
       " (" +
-      quotation.Payment_id +
+      paymentId +
       "). ";
 
     // FIXED: Ensure price list is properly transferred
