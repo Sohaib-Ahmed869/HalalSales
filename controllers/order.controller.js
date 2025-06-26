@@ -71,6 +71,7 @@ exports.generatePaymentLinkForOrder = async (req, res) => {
       additionalData: {
         "openinvoicedata.merchantData": account_info,
       },
+      allowedPaymentMethods: ["klarna_b2b"],
       company: {
         name: order.CardName,
       },
@@ -750,7 +751,7 @@ exports.createOrder = async (req, res) => {
       LineTotal: (line.Quantity || 0) * (line.Price || 0),
     }));
 
-    console.log(processedDocumentLines)
+    console.log(processedDocumentLines);
 
     // Replace the original DocumentLines with processed ones
     req.body.DocumentLines = processedDocumentLines;

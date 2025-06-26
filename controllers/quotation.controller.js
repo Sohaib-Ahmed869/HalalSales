@@ -125,6 +125,7 @@ exports.generatePaymentLinkForQuotation = async (req, res) => {
         ),
         description: line.ItemDescription,
       })),
+      allowedPaymentMethods: ["klarna_b2b"],
     };
 
     const response = await axios.post(
