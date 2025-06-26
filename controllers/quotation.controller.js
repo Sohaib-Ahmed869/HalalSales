@@ -176,14 +176,14 @@ exports.generatePaymentLinkForQuotation = async (req, res) => {
         "fr-FR",
         {
           style: "currency",
-          currency: quotation.DocCurrency || "EUR",
+          currency: "EUR",
         }
       ).format(line.Price)}</td>
       <td style="padding: 8px; border: 1px solid #ddd;">${new Intl.NumberFormat(
         "fr-FR",
         {
           style: "currency",
-          currency: quotation.DocCurrency || "EUR",
+          currency: "EUR",
         }
       ).format(line.LineTotal)}</td>
       </tr>
@@ -197,7 +197,7 @@ exports.generatePaymentLinkForQuotation = async (req, res) => {
       "fr-FR",
       {
         style: "currency",
-        currency: quotation.DocCurrency || "EUR",
+        currency: "EUR",
       }
     ).format(quotation.DocTotal)}</strong></td>
     </tr>
@@ -236,14 +236,14 @@ exports.generatePaymentLinkForQuotation = async (req, res) => {
         "en-US",
         {
           style: "currency",
-          currency: quotation.DocCurrency || "USD",
+          currency: quotation.DocCurrency || "EUR",
         }
       ).format(line.Price)}</td>
       <td style="padding: 8px; border: 1px solid #ddd;">${new Intl.NumberFormat(
         "en-US",
         {
           style: "currency",
-          currency: quotation.DocCurrency || "USD",
+          currency: quotation.DocCurrency || "EUR",
         }
       ).format(line.LineTotal)}</td>
       </tr>
@@ -257,7 +257,7 @@ exports.generatePaymentLinkForQuotation = async (req, res) => {
       "en-US",
       {
         style: "currency",
-        currency: quotation.DocCurrency || "USD",
+        currency: quotation.DocCurrency || "EUR",
       }
     ).format(quotation.DocTotal)}</strong></td>
     </tr>
