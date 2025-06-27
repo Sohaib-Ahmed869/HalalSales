@@ -4429,3 +4429,38 @@ exports.previewZeroValueAbandonedCarts = async (req, res) => {
     });
   }
 };
+
+exports.getCustomerByCardCode = async (req, res) => {
+  try {
+    const { cardCode } = req.params;
+
+    if (!cardCode) {
+      return res.status(400).json({
+        success: false,
+        message: "Card code is required",
+      });
+    }
+
+    // Find customer by CardCode
+    const customer = await Customer.findOne({ CardCode: cardCode }).lean();
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      customer,
+    });
+  } catch (error) {
+    console.error("Error fetching customer by card code:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error fetching customer",
+      error: error.message,
+    });
+  }
+};

@@ -52,11 +52,13 @@ const upload = multer({
   },
 });
 
+router.get("/get-customer-by-card/:cardCode", auth, customerController.getCustomerByCardCode);
+
 router.get(
   "/get-customer-email/:cardCode",
   auth,
   customerController.getCustomerEmailByCode
-)
+);
 router.get(
   "/preview-zero-value",
   customerController.previewZeroValueAbandonedCarts

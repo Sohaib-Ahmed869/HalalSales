@@ -13,6 +13,25 @@ router.get(
   "/:docNum/payment-status",
   quotationController.getUpdateOnPaymentLinkForQuotation
 );
+
+// Add these new routes to your existing quotationRoutes.js file
+// @route   GET /api/quotations/:docEntry/edit-data
+// @desc    Get quotation data for editing
+// @access  Private
+router.get(
+  "/:docEntry/edit-data",
+  auth,
+  quotationController.getQuotationForEdit
+);
+
+// @route   POST /api/quotations/:docEntry/prepare-duplicate
+// @desc    Prepare quotation data for duplication
+// @access  Private
+router.post(
+  "/:docEntry/prepare-duplicate",
+  auth,
+  quotationController.prepareQuotationForDuplicate
+);
 // @route   GET /api/quotations/stats
 // @desc    Get quotation statistics
 // @access  Private (Admin only)

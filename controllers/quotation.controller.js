@@ -448,7 +448,112 @@ async function pushOrderToSAPInternal(order) {
   }
 }
 
-// Add these methods to your quotation.controller.js file
+// Get quotation data for editing
+exports.getQuotationForEdit = async (req, res) => {
+  try {
+    const quotation = await Quotation.findOne({
+      DocEntry: req.params.docEntry,
+    }).populate("salesAgent", "firstName lastName email");
+
+    if (!quotation) {
+      return res.status(404).json({
+        success: false,
+        message: `Quotation with DocEntry ${req.params.docEntry} not found`,
+      });
+    }
+
+    // Check permissions for sales agents
+    if (
+      req.user.role === "sales_agent" &&
+      quotation.salesAgent &&
+      quotation.salesAgent._id.toString() !== req.user._id.toString()
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to edit this quotation",
+      });
+    }
+
+    // Check permissions for sales managers
+    if (req.user.role === "sales_manager" && quotation.salesAgent) {
+      const agent = await User.findById(quotation.salesAgent._id);
+      if (!agent || agent.manager.toString() !== req.user._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: "Not authorized to edit this quotation",
+        });
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      data: quotation,
+      mode: "edit",
+    });
+  } catch (error) {
+    console.error("Error fetching quotation for edit:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching quotation for edit",
+      error: error.message,
+    });
+  }
+};
+
+// Prepare quotation data for duplication
+exports.prepareQuotationForDuplicate = async (req, res) => {
+  try {
+    const quotation = await Quotation.findOne({
+      DocEntry: req.params.docEntry,
+    }).populate("salesAgent", "firstName lastName email");
+
+    if (!quotation) {
+      return res.status(404).json({
+        success: false,
+        message: `Quotation with DocEntry ${req.params.docEntry} not found`,
+      });
+    }
+
+    // Create a copy of the quotation data for duplication
+    const quotationData = quotation.toObject();
+
+    // Remove fields that shouldn't be duplicated
+    delete quotationData._id;
+    delete quotationData.DocEntry;
+    delete quotationData.DocNum;
+    delete quotationData.CreationDate;
+    delete quotationData.UpdateDate;
+    delete quotationData.ConvertedToOrderDocEntry;
+    delete quotationData.ConvertedDate;
+    delete quotationData.approvalTask;
+    delete quotationData.approvalStatus;
+    delete quotationData.approvedBy;
+    delete quotationData.approvedDate;
+    delete quotationData.approvalComments;
+    delete quotationData.Payment_id;
+    delete quotationData.Link_sent;
+    delete quotationData.payment_status;
+    delete quotationData.emailSentTo;
+
+    // Set new dates
+    const today = new Date();
+    quotationData.DocDate = today;
+    quotationData.DocDueDate = new Date(today.setDate(today.getDate() + 30));
+
+    res.status(200).json({
+      success: true,
+      data: quotationData,
+      mode: "duplicate",
+    });
+  } catch (error) {
+    console.error("Error preparing quotation for duplication:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error preparing quotation for duplication",
+      error: error.message,
+    });
+  }
+};
 
 // Get quotation statistics
 exports.getQuotationStats = async (req, res) => {
@@ -1273,6 +1378,7 @@ exports.convertToOrder = async (req, res) => {
 };
 
 // Update quotation
+// Update quotation (Enhanced version)
 exports.updateQuotation = async (req, res) => {
   try {
     const quotation = await Quotation.findOne({
@@ -1308,6 +1414,8 @@ exports.updateQuotation = async (req, res) => {
       "IsActive",
       "ConvertedToOrderDocEntry",
       "ConvertedDate",
+      "SyncedWithSAP",
+      "SAPDocEntry",
     ];
 
     // Remove protected fields from the update
@@ -1316,6 +1424,17 @@ exports.updateQuotation = async (req, res) => {
         delete req.body[field];
       }
     });
+
+    // If this is a significant update (DocumentLines changed), reset approval status
+    if (req.body.DocumentLines) {
+      req.body.approvalStatus = "pending";
+      req.body.approvedBy = undefined;
+      req.body.approvedDate = undefined;
+      req.body.approvalComments = undefined;
+
+      // Clear any existing approval task reference
+      req.body.approvalTask = undefined;
+    }
 
     // Update allowed fields
     Object.keys(req.body).forEach((key) => {
@@ -1329,11 +1448,37 @@ exports.updateQuotation = async (req, res) => {
     if (req.body.DocumentLines) {
       let total = 0;
       for (const line of quotation.DocumentLines) {
-        const lineTotal = line.Quantity * line.Price;
+        const lineTotal = (line.Quantity || 0) * (line.Price || 0);
         line.LineTotal = lineTotal;
         total += lineTotal;
       }
       quotation.DocTotal = total;
+
+      // Create new approval task if needed
+      const adminUsers = await User.find({ role: "admin" }).select("_id");
+      if (adminUsers.length > 0) {
+        const adminId = adminUsers[0]._id;
+
+        const Task = require("../models/Task");
+        const task = new Task({
+          title: `Approve Updated Quotation #${quotation.DocNum}`,
+          description: `Review and approve updated quotation #${
+            quotation.DocNum
+          } for ${quotation.CardName} (${
+            quotation.CardCode
+          }) - Total: €${quotation.DocTotal.toFixed(2)}`,
+          dueDate: new Date(new Date().setDate(new Date().getDate() + 1)),
+          priority: "medium",
+          type: "approval",
+          status: "pending_approval",
+          assignedTo: adminId,
+          createdBy: req.user._id,
+          relatedQuotation: quotation.DocEntry,
+        });
+
+        await task.save();
+        quotation.approvalTask = task._id;
+      }
     }
 
     await quotation.save();
@@ -1341,7 +1486,9 @@ exports.updateQuotation = async (req, res) => {
     res.status(200).json({
       success: true,
       data: quotation,
-      message: "Quotation updated successfully",
+      message: req.body.DocumentLines
+        ? "Quotation updated successfully and sent for re-approval"
+        : "Quotation updated successfully",
     });
   } catch (error) {
     console.error("Error updating quotation:", error);
