@@ -115,13 +115,17 @@ exports.generatePaymentLinkForQuotation = async (req, res) => {
       },
       shopperEmail: email,
       lineItems: quotation.DocumentLines.map((line) => ({
-        id: line.LineNum,
+        id: line.LineNum || line._id,
         quantity: line.Quantity,
-        amountIncludingTax: Math.round(line.PriceAfterVAT * 100),
+        amountIncludingTax: Math.round(
+          (line.PriceAfterVAT || line.Price * 1.2) * 100
+        ),
         amountExcludingTax: Math.round(line.Price * 100),
-        taxAmount: Math.round((line.PriceAfterVAT - line.Price) * 100),
+        taxAmount: Math.round(
+          ((line.PriceAfterVAT || line.Price * 1.2) - line.Price) * 100
+        ),
         taxPercentage: Math.round(
-          (line.PriceAfterVAT / line.Price - 1) * 10000
+          ((line.PriceAfterVAT || line.Price * 1.2) / line.Price - 1) * 10000
         ),
         description: line.ItemDescription,
       })),
@@ -156,112 +160,85 @@ exports.generatePaymentLinkForQuotation = async (req, res) => {
     <p>Le lien de paiement expirera le ${expiryDate.split("T")[0]}.</p>
     <h3>Détails du devis :</h3>
     <table style="border-collapse: collapse; width: 100%;">
-    <thead>
-    <tr style="background-color: #f3f4f6;">
-    <th style="padding: 8px; border: 1px solid #ddd;">Article</th>
-    <th style="padding: 8px; border: 1px solid #ddd;">Quantité</th>
-    <th style="padding: 8px; border: 1px solid #ddd;">Prix</th>
-    <th style="padding: 8px; border: 1px solid #ddd;">Total</th>
-    </tr>
-    </thead>
-    <tbody>
-    ${quotation.DocumentLines.map(
-      (line) => `
-      <tr>
-      <td style="padding: 8px; border: 1px solid #ddd;">${
-        line.ItemDescription
-      }</td>
-      <td style="padding: 8px; border: 1px solid #ddd;">${line.Quantity}</td>
-      <td style="padding: 8px; border: 1px solid #ddd;">${new Intl.NumberFormat(
-        "fr-FR",
-        {
-          style: "currency",
-          currency: "EUR",
-        }
-      ).format(line.Price)}</td>
-      <td style="padding: 8px; border: 1px solid #ddd;">${new Intl.NumberFormat(
-        "fr-FR",
-        {
-          style: "currency",
-          currency: "EUR",
-        }
-      ).format(line.LineTotal)}</td>
-      </tr>
-      `
-    ).join("")}
-    </tbody>
-    <tfoot>
-    <tr style="background-color: #f3f4f6;">
-    <td colspan="3" style="padding: 8px; border: 1px solid #ddd;"><strong>Total</strong></td>
-    <td style="padding: 8px; border: 1px solid #ddd;"><strong>${new Intl.NumberFormat(
+   <thead>
+<tr style="background-color: #f3f4f6;">
+<th style="padding: 8px; border: 1px solid #ddd;">Article</th>
+<th style="padding: 8px; border: 1px solid #ddd;">Quantité</th>
+<th style="padding: 8px; border: 1px solid #ddd;">Prix HT</th>
+<th style="padding: 8px; border: 1px solid #ddd;">TVA</th>
+<th style="padding: 8px; border: 1px solid #ddd;">Prix TTC</th>
+<th style="padding: 8px; border: 1px solid #ddd;">Total TTC</th>
+</tr>
+</thead>
+<tbody>
+${quotation.DocumentLines.map(
+  (line) => `
+  <tr>
+  <td style="padding: 8px; border: 1px solid #ddd;">${line.ItemDescription}</td>
+  <td style="padding: 8px; border: 1px solid #ddd;">${line.Quantity}</td>
+  <td style="padding: 8px; border: 1px solid #ddd;">${new Intl.NumberFormat(
+    "fr-FR",
+    {
+      style: "currency",
+      currency: "EUR",
+    }
+  ).format(line.Price)}</td>
+  <td style="padding: 8px; border: 1px solid #ddd;">${
+    line.VatGroup || "C4"
+  }</td>
+  <td style="padding: 8px; border: 1px solid #ddd;">${new Intl.NumberFormat(
+    "fr-FR",
+    {
+      style: "currency",
+      currency: "EUR",
+    }
+  ).format(line.PriceAfterVAT || line.Price * 1.2)}</td>
+  <td style="padding: 8px; border: 1px solid #ddd;">${new Intl.NumberFormat(
+    "fr-FR",
+    {
+      style: "currency",
+      currency: "EUR",
+    }
+  ).format(line.LineTotalWithVAT || line.LineTotal * 1.2)}</td>
+  </tr>
+  `
+).join("")}
+</tbody>
+<tfoot>
+<tr style="background-color: #f3f4f6;">
+<td colspan="4" style="padding: 8px; border: 1px solid #ddd;"><strong>Total HT</strong></td>
+<td style="padding: 8px; border: 1px solid #ddd;"><strong>${new Intl.NumberFormat(
       "fr-FR",
       {
         style: "currency",
         currency: "EUR",
       }
     ).format(quotation.DocTotal)}</strong></td>
-    </tr>
-    </tfoot>
-    </table>
-    <p>Si vous avez des questions, n'hésitez pas à nous contacter.</p>
-    <p>Merci pour votre confiance !</p>
-
-    <hr />
-
-    <h2>Payment Request for Quotation #${quotation.DocNum}</h2>
-    <p>Dear ${quotation.CardName},</p>
-    <p>Please find below the payment link for your quotation:</p>
-    <p><a href="${paymentLink}">Click here to make your payment</a></p>
-    <p style="font-weight: bold;">If you want to proceed with payment after 30 days, please choose the option "Pay by Invoice for Businesses" and proceed to fill out the required information.</p>
-    <p>The payment link will expire on ${expiryDate.split("T")[0]}.</p>
-    <h3>Quotation Details:</h3>
-    <table style="border-collapse: collapse; width: 100%;">
-    <thead>
-    <tr style="background-color: #f3f4f6;">
-    <th style="padding: 8px; border: 1px solid #ddd;">Item</th>
-    <th style="padding: 8px; border: 1px solid #ddd;">Quantity</th>
-    <th style="padding: 8px; border: 1px solid #ddd;">Price</th>
-    <th style="padding: 8px; border: 1px solid #ddd;">Total</th>
-    </tr>
-    </thead>
-    <tbody>
-    ${quotation.DocumentLines.map(
-      (line) => `
-      <tr>
-      <td style="padding: 8px; border: 1px solid #ddd;">${
-        line.ItemDescription
-      }</td>
-      <td style="padding: 8px; border: 1px solid #ddd;">${line.Quantity}</td>
-      <td style="padding: 8px; border: 1px solid #ddd;">${new Intl.NumberFormat(
-        "en-US",
-        {
-          style: "currency",
-          currency: quotation.DocCurrency || "EUR",
-        }
-      ).format(line.Price)}</td>
-      <td style="padding: 8px; border: 1px solid #ddd;">${new Intl.NumberFormat(
-        "en-US",
-        {
-          style: "currency",
-          currency: quotation.DocCurrency || "EUR",
-        }
-      ).format(line.LineTotal)}</td>
-      </tr>
-      `
-    ).join("")}
-    </tbody>
-    <tfoot>
-    <tr style="background-color: #f3f4f6;">
-    <td colspan="3" style="padding: 8px; border: 1px solid #ddd;"><strong>Total</strong></td>
-    <td style="padding: 8px; border: 1px solid #ddd;"><strong>${new Intl.NumberFormat(
-      "en-US",
+<td></td>
+</tr>
+<tr style="background-color: #f3f4f6;">
+<td colspan="4" style="padding: 8px; border: 1px solid #ddd;"><strong>TVA</strong></td>
+<td style="padding: 8px; border: 1px solid #ddd;"><strong>${new Intl.NumberFormat(
+      "fr-FR",
       {
         style: "currency",
-        currency: quotation.DocCurrency || "EUR",
+        currency: "EUR",
       }
-    ).format(quotation.DocTotal)}</strong></td>
-    </tr>
-    </tfoot>
+    ).format(quotation.VatSum || 0)}</strong></td>
+<td></td>
+</tr>
+<tr style="background-color: #f3f4f6;">
+<td colspan="4" style="padding: 8px; border: 1px solid #ddd;"><strong>Total TTC</strong></td>
+<td style="padding: 8px; border: 1px solid #ddd;"><strong>${new Intl.NumberFormat(
+      "fr-FR",
+      {
+        style: "currency",
+        currency: "EUR",
+      }
+    ).format(quotation.DocTotalWithVAT || quotation.DocTotal)}</strong></td>
+<td></td>
+</tr>
+</tfoot>
     </table>
     <p>If you have any questions, please don't hesitate to contact us.</p>
     <p>Thank you for your business!</p>
@@ -699,6 +676,7 @@ exports.exportQuotations = async (req, res) => {
 };
 
 // Approve quotation
+// Approve quotation
 exports.approveQuotation = async (req, res) => {
   try {
     const { docEntry } = req.params;
@@ -724,6 +702,25 @@ exports.approveQuotation = async (req, res) => {
 
     await quotation.save();
 
+    // CRITICAL FIX: Update related task to completed when quotation is approved
+    if (quotation.approvalTask) {
+      const approvalTask = await Task.findById(quotation.approvalTask);
+      if (approvalTask) {
+        approvalTask.status = "completed";
+        approvalTask.completedDate = new Date();
+
+        // Add approval comment to task
+        const taskComment = `Quotation approved by ${req.user.firstName} ${
+          req.user.lastName
+        }${comments ? ": " + comments : ""}`;
+        approvalTask.comments = approvalTask.comments
+          ? `${approvalTask.comments}\n\n${taskComment}`
+          : taskComment;
+
+        await approvalTask.save();
+      }
+    }
+
     res.status(200).json({
       success: true,
       data: quotation,
@@ -739,6 +736,7 @@ exports.approveQuotation = async (req, res) => {
   }
 };
 
+// Reject quotation
 // Reject quotation
 exports.rejectQuotation = async (req, res) => {
   try {
@@ -764,6 +762,24 @@ exports.rejectQuotation = async (req, res) => {
     quotation.UpdateDate = new Date();
 
     await quotation.save();
+
+    // CRITICAL FIX: Update related task to rejected when quotation is rejected
+    if (quotation.approvalTask) {
+      const approvalTask = await Task.findById(quotation.approvalTask);
+      if (approvalTask) {
+        approvalTask.status = "rejected";
+
+        // Add rejection comment to task
+        const taskComment = `Quotation rejected by ${req.user.firstName} ${
+          req.user.lastName
+        }${reason ? ": " + reason : ""}`;
+        approvalTask.comments = approvalTask.comments
+          ? `${approvalTask.comments}\n\n${taskComment}`
+          : taskComment;
+
+        await approvalTask.save();
+      }
+    }
 
     res.status(200).json({
       success: true,
@@ -892,6 +908,7 @@ exports.createQuotation = async (req, res) => {
     const today = new Date();
 
     // CRITICAL FIX: Process document lines to ensure price list consistency
+
     const priceList = req.body.PriceList || "2"; // Default to Prix Livraison
     const processedDocumentLines = req.body.DocumentLines.map((line) => ({
       ...line,
@@ -899,6 +916,10 @@ exports.createQuotation = async (req, res) => {
       PriceList: priceList,
       // Ensure line total is calculated correctly
       LineTotal: (line.Quantity || 0) * (line.Price || 0),
+      // ADD VAT FIELDS
+      PriceAfterVAT: line.PriceAfterVAT || 0,
+      VatGroup: line.VatGroup || "C4", // Default VAT group
+      LineTotalWithVAT: line.LineTotalWithVAT || 0,
     }));
 
     // Create the new quotation
@@ -924,13 +945,19 @@ exports.createQuotation = async (req, res) => {
       DocumentLines: processedDocumentLines,
     });
 
-    // Calculate totals if not provided
+    // Calculate totals if not provided - INCLUDE VAT TOTALS
     if (!newQuotation.DocTotal) {
-      let total = 0;
+      let totalExVAT = 0;
+      let totalIncVAT = 0;
+
       for (const line of newQuotation.DocumentLines) {
-        total += line.LineTotal || 0;
+        totalExVAT += line.LineTotal || 0;
+        totalIncVAT += line.LineTotalWithVAT || 0;
       }
-      newQuotation.DocTotal = total;
+
+      newQuotation.DocTotal = totalExVAT; // Base total (ex VAT)
+      newQuotation.DocTotalWithVAT = totalIncVAT; // Total with VAT
+      newQuotation.VatSum = totalIncVAT - totalExVAT; // VAT amount
     }
 
     if (adminUsers.length > 0) {
@@ -1273,12 +1300,17 @@ exports.convertToOrder = async (req, res) => {
     const quotationData = quotation.toObject();
 
     // Process document lines to ensure price list consistency
+    // Process document lines to ensure price list consistency AND VAT
     const processedDocumentLines = quotationData.DocumentLines.map((line) => ({
       ...line,
       // CRITICAL FIX: Ensure each line has the correct price list
       PriceList: quotationData.PriceList || "2", // Default to Prix Livraison if not set
       // Ensure line total is recalculated
       LineTotal: (line.Quantity || 0) * (line.Price || 0),
+      // CRITICAL FIX: Preserve VAT information
+      PriceAfterVAT: line.PriceAfterVAT || 0,
+      VatGroup: line.VatGroup || "C4",
+      LineTotalWithVAT: line.LineTotalWithVAT || 0,
     }));
 
     // Create the sales order from the quotation data
@@ -1426,14 +1458,27 @@ exports.updateQuotation = async (req, res) => {
     });
 
     // If this is a significant update (DocumentLines changed), reset approval status
+    // Recalculate totals if DocumentLines are updated
     if (req.body.DocumentLines) {
-      req.body.approvalStatus = "pending";
-      req.body.approvedBy = undefined;
-      req.body.approvedDate = undefined;
-      req.body.approvalComments = undefined;
+      let totalExVAT = 0;
+      let totalIncVAT = 0;
 
-      // Clear any existing approval task reference
-      req.body.approvalTask = undefined;
+      for (const line of quotation.DocumentLines) {
+        const lineTotal = (line.Quantity || 0) * (line.Price || 0);
+        const lineTotalWithVAT = line.LineTotalWithVAT || lineTotal * 1.2; // Fallback calculation
+
+        line.LineTotal = lineTotal;
+        line.LineTotalWithVAT = lineTotalWithVAT;
+
+        totalExVAT += lineTotal;
+        totalIncVAT += lineTotalWithVAT;
+      }
+
+      quotation.DocTotal = totalExVAT;
+      quotation.DocTotalWithVAT = totalIncVAT;
+      quotation.VatSum = totalIncVAT - totalExVAT;
+
+      // Create new approval task if needed...
     }
 
     // Update allowed fields

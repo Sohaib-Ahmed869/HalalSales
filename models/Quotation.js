@@ -48,6 +48,7 @@ const DocumentLineSchema = new Schema({
   Height1: Number,
   Hight1Unit: Number,
   Height2: Number,
+  LineTotalWithVAT: Number,
   Height2Unit: Number,
   Lengh1: Number,
   Lengh1Unit: Number,
@@ -268,6 +269,14 @@ const OrderSchema = new Schema(
     Address: String,
     NumAtCard: String,
     DocTotal: Number,
+    DocTotalWithVAT: {
+      type: Number,
+      default: 0,
+    },
+    VatSum: {
+      type: Number,
+      default: 0,
+    },
     AttachmentEntry: Number,
     DocCurrency: String,
     DocRate: Number,

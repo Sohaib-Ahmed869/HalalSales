@@ -68,9 +68,334 @@ const processXLSXFile = (filePath) => {
 };
 
 // Add this function to your customer.controller.js
-// Add this to customer.controller.js
 
-// Add this to customer.controller.js
+const normalizePhoneNumber = (phone) => {
+  if (!phone) return "";
+
+  // Remove all non-digit characters
+  let digitsOnly = phone.replace(/[^\d]/g, "");
+
+  // Handle French phone numbers
+  if (digitsOnly.startsWith("33") && digitsOnly.length >= 11) {
+    // +33123456789 -> 123456789
+    return digitsOnly.substring(2);
+  } else if (digitsOnly.startsWith("0") && digitsOnly.length === 10) {
+    // 0123456789 -> 123456789
+    return digitsOnly.substring(1);
+  } else if (digitsOnly.length === 9) {
+    // 123456789 -> 123456789
+    return digitsOnly;
+  }
+
+  return digitsOnly;
+};
+
+const normalizeNameForMatching = (name) => {
+  if (!name) return "";
+  return name.toLowerCase().trim().replace(/\s+/g, " ");
+};
+
+exports.mapHubspotEmailsAndPhones = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "Please upload a CSV file with HubSpot data",
+      });
+    }
+
+    console.log("Processing HubSpot email and phone mapping:", req.file.path);
+    const startTime = Date.now();
+
+    // Process CSV file
+    const data = [];
+    await new Promise((resolve, reject) => {
+      fs.createReadStream(req.file.path)
+        .pipe(csv())
+        .on("data", (row) => {
+          data.push(row);
+        })
+        .on("end", () => {
+          console.log(`Extracted ${data.length} rows from CSV file`);
+          resolve();
+        })
+        .on("error", (error) => {
+          console.error("CSV parsing error:", error);
+          reject(error);
+        });
+    });
+
+    // Process HubSpot data
+    const hubspotContacts = data
+      .map((row) => {
+        const phone = normalizePhoneNumber(row["Phone Number"] || "");
+        const email = (row["Email"] || "").toString().trim().toLowerCase();
+        const firstName = (row["First Name"] || "").toString().trim();
+        const lastName = (row["Last Name"] || "").toString().trim();
+
+        return {
+          email,
+          phone,
+          firstName,
+          lastName,
+          fullName: `${firstName} ${lastName}`.trim(),
+          hubspotId: row["Record ID"] ? String(row["Record ID"]) : "",
+          originalPhone: row["Phone Number"] || "",
+          originalRow: row,
+        };
+      })
+      .filter(
+        (contact) =>
+          contact.email &&
+          (contact.phone || contact.firstName || contact.lastName)
+      );
+
+    console.log(
+      `Found ${hubspotContacts.length} valid HubSpot contacts with emails`
+    );
+
+    // Get all customers without emails
+    const customersWithoutEmails = await Customer.find({
+      $or: [{ Email: { $exists: false } }, { Email: null }, { Email: "" }],
+    }).lean();
+
+    console.log(
+      `Found ${customersWithoutEmails.length} customers without emails`
+    );
+
+    // Get all customers with emails for phone number updates
+    const customersWithEmails = await Customer.find({
+      Email: { $exists: true, $ne: null, $ne: "" },
+    }).lean();
+
+    console.log(`Found ${customersWithEmails.length} customers with emails`);
+
+    const results = {
+      totalHubspotContacts: hubspotContacts.length,
+      emailsUpdated: 0,
+      phonesAddedToExisting: 0,
+      matchedByPhone: 0,
+      matchedByName: 0,
+      noMatches: 0,
+      errors: [],
+    };
+
+    const bulkOperations = [];
+
+    // Phase 1: Map emails to customers without emails
+    for (const hubspotContact of hubspotContacts) {
+      let matchedCustomer = null;
+      let matchType = "";
+
+      // Try to match by phone number first (most reliable)
+      if (hubspotContact.phone && hubspotContact.phone.length >= 6) {
+        for (const customer of customersWithoutEmails) {
+          const customerPhones = [
+            normalizePhoneNumber(customer.phoneNumber),
+            ...(customer.additionalPhoneNumbers || []).map(
+              normalizePhoneNumber
+            ),
+          ].filter(Boolean);
+
+          if (customerPhones.includes(hubspotContact.phone)) {
+            matchedCustomer = customer;
+            matchType = "phone";
+            results.matchedByPhone++;
+            break;
+          }
+        }
+      }
+
+      // If no phone match, try name matching (less reliable, stricter criteria)
+      if (
+        !matchedCustomer &&
+        hubspotContact.firstName &&
+        hubspotContact.lastName
+      ) {
+        const hubspotFullName = normalizeNameForMatching(
+          hubspotContact.fullName
+        );
+
+        for (const customer of customersWithoutEmails) {
+          const customerFullName = normalizeNameForMatching(
+            `${customer.firstName || ""} ${customer.lastName || ""}`
+          );
+          const customerCardName = normalizeNameForMatching(
+            customer.CardName || ""
+          );
+
+          // Exact name match or CardName match
+          if (
+            hubspotFullName === customerFullName ||
+            hubspotFullName === customerCardName ||
+            (hubspotContact.firstName.toLowerCase() ===
+              (customer.firstName || "").toLowerCase() &&
+              hubspotContact.lastName.toLowerCase() ===
+                (customer.lastName || "").toLowerCase())
+          ) {
+            matchedCustomer = customer;
+            matchType = "name";
+            results.matchedByName++;
+            break;
+          }
+        }
+      }
+
+      if (matchedCustomer) {
+        // Prepare update for matched customer
+        const updateData = {
+          Email: hubspotContact.email,
+          updatedAt: new Date(),
+        };
+
+        // Add firstName/lastName if missing
+        if (!matchedCustomer.firstName && hubspotContact.firstName) {
+          updateData.firstName = hubspotContact.firstName;
+        }
+        if (!matchedCustomer.lastName && hubspotContact.lastName) {
+          updateData.lastName = hubspotContact.lastName;
+        }
+
+        // Add phone number if missing
+        if (!matchedCustomer.phoneNumber && hubspotContact.originalPhone) {
+          updateData.phoneNumber = hubspotContact.originalPhone;
+        }
+
+        // Add HubSpot ID if missing
+        if (!matchedCustomer.hubspotId && hubspotContact.hubspotId) {
+          updateData.hubspotId = hubspotContact.hubspotId;
+        }
+
+        bulkOperations.push({
+          updateOne: {
+            filter: { _id: matchedCustomer._id },
+            update: { $set: updateData },
+          },
+        });
+
+        results.emailsUpdated++;
+
+        console.log(
+          `Matched by ${matchType}: ${matchedCustomer.CardCode} -> ${hubspotContact.email}`
+        );
+
+        // Remove from array to avoid duplicate matches
+        const index = customersWithoutEmails.indexOf(matchedCustomer);
+        if (index > -1) {
+          customersWithoutEmails.splice(index, 1);
+        }
+      } else {
+        results.noMatches++;
+      }
+    }
+
+    // Phase 2: Add phone numbers to existing customers with same email
+    const emailToHubspotMap = new Map();
+    hubspotContacts.forEach((contact) => {
+      if (contact.email && contact.originalPhone) {
+        if (!emailToHubspotMap.has(contact.email)) {
+          emailToHubspotMap.set(contact.email, []);
+        }
+        emailToHubspotMap.get(contact.email).push(contact.originalPhone);
+      }
+    });
+
+    for (const customer of customersWithEmails) {
+      const customerEmail = customer.Email.toLowerCase().trim();
+      const hubspotPhones = emailToHubspotMap.get(customerEmail);
+
+      if (hubspotPhones && hubspotPhones.length > 0) {
+        const existingPhones = [
+          customer.phoneNumber,
+          ...(customer.additionalPhoneNumbers || []),
+        ]
+          .filter(Boolean)
+          .map((phone) => phone.trim());
+
+        const newPhones = hubspotPhones.filter(
+          (phone) =>
+            phone &&
+            !existingPhones.some(
+              (existing) =>
+                normalizePhoneNumber(existing) === normalizePhoneNumber(phone)
+            )
+        );
+
+        if (newPhones.length > 0) {
+          bulkOperations.push({
+            updateOne: {
+              filter: { _id: customer._id },
+              update: {
+                $addToSet: {
+                  additionalPhoneNumbers: { $each: newPhones },
+                },
+                $set: { updatedAt: new Date() },
+              },
+            },
+          });
+
+          results.phonesAddedToExisting++;
+          console.log(
+            `Added phones to ${customer.CardCode}: ${newPhones.join(", ")}`
+          );
+        }
+      }
+    }
+
+    // Execute bulk operations
+    if (bulkOperations.length > 0) {
+      console.log(`Executing ${bulkOperations.length} update operations`);
+
+      const bulkResult = await Customer.bulkWrite(bulkOperations, {
+        ordered: false,
+      });
+
+      console.log(`Bulk update completed:`, {
+        matchedCount: bulkResult.matchedCount,
+        modifiedCount: bulkResult.modifiedCount,
+      });
+    }
+
+    // Clean up uploaded file
+    try {
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error deleting file:", unlinkError);
+    }
+
+    const totalTime = Date.now() - startTime;
+    console.log(`Mapping completed in ${totalTime}ms`);
+
+    res.status(200).json({
+      success: true,
+      message: `HubSpot email and phone mapping completed in ${totalTime}ms`,
+      results: {
+        ...results,
+        processingTimeMs: totalTime,
+        bulkOperationsExecuted: bulkOperations.length,
+      },
+    });
+  } catch (error) {
+    console.error("HubSpot mapping error:", error);
+
+    // Clean up file
+    try {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error cleaning up file:", unlinkError);
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Error mapping HubSpot emails and phones",
+      error: error.message,
+    });
+  }
+};
 
 exports.fastHubspotImportWithAgents = async (req, res) => {
   try {

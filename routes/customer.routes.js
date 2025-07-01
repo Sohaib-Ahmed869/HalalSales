@@ -52,7 +52,18 @@ const upload = multer({
   },
 });
 
-router.get("/get-customer-by-card/:cardCode", auth, customerController.getCustomerByCardCode);
+// Route for mapping HubSpot emails and phones
+router.post(
+  "/map-hubspot-emails-phones",
+  upload.single("file"),
+  customerController.mapHubspotEmailsAndPhones
+);
+
+router.get(
+  "/get-customer-by-card/:cardCode",
+  auth,
+  customerController.getCustomerByCardCode
+);
 
 router.get(
   "/get-customer-email/:cardCode",
