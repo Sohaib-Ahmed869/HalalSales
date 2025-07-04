@@ -52,6 +52,10 @@ const upload = multer({
   },
 });
 
+router.post("/create", customerController.createCustomer);
+
+
+
 // Route for mapping HubSpot emails and phones
 router.post(
   "/map-hubspot-emails-phones",

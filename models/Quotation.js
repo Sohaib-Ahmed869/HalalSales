@@ -504,6 +504,7 @@ const OrderSchema = new Schema(
     CustOffice: String,
     FCI: String,
     AddLegIn: String,
+    
     LegTextF: String,
     DANFELgTxt: String,
     IndFinal: String,

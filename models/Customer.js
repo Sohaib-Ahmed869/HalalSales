@@ -36,7 +36,7 @@ const CustomerSchema = new Schema({
     type: String,
     trim: true,
   },
-   prestashopAcc: {
+  prestashopAcc: {
     type: String,
     trim: true,
   },
@@ -113,6 +113,27 @@ const CustomerSchema = new Schema({
   outstandingBalance: {
     type: Number,
     default: 0,
+  },
+  // NEW SAP SYNC FIELDS
+  // SAP Integration Status
+  SyncedWithSAP: {
+    type: Boolean,
+    default: false,
+  },
+  LocalStatus: {
+    type: String,
+    enum: ["Created", "Synced", "SyncFailed"],
+    default: "Created",
+  },
+  SyncErrors: {
+    type: String,
+  },
+  LastSyncAttempt: {
+    type: Date,
+  },
+  SAPSyncDisabled: {
+    type: Boolean,
+    default: false,
   },
 });
 

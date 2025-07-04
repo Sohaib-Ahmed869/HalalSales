@@ -12,6 +12,137 @@ const Quotation = require("../models/Quotation");
 const Deal = require("../models/Deal");
 const Cart = require("../models/Cart");
 
+const {
+  getLastCustomerFromSAP,
+  generateNextCardCode,
+  formatCustomerForSAP,
+  createCustomerInSAP,
+  checkCustomerExistsInSAP,
+} = require("../utils/sapB1CustomerIntegration");
+
+// Helper function to push customer to SAP
+async function pushCustomerToSAPInternal(customer) {
+  try {
+    // Format the customer for SAP B1
+    const sapCustomer = await formatCustomerForSAP(customer);
+
+    // Push to SAP B1
+    const sapResponse = await createCustomerInSAP(sapCustomer);
+
+    // Update local customer with SAP CardCode if successful
+    if (sapResponse && sapResponse.CardCode) {
+      customer.CardCode = sapResponse.CardCode;
+      customer.customerType = "sap";
+      customer.SyncedWithSAP = true;
+      customer.LocalStatus = "Synced";
+      customer.updatedAt = new Date();
+
+      await customer.save();
+
+      return {
+        success: true,
+        CardCode: sapResponse.CardCode,
+        sapData: sapResponse,
+      };
+    } else {
+      throw new Error("Invalid response from SAP B1");
+    }
+  } catch (error) {
+    // Update local customer to mark sync failure
+    customer.SyncErrors = error.message;
+    customer.LastSyncAttempt = new Date();
+    customer.LocalStatus = "SyncFailed";
+    await customer.save();
+
+    console.error("Error pushing customer to SAP:", error);
+    return {
+      success: false,
+      error: error.message || "Unknown error",
+    };
+  }
+}
+
+// Create a new customer (save to local DB and push to SAP)
+exports.createCustomer = async (req, res) => {
+  try {
+    // Validate required fields
+    if (!req.body.CardName) {
+      return res.status(400).json({
+        success: false,
+        message: "Customer name (CardName) is required",
+      });
+    }
+
+    if (!req.body.Email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email is required",
+      });
+    }
+
+
+    // Get the next CardCode from SAP
+    console.log("Getting next CardCode from SAP...");
+    const nextCardCode = await generateNextCardCode();
+
+    // Create the new customer
+    const newCustomer = new Customer({
+      ...req.body,
+      CardCode: nextCardCode,
+      customerType: "non-sap", // Will be updated to "sap" after successful sync
+      assignedTo: null,
+      SyncedWithSAP: false,
+      LocalStatus: "Created",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    console.log("Creating new customer:", {
+      CardName: newCustomer.CardName,
+      CardCode: newCustomer.CardCode,
+      Email: newCustomer.Email,
+    });
+
+    // Save to local database
+    await newCustomer.save();
+
+    // Push to SAP automatically
+    console.log("Automatically pushing new customer to SAP...");
+    const sapResult = await pushCustomerToSAPInternal(newCustomer);
+
+    // Return response with both local creation and SAP push results
+    if (sapResult.success) {
+      res.status(201).json({
+        success: true,
+        data: newCustomer,
+        message: "Customer created successfully and synced with SAP",
+        sapSync: {
+          success: true,
+          CardCode: sapResult.CardCode,
+        },
+      });
+    } else {
+      res.status(201).json({
+        success: true,
+        data: newCustomer,
+        message:
+          "Customer created successfully in local database but failed to sync with SAP",
+        sapSync: {
+          success: false,
+          error: sapResult.error,
+        },
+      });
+    }
+  } catch (error) {
+    console.error("Error creating customer:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error creating customer",
+      error: error.message,
+    });
+  }
+};
+
 // Process customer data from text format
 const processCustomerData = (text) => {
   const lines = text.split("\n");
@@ -1407,67 +1538,7 @@ exports.getCustomerById = async (req, res) => {
   }
 };
 
-// Create customer
-exports.createCustomer = async (req, res) => {
-  try {
-    const {
-      CardName,
-      CardCode,
-      Email,
-      phoneNumber,
-      hubspotId,
-      assignedTo,
-      status,
-      notes,
-    } = req.body;
 
-    // Validate required fields
-    if (!CardName || !CardCode || !Email) {
-      return res
-        .status(400)
-        .json({ message: "CardName, CardCode, and Email are required" });
-    }
-
-    // Check if customer already exists
-    const existingCustomer = await Customer.findOne({ CardCode });
-    if (existingCustomer) {
-      return res
-        .status(400)
-        .json({ message: "Customer with this CardCode already exists" });
-    }
-
-    // Validate assigned agent if provided
-    if (assignedTo) {
-      const agent = await User.findById(assignedTo);
-
-      if (!agent || agent.role !== "sales_agent") {
-        return res.status(400).json({ message: "Invalid sales agent ID" });
-      }
-    }
-
-    // Create new customer
-    const newCustomer = new Customer({
-      CardName,
-      CardCode,
-      Email,
-      phoneNumber,
-      hubspotId,
-      assignedTo,
-      status: status || "active",
-      notes,
-    });
-
-    await newCustomer.save();
-
-    res.status(201).json({
-      message: "Customer created successfully",
-      customer: newCustomer,
-    });
-  } catch (error) {
-    console.error("Customer creation error:", error);
-    res.status(500).json({ message: "Server error", error: error.message });
-  }
-};
 
 // Update customer
 exports.updateCustomer = async (req, res) => {
