@@ -203,7 +203,7 @@ exports.formatCustomerForSAP = async (customer) => {
     // Default SAP values (you can customize these)
     GroupCode: 110,
     Currency: "EUR", // Euro currency as requested
-    PayTermsGrpCode: 1, // Default payment terms - adjust as needed
+    PayTermsGrpCode: -1, // Default payment terms - adjust as needed
     PriceListNum: 2,
 
     // Additional phone numbers

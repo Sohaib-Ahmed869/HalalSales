@@ -137,6 +137,8 @@ app.use("/api/application-usage", applicationUsageRoutes); // Application usage 
 app.use("/api/carts", CartRoutes); // Cart routes
 app.use("/api/sales-manager-dashboard", SalesManagerDashboardRoutes); // Sales manager dashboard routes
 app.use("/api/notifications", notificationRoutes);
+
+
 // Health check route
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });

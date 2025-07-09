@@ -65,7 +65,7 @@ router.post(
 
 router.get(
   "/get-customer-by-card/:cardCode",
-  auth,
+
   customerController.getCustomerByCardCode
 );
 

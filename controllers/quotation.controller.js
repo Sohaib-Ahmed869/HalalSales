@@ -1410,7 +1410,7 @@ exports.convertToOrder = async (req, res) => {
 };
 
 // Update quotation
-// Update quotation (Enhanced version)
+// Update quotation
 exports.updateQuotation = async (req, res) => {
   try {
     const quotation = await Quotation.findOne({
@@ -1457,7 +1457,14 @@ exports.updateQuotation = async (req, res) => {
       }
     });
 
-    // If this is a significant update (DocumentLines changed), reset approval status
+    // Update allowed fields
+    Object.keys(req.body).forEach((key) => {
+      quotation[key] = req.body[key];
+    });
+
+    // Update the UpdateDate
+    quotation.UpdateDate = new Date();
+
     // Recalculate totals if DocumentLines are updated
     if (req.body.DocumentLines) {
       let totalExVAT = 0;
@@ -1465,7 +1472,7 @@ exports.updateQuotation = async (req, res) => {
 
       for (const line of quotation.DocumentLines) {
         const lineTotal = (line.Quantity || 0) * (line.Price || 0);
-        const lineTotalWithVAT = line.LineTotalWithVAT || lineTotal * 1.2; // Fallback calculation
+        const lineTotalWithVAT = line.LineTotalWithVAT || lineTotal * 1.2;
 
         line.LineTotal = lineTotal;
         line.LineTotalWithVAT = lineTotalWithVAT;
@@ -1478,28 +1485,18 @@ exports.updateQuotation = async (req, res) => {
       quotation.DocTotalWithVAT = totalIncVAT;
       quotation.VatSum = totalIncVAT - totalExVAT;
 
-      // Create new approval task if needed...
-    }
+      // **CRITICAL FIX: Reset approval status when quotation is updated**
+      quotation.approvalStatus = "pending";
 
-    // Update allowed fields
-    Object.keys(req.body).forEach((key) => {
-      quotation[key] = req.body[key];
-    });
+      // **CRITICAL FIX: Clear previous approval/rejection data**
+      if (quotation.approvedBy) delete quotation.approvedBy;
+      if (quotation.approvedDate) delete quotation.approvedDate;
+      if (quotation.rejectedBy) delete quotation.rejectedBy;
+      if (quotation.rejectedDate) delete quotation.rejectedDate;
+      if (quotation.rejectionReason) delete quotation.rejectionReason;
+      if (quotation.approvalComments) delete quotation.approvalComments;
 
-    // Update the UpdateDate
-    quotation.UpdateDate = new Date();
-
-    // Recalculate totals if DocumentLines are updated
-    if (req.body.DocumentLines) {
-      let total = 0;
-      for (const line of quotation.DocumentLines) {
-        const lineTotal = (line.Quantity || 0) * (line.Price || 0);
-        line.LineTotal = lineTotal;
-        total += lineTotal;
-      }
-      quotation.DocTotal = total;
-
-      // Create new approval task if needed
+      // Create new approval task
       const adminUsers = await User.find({ role: "admin" }).select("_id");
       if (adminUsers.length > 0) {
         const adminId = adminUsers[0]._id;
@@ -1515,7 +1512,7 @@ exports.updateQuotation = async (req, res) => {
           dueDate: new Date(new Date().setDate(new Date().getDate() + 1)),
           priority: "medium",
           type: "approval",
-          status: "pending_approval",
+          status: "pending", // **CRITICAL FIX: Set task status to pending, not pending_approval**
           assignedTo: adminId,
           createdBy: req.user._id,
           relatedQuotation: quotation.DocEntry,
