@@ -1410,7 +1410,6 @@ exports.convertToOrder = async (req, res) => {
 };
 
 // Update quotation
-// Update quotation
 exports.updateQuotation = async (req, res) => {
   try {
     const quotation = await Quotation.findOne({
@@ -1484,17 +1483,23 @@ exports.updateQuotation = async (req, res) => {
       quotation.DocTotal = totalExVAT;
       quotation.DocTotalWithVAT = totalIncVAT;
       quotation.VatSum = totalIncVAT - totalExVAT;
+    }
 
-      // **CRITICAL FIX: Reset approval status when quotation is updated**
+    // **CRITICAL FIX: Reset approval status for ANY update**
+    // Only reset if currently approved or rejected (don't reset if already pending)
+    if (
+      quotation.approvalStatus === "approved" ||
+      quotation.approvalStatus === "rejected"
+    ) {
       quotation.approvalStatus = "pending";
 
-      // **CRITICAL FIX: Clear previous approval/rejection data**
-      if (quotation.approvedBy) delete quotation.approvedBy;
-      if (quotation.approvedDate) delete quotation.approvedDate;
-      if (quotation.rejectedBy) delete quotation.rejectedBy;
-      if (quotation.rejectedDate) delete quotation.rejectedDate;
-      if (quotation.rejectionReason) delete quotation.rejectionReason;
-      if (quotation.approvalComments) delete quotation.approvalComments;
+      // Clear previous approval/rejection data
+      quotation.approvedBy = undefined;
+      quotation.approvedDate = undefined;
+      quotation.rejectedBy = undefined;
+      quotation.rejectedDate = undefined;
+      quotation.rejectionReason = undefined;
+      quotation.approvalComments = undefined;
 
       // Create new approval task
       const adminUsers = await User.find({ role: "admin" }).select("_id");
@@ -1502,6 +1507,15 @@ exports.updateQuotation = async (req, res) => {
         const adminId = adminUsers[0]._id;
 
         const Task = require("../models/Task");
+
+        // Cancel/complete old approval task first
+        if (quotation.approvalTask) {
+          await Task.findByIdAndUpdate(quotation.approvalTask, {
+            status: "cancelled",
+            comments: `Task cancelled due to quotation update by ${req.user.firstName} ${req.user.lastName}`,
+          });
+        }
+
         const task = new Task({
           title: `Approve Updated Quotation #${quotation.DocNum}`,
           description: `Review and approve updated quotation #${
@@ -1512,7 +1526,7 @@ exports.updateQuotation = async (req, res) => {
           dueDate: new Date(new Date().setDate(new Date().getDate() + 1)),
           priority: "medium",
           type: "approval",
-          status: "pending", // **CRITICAL FIX: Set task status to pending, not pending_approval**
+          status: "pending",
           assignedTo: adminId,
           createdBy: req.user._id,
           relatedQuotation: quotation.DocEntry,
@@ -1525,12 +1539,15 @@ exports.updateQuotation = async (req, res) => {
 
     await quotation.save();
 
+    const responseMessage =
+      quotation.approvalStatus === "pending"
+        ? "Quotation updated successfully and sent for re-approval"
+        : "Quotation updated successfully";
+
     res.status(200).json({
       success: true,
       data: quotation,
-      message: req.body.DocumentLines
-        ? "Quotation updated successfully and sent for re-approval"
-        : "Quotation updated successfully",
+      message: responseMessage,
     });
   } catch (error) {
     console.error("Error updating quotation:", error);
@@ -1541,7 +1558,6 @@ exports.updateQuotation = async (req, res) => {
     });
   }
 };
-
 // Cancel/deactivate quotation
 exports.cancelQuotation = async (req, res) => {
   try {
