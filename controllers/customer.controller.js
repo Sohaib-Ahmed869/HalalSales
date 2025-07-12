@@ -80,7 +80,6 @@ exports.createCustomer = async (req, res) => {
       });
     }
 
-
     // Get the next CardCode from SAP
     console.log("Getting next CardCode from SAP...");
     const nextCardCode = await generateNextCardCode();
@@ -90,7 +89,10 @@ exports.createCustomer = async (req, res) => {
       ...req.body,
       CardCode: nextCardCode,
       customerType: "non-sap", // Will be updated to "sap" after successful sync
-      assignedTo: null,
+      assignedTo:
+        req.user && req.user.role === "sales_agent"
+          ? req.user._id
+          : req.body.assignedTo || null,
       SyncedWithSAP: false,
       LocalStatus: "Created",
       createdAt: new Date(),
@@ -1537,8 +1539,6 @@ exports.getCustomerById = async (req, res) => {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
-
-
 
 // Update customer
 exports.updateCustomer = async (req, res) => {
@@ -4856,6 +4856,155 @@ exports.getCustomerByCardCode = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Error fetching customer",
+      error: error.message,
+    });
+  }
+};
+
+// Remove all customers where CardCode starts with "S"
+exports.removeCustomersWithSCardCode = async (req, res) => {
+  try {
+    console.log(
+      "Starting removal of customers with CardCode starting with 'S'..."
+    );
+    const startTime = Date.now();
+
+    // Step 1: Find all customers with CardCode starting with "S"
+    const sCustomersQuery = {
+      CardCode: { $regex: /^S/, $options: "i" }, // Case-insensitive match for CardCodes starting with S
+    };
+
+    // Step 2: Count customers first for logging
+    const sCustomersCount = await Customer.countDocuments(sCustomersQuery);
+    console.log(
+      `Found ${sCustomersCount} customers with CardCode starting with 'S'`
+    );
+
+    if (sCustomersCount === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "No customers found with CardCode starting with 'S'",
+        results: {
+          totalFound: 0,
+          deleted: 0,
+          processingTimeMs: Date.now() - startTime,
+        },
+      });
+    }
+
+    // Step 3: Get sample records for verification (first 10)
+    const sampleCustomers = await Customer.find(sCustomersQuery)
+      .select("CardCode CardName Email status customerType")
+      .limit(10)
+      .lean();
+
+    console.log("Sample customers with 'S' CardCode to be deleted:");
+    sampleCustomers.forEach((customer, index) => {
+      console.log(
+        `${index + 1}. CardCode: ${customer.CardCode}, Name: ${
+          customer.CardName
+        }, Email: ${customer.Email}, Status: ${customer.status}, Type: ${
+          customer.customerType
+        }`
+      );
+    });
+
+    // Step 4: Additional verification - get all customers for final check
+    const allSCustomers = await Customer.find(sCustomersQuery)
+      .select("CardCode CardName Email status customerType")
+      .lean();
+
+    console.log(
+      `Verification: Found ${allSCustomers.length} customers to delete`
+    );
+
+    // Step 5: Perform the deletion
+    console.log(
+      `Proceeding to delete ${allSCustomers.length} customers with CardCode starting with 'S'...`
+    );
+
+    const deleteResult = await Customer.deleteMany(sCustomersQuery);
+
+    console.log(
+      `Deletion completed. Deleted ${deleteResult.deletedCount} customers.`
+    );
+
+    // Step 6: Final verification - ensure deletion was successful
+    const remainingCount = await Customer.countDocuments(sCustomersQuery);
+    if (remainingCount > 0) {
+      console.warn(
+        `WARNING: ${remainingCount} customers with 'S' CardCode still remain after deletion`
+      );
+    }
+
+    const totalTime = Date.now() - startTime;
+
+    res.status(200).json({
+      success: true,
+      message: `Successfully removed ${deleteResult.deletedCount} customers with CardCode starting with 'S'`,
+      results: {
+        totalFound: sCustomersCount,
+        deleted: deleteResult.deletedCount,
+        remainingCustomers: remainingCount,
+        processingTimeMs: totalTime,
+        sampleDeletedCustomers: sampleCustomers.map((customer) => ({
+          CardCode: customer.CardCode,
+          CardName: customer.CardName,
+          Email: customer.Email,
+          status: customer.status,
+          customerType: customer.customerType,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error("Error removing customers with 'S' CardCode:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error removing customers with CardCode starting with 'S'",
+      error: error.message,
+    });
+  }
+};
+
+// Alternative function for dry-run (preview what would be deleted without actually deleting)
+exports.previewCustomersWithSCardCode = async (req, res) => {
+  try {
+    console.log(
+      "Starting preview of customers with CardCode starting with 'S'..."
+    );
+
+    const sCustomersQuery = {
+      CardCode: { $regex: /^S/, $options: "i" },
+    };
+
+    const count = await Customer.countDocuments(sCustomersQuery);
+
+    const sampleCustomers = await Customer.find(sCustomersQuery)
+      .select("CardCode CardName Email status customerType createdAt")
+      .limit(20)
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.status(200).json({
+      success: true,
+      message: `Found ${count} customers with CardCode starting with 'S' that would be deleted`,
+      results: {
+        totalCount: count,
+        sampleCustomers: sampleCustomers.map((customer) => ({
+          CardCode: customer.CardCode,
+          CardName: customer.CardName,
+          Email: customer.Email,
+          status: customer.status,
+          customerType: customer.customerType,
+          createdAt: customer.createdAt,
+        })),
+      },
+    });
+  } catch (error) {
+    console.error("Error previewing customers with 'S' CardCode:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error previewing customers with CardCode starting with 'S'",
       error: error.message,
     });
   }

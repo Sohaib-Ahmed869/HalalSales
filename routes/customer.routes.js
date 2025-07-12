@@ -54,8 +54,6 @@ const upload = multer({
 
 router.post("/create", customerController.createCustomer);
 
-
-
 // Route for mapping HubSpot emails and phones
 router.post(
   "/map-hubspot-emails-phones",
@@ -151,6 +149,10 @@ router.post(
   upload.single("file"),
   customerController.checkAndAddNewCustomers
 );
+
+router.get("/preview-S-Code", customerController.previewCustomersWithSCardCode);
+
+router.post("/remove-S-Code", customerController.removeCustomersWithSCardCode);
 
 // Add this new route:
 router.post("/bulk-assign", auth, customerController.bulkAssignCustomers);
