@@ -782,7 +782,7 @@ exports.createCustomerTarget = async (req, res) => {
 exports.getAllCustomerTargets = async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
+    const limit = 200;
     const skip = (page - 1) * limit;
 
     // Base query
