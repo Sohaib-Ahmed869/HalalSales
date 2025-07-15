@@ -478,14 +478,10 @@ exports.getSalesManagerDashboard = async (req, res) => {
       managedAgentsQuery._id = null; // This will return no results
     }
 
-    const managedAgents = await User.find(
-      {
-        role: "sales_agent",
-        deactivated: false,
-      }
-    ).select(
-      "firstName lastName email target deactivated"
-    );
+    const managedAgents = await User.find({
+      role: "sales_agent",
+      deactivated: false,
+    }).select("firstName lastName email target deactivated");
 
     if (managedAgents.length === 0) {
       return res.status(200).json({

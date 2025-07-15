@@ -80,6 +80,8 @@ exports.createCustomer = async (req, res) => {
       });
     }
 
+    console.log(req.user.role, "is creating a new customer", req.user._id);
+
     // Get the next CardCode from SAP
     console.log("Getting next CardCode from SAP...");
     const nextCardCode = await generateNextCardCode();

@@ -52,7 +52,7 @@ const upload = multer({
   },
 });
 
-router.post("/create", customerController.createCustomer);
+router.post("/create", auth,customerController.createCustomer);
 
 // Route for mapping HubSpot emails and phones
 router.post(
@@ -179,7 +179,7 @@ router.get("/:id", auth, updateLastLogin, customerController.getCustomerById);
 router.post(
   "/",
   auth,
-  checkRole(["admin", "sales_manager"]),
+  checkRole(["admin", "sales_manager", "sales_agent"]),
   customerController.createCustomer
 );
 
