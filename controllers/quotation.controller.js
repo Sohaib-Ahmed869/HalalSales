@@ -96,10 +96,20 @@ exports.generatePaymentLinkForQuotation = async (req, res) => {
       "base64"
     );
 
+    // Calculate total with VAT from document lines
+    const totalWithVAT = quotation.DocumentLines.reduce((total, line) => {
+      const lineTotal = (line.Quantity || 0) * (line.Price || 0);
+      const lineTotalWithVAT =
+        line.LineTotalWithVAT ||
+        line.PriceAfterVAT * (line.Quantity || 0) ||
+        lineTotal * 1.2;
+      return total + lineTotalWithVAT;
+    }, 0);
+
     const paymentLinkRequest = {
       reference: `QT-${quotation.DocNum}`,
       amount: {
-        value: Math.round(quotation.DocTotal * 100),
+        value: Math.round(totalWithVAT * 100),
         currency: quotation.DocCurrency || "EUR",
       },
       description: `Payment for Quotation #${quotation.DocNum}`,

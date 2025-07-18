@@ -34,6 +34,7 @@ const applicationUsageRoutes = require("./routes/applicationUsage.routes");
 const CartRoutes = require("./routes/carts.routes");
 const SalesManagerDashboardRoutes = require("./routes/salesManagerDashboardRoutes");
 const notificationRoutes = require("./routes/notification.routes");
+const jobLogRoutes = require("./routes/jobLog.routes");
 const config = require("./services/config");
 const desktimeJob = require("./jobs/desktimeJob");
 const {linkDocumentsToAgents} = require("./migrateAgentReferences");
@@ -137,6 +138,7 @@ app.use("/api/application-usage", applicationUsageRoutes); // Application usage 
 app.use("/api/carts", CartRoutes); // Cart routes
 app.use("/api/sales-manager-dashboard", SalesManagerDashboardRoutes); // Sales manager dashboard routes
 app.use("/api/notifications", notificationRoutes);
+app.use("/api/jobs", jobLogRoutes); // Job logs routes
 
 
 // Health check route
