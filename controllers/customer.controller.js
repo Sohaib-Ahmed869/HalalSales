@@ -4976,7 +4976,7 @@ exports.previewCustomersWithSCardCode = async (req, res) => {
     );
 
     const sCustomersQuery = {
-      CardCode: { $regex: /^S/, $options: "i" },
+      CardCode: { $regex: /^S\d{4}$/, $options: "i" },
     };
 
     const count = await Customer.countDocuments(sCustomersQuery);
