@@ -27,6 +27,7 @@ const scraperRoutes = require("./routes/scraper.routes");
 const dealsRoutes = require("./routes/deals.routes");
 const menuRoutes = require("./routes/menu.routes");
 const leadRoutes = require("./routes/lead.routes");
+const lead2Routes = require("./routes/lead2.routes");
 const taskRoutes = require("./routes/task.routes");
 const QuotationRoutes = require("./routes/quotation.routes");
 const salesAgentJourneyRoutes = require("./routes/salesAgentJourney.routes");
@@ -34,6 +35,7 @@ const applicationUsageRoutes = require("./routes/applicationUsage.routes");
 const CartRoutes = require("./routes/carts.routes");
 const SalesManagerDashboardRoutes = require("./routes/salesManagerDashboardRoutes");
 const notificationRoutes = require("./routes/notification.routes");
+const restaurantMatcherRoutes = require("./routes/restaurantMatcher.routes");
 const jobLogRoutes = require("./routes/jobLog.routes");
 const config = require("./services/config");
 const desktimeJob = require("./jobs/desktimeJob");
@@ -123,6 +125,7 @@ app.use("/api/sales-orders", salesOrderRoutes);
 app.use("/api/invoices", invoiceRoutes);
 app.use("/api/desktime", desktimeRoutes);
 app.use("/api/call-data", callDataRoutes);
+app.use("/api/restaurant-matcher", restaurantMatcherRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/customer-journey", customerJourneyRoutes);
 app.use("/api/recommendations", recommendationRoutes);
@@ -133,6 +136,7 @@ app.use("/api/deals", dealsRoutes);
 app.use("/api/menu", menuRoutes); // Menu routes
 app.use("/api/quotations", QuotationRoutes); // Quotation routes
 app.use("/api/leads", leadRoutes); // Lead routes
+app.use("/api/leads2", lead2Routes); // Lead2 routes
 app.use("/api/tasks", taskRoutes); // Task routes
 app.use("/api/sales-agent-journey", salesAgentJourneyRoutes); // Sales agent journey routes
 app.use("/api/application-usage", applicationUsageRoutes); // Application usage routes
