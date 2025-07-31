@@ -2,7 +2,92 @@
 const express = require("express");
 const router = express.Router();
 const customerTargetController = require("../controllers/customerTarget.controller");
+const targetScheduler = require("../services/targetScheduler");
+
 const { auth, checkRole, updateLastLogin } = require("../middleware/auth");
+
+// Get scheduler status
+router.get("/scheduler/status", auth, checkRole(["admin"]), (req, res) => {
+  try {
+    const status = targetScheduler.getSchedulerStatus();
+    res.status(200).json({
+      success: true,
+      data: status,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Error getting scheduler status",
+      error: error.message,
+    });
+  }
+});
+
+// Trigger immediate rollover for testing
+router.post(
+  "/scheduler/trigger-rollover",
+  auth,
+  checkRole(["admin"]),
+  async (req, res) => {
+    try {
+      const result = await targetScheduler.triggerImmediateRollover();
+      res.status(200).json(result);
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        message: "Error triggering rollover",
+        error: error.message,
+      });
+    }
+  }
+);
+
+// Rollover specific period type
+router.post(
+  "/scheduler/rollover/:periodType",
+  auth,
+  checkRole(["admin"]),
+  async (req, res) => {
+    try {
+      const { periodType } = req.params;
+
+      if (!["monthly", "quarterly", "yearly"].includes(periodType)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid period type. Must be monthly, quarterly, or yearly",
+        });
+      }
+
+      const result = await targetScheduler.rolloverTargetsByPeriod(periodType);
+      res.status(200).json(result);
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        message: `Error rolling over ${periodType} targets`,
+        error: error.message,
+      });
+    }
+  }
+);
+
+// Update expired targets manually
+router.post(
+  "/scheduler/update-expired",
+  auth,
+  checkRole(["admin"]),
+  async (req, res) => {
+    try {
+      const result = await targetScheduler.updateExpiredTargets();
+      res.status(200).json(result);
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        message: "Error updating expired targets",
+        error: error.message,
+      });
+    }
+  }
+);
 
 // Get sales manager dashboard - specific for sales managers
 router.get(

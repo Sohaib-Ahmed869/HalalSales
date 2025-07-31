@@ -40,8 +40,6 @@ const salesAgentJourneyController = {
         });
       }
 
-     
-
       const customers = await Customer.find({ assignedTo: agentId }).lean();
       const customerCodes = customers.map((c) => c.CardCode);
 
@@ -300,6 +298,7 @@ const salesAgentJourneyController = {
         endDate,
         sortBy = "CardName",
         sortOrder = "asc",
+        export: isExport = false, // 🎯 ADD: Export parameter
       } = req.query;
 
       // Validate sales agent
@@ -319,7 +318,6 @@ const salesAgentJourneyController = {
         query.$or = [
           { CardName: new RegExp(search, "i") },
           { CardCode: new RegExp(search, "i") },
-          { Email: new RegExp(search, "i") },
         ];
       }
 
@@ -330,7 +328,7 @@ const salesAgentJourneyController = {
 
       // Get all matching customers without pagination first (for metrics calculation)
       const allCustomers = await Customer.find(query)
-        .select("CardCode CardName Email phoneNumber status assignedTo")
+        .select("CardCode CardName status assignedTo") // 🎯 REMOVE: Email and phoneNumber
         .populate("assignedTo", "firstName lastName email")
         .lean();
 
@@ -349,6 +347,18 @@ const salesAgentJourneyController = {
 
       // Extract customer codes for metrics queries
       const customerCodes = allCustomers.map((c) => c.CardCode);
+
+      // 🎯 ADD: Get customer targets to fetch client averages
+      const customerTargets = await CustomerTarget.find({
+        salesAgent: agentId,
+        cardCode: { $in: customerCodes },
+      }).lean();
+
+      // Create a map of client averages by customer code
+      const clientAveragesMap = {};
+      customerTargets.forEach((target) => {
+        clientAveragesMap[target.cardCode] = target.clientExistingAverage || 0;
+      });
 
       // Set up date filter for metrics if provided
       let dateFilter = {};
@@ -481,6 +491,7 @@ const salesAgentJourneyController = {
           metrics: {
             invoiceCount: invoiceCountMap[customer.CardCode] || 0,
             sapTurnover: invoiceTotalMap[customer.CardCode] || 0,
+            clientAverage: clientAveragesMap[customer.CardCode] || 0, // 🎯 ADD: Client average
             orderCount: orderCountMap[customer.CardCode] || 0,
             orderTotal: orderTotalMap[customer.CardCode] || 0,
             quotationCount: quotationCountMap[customer.CardCode] || 0,
@@ -498,6 +509,10 @@ const salesAgentJourneyController = {
           case "sapTurnover":
             aValue = a.metrics.sapTurnover;
             bValue = b.metrics.sapTurnover;
+            break;
+          case "clientAverage": // 🎯 ADD: Sort by client average
+            aValue = a.metrics.clientAverage;
+            bValue = b.metrics.clientAverage;
             break;
           case "invoiceCount":
             aValue = a.metrics.invoiceCount;
@@ -527,26 +542,35 @@ const salesAgentJourneyController = {
         return sortDirection * (aValue - bValue);
       });
 
-      // Apply pagination after sorting
-      const skip = (parseInt(page) - 1) * parseInt(limit);
-      const paginatedCustomers = enhancedCustomers.slice(
-        skip,
-        skip + parseInt(limit)
-      );
+      let paginatedCustomers;
+      let total;
 
-      // Get total count
-      const total = enhancedCustomers.length;
+      // 🎯 ADD: Handle export vs pagination
+      if (isExport === "true" || isExport === true) {
+        // For export: Return all customers
+        paginatedCustomers = enhancedCustomers;
+        total = enhancedCustomers.length;
+      } else {
+        // For regular display: Apply pagination
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        paginatedCustomers = enhancedCustomers.slice(
+          skip,
+          skip + parseInt(limit)
+        );
+        total = enhancedCustomers.length;
+      }
 
       return res.status(200).json({
         success: true,
         customers: paginatedCustomers,
         pagination: {
           total,
-          page: parseInt(page),
-          pages: Math.ceil(total / parseInt(limit)),
+          page: isExport ? 1 : parseInt(page),
+          pages: isExport ? 1 : Math.ceil(total / parseInt(limit)),
           limit: parseInt(limit),
         },
         dateRange: startDate && endDate ? { startDate, endDate } : null,
+        isExport: isExport === "true" || isExport === true, // 🎯 ADD: Export flag
       });
     } catch (error) {
       console.error("Error fetching agent customers:", error);
@@ -700,6 +724,7 @@ const salesAgentJourneyController = {
         customerCode,
         sortBy = "DocDate",
         sortDirection = -1,
+        export: isExport = false, // Add export parameter
       } = req.query;
 
       // Validate sales agent
@@ -719,7 +744,7 @@ const salesAgentJourneyController = {
 
       const customers = await Customer.find({ assignedTo: agentId }).lean();
       const customerCodes = customers.map((c) => c.CardCode);
-      // *** FIX: Use direct sales agent assignment (not customer-based) ***
+
       if (customerCodes.length === 0) {
         return res.status(200).json({
           success: true,
@@ -754,19 +779,30 @@ const salesAgentJourneyController = {
         query.CardCode = customerCode;
       }
 
-      // Pagination
-      const skip = (parseInt(page) - 1) * parseInt(limit);
+      let orders;
+      let total;
 
-      // Execute query
-      const orders = await SalesOrder.find(query)
-        .skip(skip)
-        .limit(parseInt(limit))
-        .sort({ [sortBy]: parseInt(sortDirection) });
+      // 🎯 KEY CHANGE: Handle export vs pagination differently
+      if (isExport === "true" || isExport === true) {
+        // For export: Get ALL orders without pagination
+        orders = await SalesOrder.find(query).sort({
+          [sortBy]: parseInt(sortDirection),
+        });
+        total = orders.length;
+      } else {
+        // For regular display: Use pagination
+        const skip = (parseInt(page) - 1) * parseInt(limit);
 
-      // Get total count
-      const total = await SalesOrder.countDocuments(query);
+        orders = await SalesOrder.find(query)
+          .skip(skip)
+          .limit(parseInt(limit))
+          .sort({ [sortBy]: parseInt(sortDirection) });
 
-      // Calculate order statistics
+        // Get total count for pagination
+        total = await SalesOrder.countDocuments(query);
+      }
+
+      // Calculate order statistics (always use all orders for stats)
       const totalSales = await SalesOrder.aggregate([
         { $match: query },
         {
@@ -788,14 +824,16 @@ const salesAgentJourneyController = {
         LocalStatus: "SyncFailed",
       });
 
+      const totalOrdersCount = await SalesOrder.countDocuments(query);
+
       return res.status(200).json({
         success: true,
         count: orders.length,
-        total,
-        page: parseInt(page),
-        pages: Math.ceil(total / parseInt(limit)),
+        total: isExport ? orders.length : total,
+        page: isExport ? 1 : parseInt(page),
+        pages: isExport ? 1 : Math.ceil(total / parseInt(limit)),
         stats: {
-          totalOrders: total,
+          totalOrders: totalOrdersCount,
           totalAmount: totalSales.length > 0 ? totalSales[0].totalAmount : 0,
           averageOrderValue:
             totalSales.length > 0 ? totalSales[0].avgAmount : 0,
@@ -803,6 +841,7 @@ const salesAgentJourneyController = {
           failedOrders,
         },
         data: orders,
+        isExport: isExport === "true" || isExport === true,
       });
     } catch (error) {
       console.error("Error fetching agent sales orders:", error);
@@ -1279,6 +1318,7 @@ const salesAgentJourneyController = {
         customerCode,
         sortBy = "DocDate",
         sortDirection = -1,
+        export: isExport = false, // Add export parameter
       } = req.query;
 
       // Validate sales agent
@@ -1296,9 +1336,10 @@ const salesAgentJourneyController = {
         ? new Date(startDate)
         : new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
 
-      // *** FIX: Get customers assigned to this agent first ***
+      // Get customers assigned to this agent first
       const customers = await Customer.find({ assignedTo: agentId }).lean();
       const customerCodes = customers.map((c) => c.CardCode);
+
       if (customerCodes.length === 0) {
         return res.status(200).json({
           success: true,
@@ -1318,7 +1359,7 @@ const salesAgentJourneyController = {
         });
       }
 
-      // Build query using customer codes (consistent with dashboard)
+      // Build query using customer codes
       const query = {
         CardCode: { $in: customerCodes },
         DocDate: { $gte: start, $lte: end },
@@ -1333,25 +1374,35 @@ const salesAgentJourneyController = {
         query.CardCode = customerCode;
       }
 
-      // Pagination
-      const skip = (parseInt(page) - 1) * parseInt(limit);
+      let invoices;
+      let total;
 
-      // Execute main query
-      const invoices = await Invoice.find(query)
-        .skip(skip)
-        .limit(parseInt(limit))
-        .sort({ [sortBy]: parseInt(sortDirection) });
+      // 🎯 KEY CHANGE: Handle export vs pagination differently
+      if (isExport === "true" || isExport === true) {
+        // For export: Get ALL invoices without pagination
+        invoices = await Invoice.find(query).sort({
+          [sortBy]: parseInt(sortDirection),
+        });
+        total = invoices.length;
+      } else {
+        // For regular display: Use pagination
+        const skip = (parseInt(page) - 1) * parseInt(limit);
 
-      // Get total count for pagination
-      const total = await Invoice.countDocuments(query);
+        invoices = await Invoice.find(query)
+          .skip(skip)
+          .limit(parseInt(limit))
+          .sort({ [sortBy]: parseInt(sortDirection) });
 
-      // Calculate invoice statistics manually for consistency
+        // Get total count for pagination
+        total = await Invoice.countDocuments(query);
+      }
+
+      // Calculate invoice statistics (always use all invoices for stats)
+      const allInvoicesForStats = await Invoice.find(query);
+
       let totalAmount = 0;
       let totalAmountNoVat = 0;
       let totalVerified = 0;
-
-      // Get all invoices for stats calculation (not just current page)
-      const allInvoicesForStats = await Invoice.find(query);
 
       allInvoicesForStats.forEach((inv) => {
         totalAmount += inv.DocTotal || 0;
@@ -1359,8 +1410,14 @@ const salesAgentJourneyController = {
         if (inv.verified) totalVerified++;
       });
 
-      const avgAmount = total > 0 ? totalAmount / total : 0;
-      const avgAmountNoVat = total > 0 ? totalAmountNoVat / total : 0;
+      const avgAmount =
+        allInvoicesForStats.length > 0
+          ? totalAmount / allInvoicesForStats.length
+          : 0;
+      const avgAmountNoVat =
+        allInvoicesForStats.length > 0
+          ? totalAmountNoVat / allInvoicesForStats.length
+          : 0;
 
       // Group by payment method
       const paymentMethods = {};
@@ -1382,15 +1439,17 @@ const salesAgentJourneyController = {
         .sort((a, b) => b.count - a.count);
 
       const stats = {
-        totalInvoices: total,
+        totalInvoices: allInvoicesForStats.length,
         totalAmount: parseFloat(totalAmount.toFixed(2)),
         totalAmountNoVat: parseFloat(totalAmountNoVat.toFixed(2)),
         averageInvoiceValue: parseFloat(avgAmount.toFixed(2)),
         averageInvoiceValueNoVat: parseFloat(avgAmountNoVat.toFixed(2)),
         verifiedInvoices: totalVerified,
         verificationRate:
-          total > 0
-            ? parseFloat(((totalVerified / total) * 100).toFixed(2))
+          allInvoicesForStats.length > 0
+            ? parseFloat(
+                ((totalVerified / allInvoicesForStats.length) * 100).toFixed(2)
+              )
             : 0,
         paymentMethods: paymentMethodStats,
       };
@@ -1398,11 +1457,12 @@ const salesAgentJourneyController = {
       return res.status(200).json({
         success: true,
         count: invoices.length,
-        total,
-        page: parseInt(page),
-        pages: Math.ceil(total / parseInt(limit)),
+        total: isExport ? invoices.length : total,
+        page: isExport ? 1 : parseInt(page),
+        pages: isExport ? 1 : Math.ceil(total / parseInt(limit)),
         stats: stats,
         data: invoices,
+        isExport: isExport === "true" || isExport === true,
       });
     } catch (error) {
       console.error("Error fetching agent invoices:", error);

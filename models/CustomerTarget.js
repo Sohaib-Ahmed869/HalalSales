@@ -152,19 +152,43 @@ CustomerTargetSchema.methods.getCurrentTargetAmount = function () {
   return this.targetAmount;
 };
 
-// Helper method to reset target for a new period
-CustomerTargetSchema.methods.startNewPeriod = function () {
-  // Store the current period's performance in history
-  this.historicalPerformance.push({
-    period: `${this.currentPeriodStart.getFullYear()}-${String(
-      this.currentPeriodStart.getMonth() + 1
-    ).padStart(2, "0")}`,
-    targetAmount: this.targetAmount,
-    achievedAmount: this.achievedAmount,
-    achievementRate: this.achievementRate,
-  });
+// Add helper method to get current period string
+CustomerTargetSchema.methods.getCurrentPeriodString = function () {
+  const year = this.currentPeriodStart.getFullYear();
+  const month = this.currentPeriodStart.getMonth() + 1;
 
-  // Calculate the new period dates
+  switch (this.period) {
+    case "monthly":
+      return `${year}-${String(month).padStart(2, "0")}`;
+    case "quarterly":
+      const quarter = Math.floor((month - 1) / 3) + 1;
+      return `${year}-Q${quarter}`;
+    case "yearly":
+      return `${year}`;
+    default:
+      return `${year}-${String(month).padStart(2, "0")}`;
+  }
+};
+
+CustomerTargetSchema.methods.startNewPeriod = function () {
+  // Store the current period's performance in history BEFORE resetting
+  const currentPeriod = this.getCurrentPeriodString();
+
+  // Check if this period is already in history to avoid duplicates
+  const existingHistory = this.historicalPerformance.find(
+    (h) => h.period === currentPeriod
+  );
+
+  if (!existingHistory) {
+    this.historicalPerformance.push({
+      period: currentPeriod,
+      targetAmount: this.targetAmount,
+      achievedAmount: this.achievedAmount,
+      achievementRate: this.achievementRate,
+    });
+  }
+
+  // Calculate the new period dates based on current date, not the old period end
   const now = new Date();
 
   if (this.period === "monthly") {
@@ -185,6 +209,13 @@ CustomerTargetSchema.methods.startNewPeriod = function () {
 
   // Update the deadline for compatibility with existing code
   this.deadline = this.currentPeriodEnd;
+
+  // Clear orders/transactions for the new period
+  this.orders = [];
+  this.transactions = [];
+
+  // Update last recalculated timestamp
+  this.lastRecalculated = new Date();
 
   return this;
 };

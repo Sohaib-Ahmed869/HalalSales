@@ -39,9 +39,11 @@ const restaurantMatcherRoutes = require("./routes/restaurantMatcher.routes");
 const jobLogRoutes = require("./routes/jobLog.routes");
 const config = require("./services/config");
 const desktimeJob = require("./jobs/desktimeJob");
-const {linkDocumentsToAgents} = require("./migrateAgentReferences");
+const { linkDocumentsToAgents } = require("./migrateAgentReferences");
 const { syncFromFeb21 } = require("./jobs/hubspotJob");
 const { fetchCallsFromMay2UntilToday } = require("./jobs/mayScript");
+const targetScheduler = require("./services/targetScheduler");
+
 // Initialize express app
 const app = express();
 
@@ -67,14 +69,13 @@ app.use(
     origin: [
       "http://localhost:5173",
       "http://halalfoodsales.s3-website.eu-north-1.amazonaws.com",
-      "https://sales.foodservices.live"
+      "https://sales.foodservices.live",
     ],
   })
 );
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 app.use(helmet());
-
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(process.cwd(), "uploads");
@@ -93,6 +94,7 @@ if (NODE_ENV === "development") {
 }
 
 // Connect to MongoDB
+// Connect to MongoDB
 mongoose
   .connect(MONGO_URI, {
     useNewUrlParser: true,
@@ -109,6 +111,14 @@ mongoose
     //   prestashopSyncService.scheduleSync(config.prestashop.syncInterval);
     // }
     console.log("✅ Connected to MongoDB");
+
+    // 🎯 ADD THIS: Initialize the target scheduler after database connection
+    try {
+      targetScheduler.initializeScheduler();
+      console.log("🎯 Target scheduler initialized and running");
+    } catch (error) {
+      console.error("❌ Error initializing target scheduler:", error);
+    }
   })
   .catch((err) => {
     console.error("❌ MongoDB connection error:", err);
@@ -145,7 +155,6 @@ app.use("/api/sales-manager-dashboard", SalesManagerDashboardRoutes); // Sales m
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/jobs", jobLogRoutes); // Job logs routes
 
-
 // Health check route
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });
@@ -162,6 +171,38 @@ app.use((err, req, res, next) => {
 
 // Start server
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+// Handle unhandled promise rejections
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled Promise Rejection:", err);
+  // Don't crash the server in production
+  if (NODE_ENV === "development") {
+    process.exit(1);
+  }
+});
+
+// 🎯 ADD THIS: Graceful shutdown handlers
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received, shutting down gracefully");
+  try {
+    targetScheduler.stopScheduler();
+    console.log("🎯 Target scheduler stopped");
+  } catch (error) {
+    console.error("Error stopping target scheduler:", error);
+  }
+  process.exit(0);
+});
+
+process.on("SIGINT", () => {
+  console.log("SIGINT received, shutting down gracefully");
+  try {
+    targetScheduler.stopScheduler();
+    console.log("🎯 Target scheduler stopped");
+  } catch (error) {
+    console.error("Error stopping target scheduler:", error);
+  }
+  process.exit(0);
+});
 
 // Handle unhandled promise rejections
 process.on("unhandledRejection", (err) => {

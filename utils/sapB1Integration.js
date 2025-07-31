@@ -126,6 +126,107 @@ exports.checkBusinessPartnerExists = async (cardCode) => {
   }
 };
 
+// Add this function to utils/sapB1Integration.js
+
+// Get the next available DocNum from SAP B1
+exports.getNextDocNumFromSAP = async () => {
+  try {
+    const sessionId = await getSessionId();
+
+    console.log("Fetching next DocNum from SAP B1...");
+
+    // Get the last order to find the highest DocNum
+    const response = await axios.get(
+      `${SAP_CONFIG.serviceLayerUrl}/Orders?$select=DocNum&$orderby=DocNum desc&$top=1`,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `B1SESSION=${sessionId}`,
+        },
+      }
+    );
+
+    let nextDocNum = 1; // Default if no orders exist
+
+    if (
+      response.data &&
+      response.data.value &&
+      response.data.value.length > 0
+    ) {
+      const lastDocNum = response.data.value[0].DocNum;
+      nextDocNum = lastDocNum + 1;
+      console.log(
+        `Last DocNum in SAP: ${lastDocNum}, Next DocNum: ${nextDocNum}`
+      );
+    } else {
+      console.log("No existing orders found in SAP, starting with DocNum: 1");
+    }
+
+    return nextDocNum;
+  } catch (error) {
+    console.error("Error getting next DocNum from SAP B1:", error.message);
+
+    // If unauthorized, try to login again and retry once
+    if (error.response && error.response.status === 401) {
+      console.log("Session expired, attempting to login again...");
+      sessionId = null;
+      await getSessionId();
+      return exports.getNextDocNumFromSAP();
+    }
+
+    // If we can't get DocNum from SAP, fall back to local calculation
+    console.warn("Falling back to local DocNum calculation");
+    return null;
+  }
+};
+
+// Alternative function to get series information if you want to use a specific numbering series
+exports.getNextDocNumFromSeries = async (seriesCode = null) => {
+  try {
+    const sessionId = await getSessionId();
+
+    console.log("Fetching next DocNum from SAP B1 series...");
+
+    let url = `${SAP_CONFIG.serviceLayerUrl}/SeriesService_GetDocumentSeries?DocumentTypeParams='13'`; // 13 = Sales Order
+
+    if (seriesCode) {
+      url += `&SeriesParams='${seriesCode}'`;
+    }
+
+    const response = await axios.get(url, {
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: `B1SESSION=${sessionId}`,
+      },
+    });
+
+    if (
+      response.data &&
+      response.data.value &&
+      response.data.value.length > 0
+    ) {
+      const series = response.data.value[0];
+      const nextDocNum = series.NextNumber;
+      console.log(`Next DocNum from SAP series: ${nextDocNum}`);
+      return nextDocNum;
+    }
+
+    return null;
+  } catch (error) {
+    console.error("Error getting next DocNum from SAP series:", error.message);
+
+    // If unauthorized, try to login again and retry once
+    if (error.response && error.response.status === 401) {
+      console.log("Session expired, attempting to login again...");
+      sessionId = null;
+      await getSessionId();
+      return exports.getNextDocNumFromSeries(seriesCode);
+    }
+
+    return null;
+  }
+};
+
 exports.formatOrderForSAP = async (order) => {
   const today = new Date();
 
@@ -140,6 +241,10 @@ exports.formatOrderForSAP = async (order) => {
     // CRITICAL FIX: Include price list at document level
     PriceList: order.PriceList ? parseInt(order.PriceList, 10) : 2,
 
+    // *** NEW: Let SAP handle DocNum automatically ***
+    // Don't specify DocNum - let SAP assign it according to its numbering series
+    // This ensures alignment with SAP's internal numbering
+
     DocumentLines: [],
   };
 
@@ -153,7 +258,6 @@ exports.formatOrderForSAP = async (order) => {
         ItemDescription: line.ItemDescription || "",
 
         // CRITICAL FIX: Include price list for each line
-        // CORRECT - proper fallback chain
         PriceList: line.PriceList
           ? parseInt(line.PriceList, 10)
           : order.PriceList
@@ -173,10 +277,16 @@ exports.formatOrderForSAP = async (order) => {
     sapOrder.U_SalesAgentId = order.salesAgent.toString();
   }
 
+  // Add reference to local DocNum for tracking
+  if (order.DocNum) {
+    sapOrder.U_LocalDocNum = order.DocNum.toString();
+  }
+
   // Log detailed information for debugging
-  console.log("SAP Order with Price List:", {
+  console.log("SAP Order formatted:", {
     CardCode: sapOrder.CardCode,
     PriceList: sapOrder.PriceList,
+    U_LocalDocNum: sapOrder.U_LocalDocNum,
     DocumentLines: sapOrder.DocumentLines.map((line) => ({
       ItemCode: line.ItemCode,
       UnitPrice: line.UnitPrice,
@@ -198,12 +308,14 @@ exports.createSalesOrderInSAP = async (orderData) => {
         simulated: true,
         message: "SAP sync is disabled",
         DocEntry: Math.floor(Math.random() * 10000), // Simulate a DocEntry
+        DocNum: Math.floor(Math.random() * 10000), // Simulate a DocNum
       };
     }
 
     const sessionId = await getSessionId();
 
     console.log("Creating sales order in SAP B1...");
+    console.log("Order data being sent:", JSON.stringify(orderData, null, 2));
 
     const response = await axios.post(
       `${SAP_CONFIG.serviceLayerUrl}/Orders`,
@@ -217,6 +329,12 @@ exports.createSalesOrderInSAP = async (orderData) => {
     );
 
     console.log("Sales order created successfully in SAP B1");
+    console.log("SAP Response:", {
+      DocEntry: response.data.DocEntry,
+      DocNum: response.data.DocNum,
+      CardCode: response.data.CardCode,
+    });
+
     return response.data;
   } catch (error) {
     console.error("Error creating sales order in SAP B1:", error.message);

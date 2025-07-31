@@ -246,6 +246,8 @@ exports.getUpdateOnPaymentLinkForOrder = async (req, res) => {
     });
   }
 };
+// Update the bulkImportSalesOrders function to mark imported orders properly
+
 exports.bulkImportSalesOrders = async (req, res) => {
   try {
     if (!req.file) {
@@ -426,15 +428,30 @@ exports.bulkImportSalesOrders = async (req, res) => {
         // Document lines
         DocumentLines: group.lines,
 
+        // *** IMPORTANT: Mark as already synced with SAP and imported ***
+        SyncedWithSAP: true, // These orders came FROM SAP
+        LocalStatus: "ImportedFromSAP", // Custom status to indicate origin
+        SAPDocEntry: docEntry, // Use DocEntry as SAP reference
+
+        // *** CRITICAL: No salesAgent - indicates SAP origin ***
+        // salesAgent: null (this is implicit - don't set it)
+
         // Timestamps
         CreationDate: parseDate(row["Posting Date"]) || new Date(),
         UpdateDate: new Date(),
+
+        // Add import metadata
+        ImportDate: new Date(),
+        ImportSource: "SAP_B1_Bulk_Import",
+        U_Notes: "Imported from SAP B1 bulk export",
       };
 
       newOrders.push(salesOrder);
     });
 
-    console.log(`Prepared ${newOrders.length} new sales orders for import`);
+    console.log(
+      `Prepared ${newOrders.length} new sales orders for import (marked as SAP origin)`
+    );
 
     // Bulk insert new orders
     let insertedCount = 0;
@@ -447,7 +464,9 @@ exports.bulkImportSalesOrders = async (req, res) => {
         });
         insertedCount = result.length;
         insertedDocNums = result.map((order) => order.DocNum);
-        console.log(`Successfully inserted ${insertedCount} sales orders`);
+        console.log(
+          `Successfully inserted ${insertedCount} SAP-origin sales orders`
+        );
       } catch (error) {
         // Handle partial success in bulk insert
         if (error.writeErrors) {
@@ -473,7 +492,8 @@ exports.bulkImportSalesOrders = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: "Sales Orders Excel import completed",
+      message:
+        "Sales Orders Excel import completed - orders marked as SAP origin",
       data: {
         totalRowsProcessed: processedRows.length,
         totalOrdersInExcel: totalOrders,
@@ -482,6 +502,7 @@ exports.bulkImportSalesOrders = async (req, res) => {
         skippedOrders: totalOrders - insertedCount,
         processingTimeSeconds: processingTime,
         insertedOrderDocNums: insertedDocNums,
+        note: "Imported orders are marked as SAP origin and will not be synced back to SAP",
       },
     });
   } catch (error) {
@@ -576,6 +597,8 @@ async function updateSalesAgentAchievement(salesAgentId, order) {
 }
 
 // Helper function to push order to SAP
+// Replace the existing pushOrderToSAPInternal function
+
 async function pushOrderToSAPInternal(order) {
   try {
     // Format the order for SAP B1 - Note this is now async
@@ -611,13 +634,24 @@ async function pushOrderToSAPInternal(order) {
     // Push to SAP B1
     const sapResponse = await createSalesOrderInSAP(sapOrder);
 
-    // Update local order with SAP DocEntry if successful
+    // Update local order with SAP DocEntry AND DocNum if successful
     if (sapResponse && sapResponse.DocEntry) {
       order.SAPDocEntry = sapResponse.DocEntry;
+
+      // *** IMPORTANT: Update local DocNum to match SAP's DocNum ***
+      if (sapResponse.DocNum) {
+        console.log(
+          `Updating local DocNum from ${order.DocNum} to ${sapResponse.DocNum} to match SAP`
+        );
+        order.DocNum = sapResponse.DocNum;
+      }
+
       order.DocumentStatus = "bost_Closed"; // Or any appropriate status
       order.UpdateDate = new Date();
       order.SyncedWithSAP = true;
       order.LocalStatus = "Synced";
+      order.SyncErrors = null; // Clear any previous errors
+      order.LastSyncAttempt = new Date();
 
       await order.save();
 
@@ -629,6 +663,7 @@ async function pushOrderToSAPInternal(order) {
       return {
         success: true,
         SAPDocEntry: sapResponse.DocEntry,
+        SAPDocNum: sapResponse.DocNum,
         sapData: sapResponse,
       };
     } else {
@@ -670,6 +705,8 @@ async function pushOrderToSAPInternal(order) {
 }
 
 // Create a new sales order (save to local DB and push to SAP)
+// Update the createOrder function - replace the DocEntry generation part
+
 exports.createOrder = async (req, res) => {
   try {
     // Validate required fields
@@ -681,14 +718,6 @@ exports.createOrder = async (req, res) => {
     }
 
     console.log("Request body PriceList:", req.body.PriceList);
-    console.log("Full request body:", {
-      PriceList: req.body.PriceList,
-      CardCode: req.body.CardCode,
-      DocumentLines: req.body.DocumentLines?.map((line) => ({
-        ItemCode: line.ItemCode,
-        PriceList: line.PriceList,
-      })),
-    });
 
     const salesAgentId = req.user._id;
 
@@ -737,60 +766,83 @@ exports.createOrder = async (req, res) => {
       });
     }
 
-    // Generate DocEntry (you might want to use a more sophisticated method)
-    const orderPriceList = req.body.PriceList || "2"; // Default to Prix Livraison
+    // *** UPDATED DOCNUM GENERATION ***
+    // Try to get the next DocNum from SAP first
+    let newDocNum;
+    let newDocEntry;
 
-    // Process document lines to ensure price list is set on each line
+    try {
+      // Import the new function
+      const { getNextDocNumFromSAP } = require("../utils/sapB1Integration");
+      newDocNum = await getNextDocNumFromSAP();
+
+      if (newDocNum) {
+        console.log(`Using SAP-aligned DocNum: ${newDocNum}`);
+        newDocEntry = newDocNum; // Use the same number for both
+      } else {
+        throw new Error("Could not get DocNum from SAP");
+      }
+    } catch (sapError) {
+      console.warn(
+        "Could not get DocNum from SAP, falling back to local generation:",
+        sapError.message
+      );
+
+      // Fallback to local DocEntry generation
+      const lastOrder = await SalesOrder.findOne().sort({ DocEntry: -1 });
+      newDocEntry = lastOrder ? lastOrder.DocEntry + 1 : 1;
+      newDocNum = newDocEntry;
+
+      console.log(`Using local DocNum: ${newDocNum}`);
+    }
+
+    // Process document lines
+    const orderPriceList = req.body.PriceList || "2";
     const processedDocumentLines = req.body.DocumentLines.map((line) => ({
       ...line,
-      // CRITICAL FIX: Ensure each line has the price list info
       PriceList: line.PriceList
         ? parseInt(line.PriceList, 10)
         : parseInt(orderPriceList, 10),
-      // Ensure line total is calculated correctly
       LineTotal: (line.Quantity || 0) * (line.Price || 0),
     }));
 
-    console.log(processedDocumentLines);
-
     // Replace the original DocumentLines with processed ones
     req.body.DocumentLines = processedDocumentLines;
-    // ✅ END OF NEW CODE BLOCK
-
-    // Generate DocEntry (you might want to use a more sophisticated method)
-    const lastOrder = await SalesOrder.findOne().sort({ DocEntry: -1 });
-    const newDocEntry = lastOrder ? lastOrder.DocEntry + 1 : 1;
 
     // Calculate today's date for DocDate and DocDueDate
     const today = new Date();
 
     const salesAgentName =
-      "The order was put up by" +
+      "The order was put up by " +
       req.user.firstName +
       " " +
       req.user.lastName +
       ". ";
 
-    // Create the new order
+    // Create the new order with SAP-aligned DocNum
     const newOrder = new SalesOrder({
       ...req.body,
       PriceList: req.body.PriceList,
       DocEntry: newDocEntry,
-      DocNum: newDocEntry, // Consider separate numbering if needed
+      DocNum: newDocNum, // Now aligned with SAP
       DocType: req.body.DocType || "dDocument_Items",
       DocumentStatus: "bost_Open",
       CreationDate: today,
       StartDeliveryDate: req.body.StartDeliveryDate || today,
       DocDate: req.body.DocDate || today,
-      DocDueDate: req.body.DocDueDate || today, // Ensure DocDueDate is set
+      DocDueDate: req.body.DocDueDate || today,
       UpdateDate: today,
       SyncedWithSAP: false,
-      LocalStatus: "Created", // Custom field to track local status
+      LocalStatus: "Created",
       salesAgent: salesAgentId,
       U_Notes: salesAgentName,
     });
 
-    console.log("Creating new order:", newOrder);
+    console.log("Creating new order with SAP-aligned DocNum:", {
+      DocEntry: newOrder.DocEntry,
+      DocNum: newOrder.DocNum,
+      CardCode: newOrder.CardCode,
+    });
 
     // Calculate totals if not provided
     if (!newOrder.DocTotal) {
@@ -806,7 +858,12 @@ exports.createOrder = async (req, res) => {
     // Save to local database
     await newOrder.save();
 
-    // NEW CODE: Push to SAP automatically
+    // Update sales agent stats
+    if (salesAgentId) {
+      await updateSalesAgentStats(salesAgentId, newOrder);
+    }
+
+    // Push to SAP automatically
     console.log("Automatically pushing new order to SAP...");
     const sapResult = await pushOrderToSAPInternal(newOrder);
 
@@ -837,7 +894,6 @@ exports.createOrder = async (req, res) => {
         data: newOrder,
         message:
           "Order created successfully in local database but failed to sync with SAP",
-        targetUpdated: updatedTarget ? true : false,
         sapSync: {
           success: false,
           error: sapResult.error,
@@ -855,6 +911,9 @@ exports.createOrder = async (req, res) => {
     });
   }
 };
+
+// Add this filter option to your getAllOrders function
+// Add this to the existing filters section:
 
 exports.getAllOrders = async (req, res) => {
   try {
@@ -904,6 +963,24 @@ exports.getAllOrders = async (req, res) => {
       }
     }
 
+    // *** NEW: Order origin filter ***
+    if (req.query.orderOrigin) {
+      switch (req.query.orderOrigin) {
+        case "system":
+          query.salesAgent = { $exists: true, $ne: null };
+          break;
+        case "sap":
+          query.salesAgent = { $exists: false };
+          break;
+        case "sap_null":
+          query.$or = [
+            { salesAgent: { $exists: false } },
+            { salesAgent: null },
+          ];
+          break;
+      }
+    }
+
     // Date range filter
     if (req.query.fromDate && req.query.toDate) {
       query.DocDate = {
@@ -947,7 +1024,7 @@ exports.getAllOrders = async (req, res) => {
       data: orders,
     });
   } catch (error) {
-    console.error("Error fetching orders:", error);
+    console.error("Error fetching orderformatOrderForSAP s:", error);
     res.status(500).json({
       success: false,
       message: "Error fetching orders",
@@ -1120,16 +1197,19 @@ exports.pushUnsyncedOrdersToSAP = async (req, res) => {
   try {
     console.log("Starting bulk SAP sync for unsynced orders...");
 
-    // Find all orders that are not synced with SAP and not disabled
+    // Find all orders that are not synced with SAP, not disabled, AND have a sales agent
+    // Orders with sales agents were created in our system
+    // Orders without sales agents came from SAP bulk import and shouldn't be pushed back
     const unsyncedOrders = await SalesOrder.find({
       SyncedWithSAP: false,
-      SAPSyncDisabled: { $ne: true }, // Exclude orders that were disabled due to previous failures
+      SAPSyncDisabled: { $ne: true },
+      salesAgent: { $exists: true, $ne: null }, // Only orders with sales agents
     }).populate("salesAgent", "firstName lastName email");
 
     if (unsyncedOrders.length === 0) {
       return res.status(200).json({
         success: true,
-        message: "No unsynced orders found",
+        message: "No unsynced orders found that were created in the system",
         data: {
           totalOrders: 0,
           successful: 0,
@@ -1139,7 +1219,9 @@ exports.pushUnsyncedOrdersToSAP = async (req, res) => {
       });
     }
 
-    console.log(`Found ${unsyncedOrders.length} unsynced orders`);
+    console.log(
+      `Found ${unsyncedOrders.length} unsynced orders created in the system`
+    );
 
     const results = [];
     let successCount = 0;
@@ -1148,7 +1230,13 @@ exports.pushUnsyncedOrdersToSAP = async (req, res) => {
     // Process each order
     for (const order of unsyncedOrders) {
       try {
-        console.log(`Processing order DocEntry: ${order.DocEntry}`);
+        console.log(
+          `Processing order DocEntry: ${order.DocEntry} (Created by: ${
+            order.salesAgent
+              ? order.salesAgent.firstName + " " + order.salesAgent.lastName
+              : "System"
+          })`
+        );
 
         const sapResult = await pushOrderToSAPInternal(order);
 
