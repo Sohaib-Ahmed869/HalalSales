@@ -39,6 +39,13 @@ router.post(
   upload.single("file"),
   orderController.bulkImportSalesOrders
 );
+
+// Statistics and analytics
+router.get("/stats", auth, orderController.getOrderStats);
+
+// Search and export
+router.post("/search", auth, orderController.searchOrders);
+router.post("/export", auth, orderController.exportOrders);
 // @route   POST /api/orders
 // @desc    Create a new sales order in local DB
 // @access  Private
@@ -49,6 +56,11 @@ router.post("/", auth, orderController.createOrder);
 // @access  Private
 //router.get("/cardCode/:cardCode",auth, orderController.getOrdersByCustomer);
 router.get("/", orderController.getAllOrders);
+
+// @route   POST /api/orders/bulk-sync-to-sap
+// @desc    Push all unsynced orders to SAP B1
+// @access  Private
+router.post("/bulk-sync-to-sap", auth, orderController.pushUnsyncedOrdersToSAP);
 
 // @route   GET /api/orders
 // @desc    Get all orders with pagination and filtering

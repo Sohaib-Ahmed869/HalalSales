@@ -5011,3 +5011,504 @@ exports.previewCustomersWithSCardCode = async (req, res) => {
     });
   }
 };
+
+exports.comprehensiveCustomerUpdateWithDelivery = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "Please upload an Excel file",
+      });
+    }
+
+    console.log(
+      "Processing comprehensive customer update file:",
+      req.file.path
+    );
+    const startTime = Date.now();
+
+    let customersData = [];
+    const fileExt = path.extname(req.file.originalname).toLowerCase();
+
+    // Process Excel file
+    if (fileExt === ".xlsx" || fileExt === ".xls") {
+      const workbook = XLSX.readFile(req.file.path);
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      const data = XLSX.utils.sheet_to_json(worksheet);
+
+      console.log(`Extracted ${data.length} rows from Excel file`);
+
+      // Map the data to our customer format with delivery address
+      customersData = data
+        .map((row) => {
+          const cardCode = (row["BP Code"] || "").toString().trim();
+          if (!cardCode) return null;
+
+          // Parse phone numbers
+          const phone1 = (row["Telephone 1"] || "").toString().trim();
+          const phone2 = (row["Telephone 2"] || "").toString().trim();
+
+          // Parse balance
+          const balanceStr = (row["Account Balance"] || "0")
+            .toString()
+            .replace(/[^\d.-]/g, "");
+
+          return {
+            CardCode: cardCode,
+            CardName: (row["BP Name"] || "").toString().trim(),
+            Email: (row["E-Mail"] || "").toString().trim(),
+            phoneNumber: phone1,
+            phone2: phone2,
+            outstandingBalance: parseFloat(balanceStr) || 0,
+            prestashopAcc: (row["PRESTASHOP ACC"] || "").toString().trim(),
+
+            // Billing Address (Bill-to)
+            billingAddress: {
+              street: (row["Bill-to Street"] || "").toString().trim(),
+              zipCode: (row["Bill-to Postcode"] || "").toString().trim(),
+              city: (row["Bill-to City"] || "").toString().trim(),
+              country: (row["Bill-to Country/Region"] || "FR")
+                .toString()
+                .trim(),
+            },
+
+            // Delivery Address (Ship-to)
+            deliveryAddress: {
+              street: (row["Ship-to Street"] || "").toString().trim(),
+              zipCode: (row["Ship-to Postcode"] || "").toString().trim(),
+              city: (row["Ship-to City"] || "").toString().trim(),
+              country: (row["Ship-to Country/Region"] || "FR")
+                .toString()
+                .trim(),
+            },
+
+            customerType: cardCode.startsWith("C") ? "sap" : "non-sap",
+          };
+        })
+        .filter((customer) => customer !== null);
+
+      console.log(
+        `Processed ${customersData.length} records in ${
+          Date.now() - startTime
+        }ms`
+      );
+    } else {
+      throw new Error("Only Excel files (.xlsx, .xls) are supported");
+    }
+
+    if (customersData.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No valid customer data found",
+      });
+    }
+
+    // Get ALL existing customers in ONE query using projection for speed
+    const existingCustomers = await Customer.find(
+      {
+        CardCode: { $in: customersData.map((c) => c.CardCode) },
+      },
+      {
+        CardCode: 1,
+        Email: 1,
+        phoneNumber: 1,
+        additionalPhoneNumbers: 1,
+        address: 1,
+        deliveryAddress: 1,
+        outstandingBalance: 1,
+        prestashopAcc: 1,
+        CardName: 1,
+        customerType: 1,
+      }
+    ).lean();
+
+    console.log(
+      `Found ${existingCustomers.length} existing customers in ${
+        Date.now() - startTime
+      }ms`
+    );
+
+    // Create fast lookup map
+    const existingMap = new Map(existingCustomers.map((c) => [c.CardCode, c]));
+
+    // Separate new customers and updates
+    const newCustomers = [];
+    const bulkUpdateOps = [];
+
+    // Fast processing with delivery address handling
+    for (const customerData of customersData) {
+      const existing = existingMap.get(customerData.CardCode);
+
+      if (!existing) {
+        // NEW CUSTOMER - create with both addresses
+        newCustomers.push({
+          CardCode: customerData.CardCode,
+          CardName: customerData.CardName,
+          Email: customerData.Email,
+          phoneNumber: customerData.phoneNumber,
+          additionalPhoneNumbers: customerData.phone2
+            ? [customerData.phone2]
+            : [],
+          outstandingBalance: customerData.outstandingBalance,
+          prestashopAcc: customerData.prestashopAcc,
+
+          // Billing address
+          address: customerData.billingAddress,
+
+          // Delivery address
+          deliveryAddress: customerData.deliveryAddress,
+
+          status: "active",
+          customerType: customerData.customerType,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      } else {
+        // EXISTING CUSTOMER - build comprehensive update
+        const updateDoc = {
+          CardName: customerData.CardName,
+          outstandingBalance: customerData.outstandingBalance,
+          prestashopAcc: customerData.prestashopAcc,
+          customerType: customerData.customerType,
+          updatedAt: new Date(),
+        };
+
+        // Only update email if customer doesn't have one
+        if (
+          customerData.Email &&
+          (!existing.Email || existing.Email.trim() === "")
+        ) {
+          updateDoc.Email = customerData.Email;
+        }
+
+        // Update phone if different or missing
+        if (
+          customerData.phoneNumber &&
+          customerData.phoneNumber !== existing.phoneNumber
+        ) {
+          updateDoc.phoneNumber = customerData.phoneNumber;
+        }
+
+        // Handle additional phones
+        if (customerData.phone2) {
+          const existingPhones = existing.additionalPhoneNumbers || [];
+          if (
+            !existingPhones.includes(customerData.phone2) &&
+            customerData.phone2 !== existing.phoneNumber
+          ) {
+            updateDoc.additionalPhoneNumbers = [
+              ...existingPhones,
+              customerData.phone2,
+            ];
+          }
+        }
+
+        // Always update billing address if data is provided
+        if (
+          customerData.billingAddress.street ||
+          customerData.billingAddress.city
+        ) {
+          updateDoc.address = customerData.billingAddress;
+        }
+
+        // Always update delivery address if data is provided
+        if (
+          customerData.deliveryAddress.street ||
+          customerData.deliveryAddress.city
+        ) {
+          updateDoc.deliveryAddress = customerData.deliveryAddress;
+        }
+
+        bulkUpdateOps.push({
+          updateOne: {
+            filter: { CardCode: customerData.CardCode },
+            update: { $set: updateDoc },
+          },
+        });
+      }
+    }
+
+    console.log(`Prepared operations in ${Date.now() - startTime}ms`);
+
+    // Execute bulk operations in parallel
+    const results = {
+      total: customersData.length,
+      created: 0,
+      updated: 0,
+      errors: 0,
+    };
+
+    try {
+      // Execute both operations in parallel
+      const [insertResult, updateResult] = await Promise.all([
+        // Bulk insert new customers
+        newCustomers.length > 0
+          ? Customer.insertMany(newCustomers, { ordered: false })
+          : Promise.resolve([]),
+        // Bulk update existing customers
+        bulkUpdateOps.length > 0
+          ? Customer.bulkWrite(bulkUpdateOps, { ordered: false })
+          : Promise.resolve({ modifiedCount: 0 }),
+      ]);
+
+      results.created = Array.isArray(insertResult) ? insertResult.length : 0;
+      results.updated = updateResult.modifiedCount || 0;
+
+      console.log(`Bulk operations completed in ${Date.now() - startTime}ms`);
+    } catch (error) {
+      console.error("Bulk operation error:", error);
+      // Handle partial success
+      if (error.writeErrors) {
+        results.errors = error.writeErrors.length;
+        results.created = newCustomers.length - results.errors;
+      }
+    }
+
+    // Clean up file
+    try {
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error deleting file:", unlinkError);
+    }
+
+    const totalTime = Date.now() - startTime;
+    console.log(`Total processing time: ${totalTime}ms`);
+
+    res.status(200).json({
+      success: true,
+      message: `Comprehensive update with delivery addresses completed in ${totalTime}ms: ${results.created} created, ${results.updated} updated`,
+      results: {
+        ...results,
+        processingTimeMs: totalTime,
+        recordsPerSecond: Math.round((customersData.length / totalTime) * 1000),
+        summary: {
+          newCustomers: results.created,
+          updatedCustomers: results.updated,
+          totalProcessed: customersData.length,
+          withDeliveryAddresses: customersData.filter(
+            (c) => c.deliveryAddress.street || c.deliveryAddress.city
+          ).length,
+          withBillingAddresses: customersData.filter(
+            (c) => c.billingAddress.street || c.billingAddress.city
+          ).length,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Comprehensive customer update error:", error);
+
+    // Clean up file
+    try {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error cleaning up file:", unlinkError);
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Error updating customers with delivery addresses",
+      error: error.message,
+    });
+  }
+};
+
+exports.updateCustomerDeliveryAddresses = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "Please upload a file containing customer delivery addresses",
+      });
+    }
+
+    console.log("Processing delivery address update file:", req.file.path);
+    const startTime = Date.now();
+
+    let deliveryData = [];
+    const fileExt = path.extname(req.file.originalname).toLowerCase();
+
+    // Process file based on extension
+    if (fileExt === ".xlsx" || fileExt === ".xls") {
+      // Process Excel file
+      const workbook = XLSX.readFile(req.file.path);
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      const data = XLSX.utils.sheet_to_json(worksheet);
+
+      console.log(`Extracted ${data.length} rows from Excel file`);
+
+      // Map data to delivery address format
+      deliveryData = data.map((row) => {
+        return {
+          CardCode: (row["BP Code"] || "").toString().trim(),
+          CardName: (row["BP Name"] || "").toString().trim(),
+          deliveryAddress: {
+            street: (row["Ship-to Street"] || "").toString().trim(),
+            zipCode: (row["Ship-to Postcode"] || "").toString().trim(),
+            city: (row["Ship-to City"] || "").toString().trim(),
+            country: (row["Ship-to Country/Region"] || "FR").toString().trim(),
+          },
+        };
+      });
+    } else if (fileExt === ".csv") {
+      // Process CSV file
+      deliveryData = await new Promise((resolve, reject) => {
+        const results = [];
+        fs.createReadStream(req.file.path)
+          .pipe(csv())
+          .on("data", (row) => {
+            results.push({
+              CardCode: (row["BP Code"] || "").toString().trim(),
+              CardName: (row["BP Name"] || "").toString().trim(),
+              deliveryAddress: {
+                street: (row["Ship-to Street"] || "").toString().trim(),
+                zipCode: (row["Ship-to Postcode"] || "").toString().trim(),
+                city: (row["Ship-to City"] || "").toString().trim(),
+                country: (row["Ship-to Country/Region"] || "FR")
+                  .toString()
+                  .trim(),
+              },
+            });
+          })
+          .on("end", () => {
+            console.log(`Processed ${results.length} rows from CSV`);
+            resolve(results);
+          })
+          .on("error", (error) => {
+            reject(error);
+          });
+      });
+    }
+
+    // Filter out entries without CardCode or delivery address
+    deliveryData = deliveryData.filter(
+      (item) =>
+        item.CardCode &&
+        (item.deliveryAddress.street || item.deliveryAddress.city)
+    );
+
+    console.log(
+      `Prepared ${deliveryData.length} delivery address records for update`
+    );
+
+    if (deliveryData.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No valid delivery address data found in the file",
+      });
+    }
+
+    // Prepare bulk update operations
+    const bulkOperations = [];
+    const results = {
+      total: deliveryData.length,
+      updated: 0,
+      notFound: 0,
+      errors: [],
+    };
+
+    // Get all customer CardCodes for efficient lookup
+    const cardCodes = deliveryData.map((item) => item.CardCode);
+    const existingCustomers = await Customer.find({
+      CardCode: { $in: cardCodes },
+    })
+      .select("CardCode")
+      .lean();
+
+    const existingCardCodes = new Set(existingCustomers.map((c) => c.CardCode));
+
+    for (const item of deliveryData) {
+      if (existingCardCodes.has(item.CardCode)) {
+        bulkOperations.push({
+          updateOne: {
+            filter: { CardCode: item.CardCode },
+            update: {
+              $set: {
+                deliveryAddress: item.deliveryAddress,
+                updatedAt: new Date(),
+              },
+            },
+          },
+        });
+        results.updated++;
+      } else {
+        results.notFound++;
+      }
+    }
+
+    // Execute bulk operations
+    if (bulkOperations.length > 0) {
+      console.log(
+        `Executing ${bulkOperations.length} delivery address updates`
+      );
+
+      const bulkResult = await Customer.bulkWrite(bulkOperations, {
+        ordered: false,
+      });
+
+      console.log("Bulk update result:", {
+        matchedCount: bulkResult.matchedCount,
+        modifiedCount: bulkResult.modifiedCount,
+      });
+
+      // Update results based on actual bulk operation results
+      results.updated = bulkResult.modifiedCount;
+
+      if (bulkResult.writeErrors && bulkResult.writeErrors.length > 0) {
+        results.errors = bulkResult.writeErrors.map((err) => ({
+          CardCode: err.op?.filter?.CardCode || "Unknown",
+          error: err.errmsg,
+        }));
+      }
+    }
+
+    // Clean up the uploaded file
+    try {
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error deleting file after processing:", unlinkError);
+    }
+
+    const totalTime = Date.now() - startTime;
+    console.log(`Delivery address update completed in ${totalTime}ms`);
+
+    res.status(200).json({
+      success: true,
+      message: `Delivery address update completed in ${totalTime}ms`,
+      results: {
+        ...results,
+        processingTimeMs: totalTime,
+        summary: {
+          totalRecords: deliveryData.length,
+          updatedCustomers: results.updated,
+          customersNotFound: results.notFound,
+          errors: results.errors.length,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Delivery address update error:", error);
+
+    // Clean up file if it exists
+    try {
+      if (req.file && fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+      }
+    } catch (unlinkError) {
+      console.error("Error cleaning up file:", unlinkError);
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Error updating customer delivery addresses",
+      error: error.message,
+    });
+  }
+};

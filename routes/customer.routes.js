@@ -52,7 +52,7 @@ const upload = multer({
   },
 });
 
-router.post("/create", auth,customerController.createCustomer);
+router.post("/create", auth, customerController.createCustomer);
 
 // Route for mapping HubSpot emails and phones
 router.post(
@@ -99,6 +99,20 @@ router.post(
   "/comprehensive-update",
   upload.single("file"),
   customerController.comprehensiveCustomerUpdate
+);
+
+// Route for comprehensive customer update with delivery addresses
+router.post(
+  "/comprehensive-update-with-delivery",
+  upload.single("file"),
+  customerController.comprehensiveCustomerUpdateWithDelivery
+);
+
+// You can also add a route specifically for delivery address updates only
+router.post(
+  "/update-delivery-addresses",
+  upload.single("file"),
+  customerController.updateCustomerDeliveryAddresses
 );
 
 router.post(

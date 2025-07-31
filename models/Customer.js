@@ -110,6 +110,26 @@ const CustomerSchema = new Schema({
       default: "France", // Default value since your examples seem to be in France
     },
   },
+  // DELIVERY ADDRESS (NEW)
+  deliveryAddress: {
+    street: {
+      type: String,
+      trim: true,
+    },
+    zipCode: {
+      type: String,
+      trim: true,
+    },
+    city: {
+      type: String,
+      trim: true,
+    },
+    country: {
+      type: String,
+      trim: true,
+      default: "France",
+    },
+  },
   outstandingBalance: {
     type: Number,
     default: 0,

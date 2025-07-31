@@ -855,53 +855,88 @@ exports.createOrder = async (req, res) => {
     });
   }
 };
-// Get all sales orders with pagination
+
 exports.getAllOrders = async (req, res) => {
   try {
-    console.log("Fetching all orders");
+    console.log("Fetching all orders with enhanced filtering");
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
     const skip = (page - 1) * limit;
+    const sortBy = req.query.sortBy || "DocDate";
+    const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
 
     // Base query
     let query = {};
 
-    // Add filters if provided
-    if (req.query.cardCode) {
-      query.CardCode = req.query.cardCode;
+    // Search filter
+    if (req.query.search) {
+      const searchRegex = { $regex: req.query.search, $options: "i" };
+      query.$or = [
+        { DocNum: searchRegex },
+        { CardCode: searchRegex },
+        { CardName: searchRegex },
+        { Address: searchRegex },
+      ];
     }
 
+    // Customer code filter
+    if (req.query.cardCode) {
+      query.CardCode = { $regex: req.query.cardCode, $options: "i" };
+    }
+
+    // Status filter
     if (req.query.status) {
       query.DocumentStatus = req.query.status;
     }
 
+    // Sync status filter
+    if (req.query.syncStatus) {
+      switch (req.query.syncStatus) {
+        case "synced":
+          query.SyncedWithSAP = true;
+          break;
+        case "unsynced":
+          query.SyncedWithSAP = false;
+          break;
+        case "failed":
+          query.LocalStatus = "SyncFailed";
+          break;
+      }
+    }
+
+    // Date range filter
     if (req.query.fromDate && req.query.toDate) {
       query.DocDate = {
         $gte: new Date(req.query.fromDate),
         $lte: new Date(req.query.toDate),
       };
+    } else if (req.query.fromDate) {
+      query.DocDate = { $gte: new Date(req.query.fromDate) };
+    } else if (req.query.toDate) {
+      query.DocDate = { $lte: new Date(req.query.toDate) };
     }
 
-    // Filter for current user if sales agent
-    if (req.user.role === "sales_agent") {
-      query.salesAgent = req.user._id;
+    // Sales agent filter
+    if (req.query.salesAgent) {
+      query.salesAgent = req.query.salesAgent;
     }
 
-    // If sales manager, get all orders from their agents
-    if (req.user.role === "sales_manager") {
-      const agentIds = await User.find({ manager: req.user._id }).distinct(
-        "_id"
-      );
-      query.salesAgent = { $in: agentIds };
-    }
+    // Build sort object
+    const sortObj = {};
+    sortObj[sortBy] = sortOrder;
+
+    console.log("Query:", JSON.stringify(query, null, 2));
+    console.log("Sort:", sortObj);
 
     const orders = await SalesOrder.find(query)
       .populate("salesAgent", "firstName lastName email")
       .skip(skip)
       .limit(limit)
-      .sort({ DocDate: -1 });
+      .sort(sortObj);
 
     const total = await SalesOrder.countDocuments(query);
+
+    console.log(`Found ${orders.length} orders out of ${total} total`);
 
     res.status(200).json({
       success: true,
@@ -1077,6 +1112,566 @@ exports.pushOrderToSAP = async (req, res) => {
       success: false,
       message: "Error pushing order to SAP B1",
       error: error.message || "Unknown error",
+    });
+  }
+};
+
+exports.pushUnsyncedOrdersToSAP = async (req, res) => {
+  try {
+    console.log("Starting bulk SAP sync for unsynced orders...");
+
+    // Find all orders that are not synced with SAP and not disabled
+    const unsyncedOrders = await SalesOrder.find({
+      SyncedWithSAP: false,
+      SAPSyncDisabled: { $ne: true }, // Exclude orders that were disabled due to previous failures
+    }).populate("salesAgent", "firstName lastName email");
+
+    if (unsyncedOrders.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "No unsynced orders found",
+        data: {
+          totalOrders: 0,
+          successful: 0,
+          failed: 0,
+          results: [],
+        },
+      });
+    }
+
+    console.log(`Found ${unsyncedOrders.length} unsynced orders`);
+
+    const results = [];
+    let successCount = 0;
+    let failureCount = 0;
+
+    // Process each order
+    for (const order of unsyncedOrders) {
+      try {
+        console.log(`Processing order DocEntry: ${order.DocEntry}`);
+
+        const sapResult = await pushOrderToSAPInternal(order);
+
+        if (sapResult.success) {
+          successCount++;
+          results.push({
+            DocEntry: order.DocEntry,
+            DocNum: order.DocNum,
+            CardCode: order.CardCode,
+            CardName: order.CardName,
+            success: true,
+            SAPDocEntry: sapResult.SAPDocEntry,
+            message: "Successfully synced to SAP",
+          });
+
+          console.log(
+            `✅ Order ${order.DocEntry} synced successfully - SAP DocEntry: ${sapResult.SAPDocEntry}`
+          );
+        } else {
+          failureCount++;
+          results.push({
+            DocEntry: order.DocEntry,
+            DocNum: order.DocNum,
+            CardCode: order.CardCode,
+            CardName: order.CardName,
+            success: false,
+            error: sapResult.error,
+            errorCode: sapResult.code,
+            message:
+              sapResult.code === "BP_NOT_FOUND"
+                ? `Business partner ${order.CardCode} does not exist in SAP`
+                : "Failed to sync to SAP",
+          });
+
+          console.log(
+            `❌ Order ${order.DocEntry} failed to sync: ${sapResult.error}`
+          );
+        }
+      } catch (error) {
+        failureCount++;
+        results.push({
+          DocEntry: order.DocEntry,
+          DocNum: order.DocNum,
+          CardCode: order.CardCode,
+          CardName: order.CardName,
+          success: false,
+          error: error.message,
+          message: "Unexpected error during sync",
+        });
+
+        console.error(`❌ Order ${order.DocEntry} encountered error:`, error);
+      }
+    }
+
+    // Prepare summary
+    const summary = {
+      totalOrders: unsyncedOrders.length,
+      successful: successCount,
+      failed: failureCount,
+      successRate:
+        ((successCount / unsyncedOrders.length) * 100).toFixed(2) + "%",
+    };
+
+    console.log(
+      `Bulk SAP sync completed: ${successCount} successful, ${failureCount} failed`
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: `Bulk SAP sync completed: ${successCount} successful, ${failureCount} failed`,
+      data: {
+        summary,
+        results,
+      },
+    });
+  } catch (error) {
+    console.error("Error in bulk SAP sync:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error during bulk SAP sync",
+      error: error.message,
+    });
+  }
+};
+
+// Get order statistics
+exports.getOrderStats = async (req, res) => {
+  try {
+    const { fromDate, toDate, salesAgent } = req.query;
+
+    // Build match query
+    let matchQuery = {};
+
+    // Date filter
+    if (fromDate || toDate) {
+      matchQuery.DocDate = {};
+      if (fromDate) matchQuery.DocDate.$gte = new Date(fromDate);
+      if (toDate) matchQuery.DocDate.$lte = new Date(toDate);
+    }
+
+    // Sales agent filter
+    if (salesAgent) {
+      matchQuery.salesAgent = new mongoose.Types.ObjectId(salesAgent);
+    }
+
+    // Filter for current user if sales agent
+    if (req.user && req.user.role === "sales_agent") {
+      matchQuery.salesAgent = req.user._id;
+    }
+
+    // If sales manager, get all orders from their agents
+    if (req.user && req.user.role === "sales_manager") {
+      const agentIds = await User.find({ manager: req.user._id }).distinct(
+        "_id"
+      );
+      matchQuery.salesAgent = { $in: agentIds };
+    }
+
+    const stats = await SalesOrder.aggregate([
+      { $match: matchQuery },
+      {
+        $group: {
+          _id: null,
+          totalOrders: { $sum: 1 },
+          totalValue: { $sum: "$DocTotal" },
+          syncedOrders: {
+            $sum: { $cond: [{ $eq: ["$SyncedWithSAP", true] }, 1, 0] },
+          },
+          pendingSync: {
+            $sum: { $cond: [{ $eq: ["$SyncedWithSAP", false] }, 1, 0] },
+          },
+          failedSync: {
+            $sum: { $cond: [{ $eq: ["$LocalStatus", "SyncFailed"] }, 1, 0] },
+          },
+          paidOrders: {
+            $sum: { $cond: [{ $eq: ["$payment_status", "completed"] }, 1, 0] },
+          },
+          pendingPayment: {
+            $sum: { $cond: [{ $ne: ["$Payment_id", null] }, 1, 0] },
+          },
+        },
+      },
+    ]);
+
+    const result = stats[0] || {
+      totalOrders: 0,
+      totalValue: 0,
+      syncedOrders: 0,
+      pendingSync: 0,
+      failedSync: 0,
+      paidOrders: 0,
+      pendingPayment: 0,
+    };
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error("Error fetching order stats:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching order statistics",
+      error: error.message,
+    });
+  }
+};
+
+// Search orders
+exports.searchOrders = async (req, res) => {
+  try {
+    const { searchTerm, filters = {} } = req.body;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * limit;
+
+    // Build search query
+    let query = {};
+
+    // Text search
+    if (searchTerm) {
+      query.$or = [
+        { DocNum: { $regex: searchTerm, $options: "i" } },
+        { CardCode: { $regex: searchTerm, $options: "i" } },
+        { CardName: { $regex: searchTerm, $options: "i" } },
+        { Address: { $regex: searchTerm, $options: "i" } },
+      ];
+    }
+
+    // Apply filters
+    Object.keys(filters).forEach((key) => {
+      if (filters[key] !== null && filters[key] !== "") {
+        query[key] = filters[key];
+      }
+    });
+
+    // Role-based filtering
+    if (req.user.role === "sales_agent") {
+      query.salesAgent = req.user._id;
+    }
+
+    if (req.user.role === "sales_manager") {
+      const agentIds = await User.find({ manager: req.user._id }).distinct(
+        "_id"
+      );
+      query.salesAgent = { $in: agentIds };
+    }
+
+    const orders = await SalesOrder.find(query)
+      .populate("salesAgent", "firstName lastName email")
+      .skip(skip)
+      .limit(limit)
+      .sort({ DocDate: -1 });
+
+    const total = await SalesOrder.countDocuments(query);
+
+    res.status(200).json({
+      success: true,
+      count: orders.length,
+      total,
+      page,
+      pages: Math.ceil(total / limit),
+      data: orders,
+    });
+  } catch (error) {
+    console.error("Error searching orders:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error searching orders",
+      error: error.message,
+    });
+  }
+};
+
+// Export orders
+exports.exportOrders = async (req, res) => {
+  try {
+    const filters = req.body;
+
+    // Build query based on filters
+    let query = {};
+
+    if (filters.fromDate && filters.toDate) {
+      query.DocDate = {
+        $gte: new Date(filters.fromDate),
+        $lte: new Date(filters.toDate),
+      };
+    }
+
+    if (filters.salesAgent) {
+      query.salesAgent = filters.salesAgent;
+    }
+
+    if (filters.cardCode) {
+      query.CardCode = { $regex: filters.cardCode, $options: "i" };
+    }
+
+    if (filters.syncStatus) {
+      if (filters.syncStatus === "synced") {
+        query.SyncedWithSAP = true;
+      } else if (filters.syncStatus === "unsynced") {
+        query.SyncedWithSAP = false;
+      } else if (filters.syncStatus === "failed") {
+        query.LocalStatus = "SyncFailed";
+      }
+    }
+
+    // Role-based filtering
+    if (req.user.role === "sales_agent") {
+      query.salesAgent = req.user._id;
+    }
+
+    if (req.user.role === "sales_manager") {
+      const agentIds = await User.find({ manager: req.user._id }).distinct(
+        "_id"
+      );
+      query.salesAgent = { $in: agentIds };
+    }
+
+    const orders = await SalesOrder.find(query)
+      .populate("salesAgent", "firstName lastName email")
+      .sort({ DocDate: -1 });
+
+    // Convert to CSV format
+    const csvHeaders = [
+      "Doc Number",
+      "Customer Code",
+      "Customer Name",
+      "Sales Agent",
+      "Order Date",
+      "Total Amount",
+      "Currency",
+      "Status",
+      "SAP Synced",
+      "SAP Doc Entry",
+      "Payment Status",
+      "Address",
+    ];
+
+    const csvRows = orders.map((order) => [
+      order.DocNum,
+      order.CardCode,
+      order.CardName,
+      order.salesAgent
+        ? `${order.salesAgent.firstName} ${order.salesAgent.lastName}`
+        : "",
+      order.DocDate ? order.DocDate.toISOString().split("T")[0] : "",
+      order.DocTotal,
+      order.DocCurrency || "EUR",
+      order.DocumentStatus,
+      order.SyncedWithSAP ? "Yes" : "No",
+      order.SAPDocEntry || "",
+      order.payment_status || "",
+      order.Address || "",
+    ]);
+
+    // Create CSV content
+    const csvContent = [csvHeaders, ...csvRows]
+      .map((row) => row.map((field) => `"${field}"`).join(","))
+      .join("\n");
+
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader(
+      "Content-Disposition",
+      "attachment; filename=sales-orders.csv"
+    );
+    res.send(csvContent);
+  } catch (error) {
+    console.error("Error exporting orders:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error exporting orders",
+      error: error.message,
+    });
+  }
+};
+
+// Update order status
+exports.updateOrderStatus = async (req, res) => {
+  try {
+    const { docEntry } = req.params;
+    const { status } = req.body;
+
+    const order = await SalesOrder.findOneAndUpdate(
+      { DocEntry: docEntry },
+      {
+        DocumentStatus: status,
+        UpdateDate: new Date(),
+      },
+      { new: true }
+    ).populate("salesAgent", "firstName lastName email");
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: `Order with DocEntry ${docEntry} not found`,
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Order status updated successfully",
+      data: order,
+    });
+  } catch (error) {
+    console.error("Error updating order status:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error updating order status",
+      error: error.message,
+    });
+  }
+};
+
+// Cancel order
+exports.cancelOrder = async (req, res) => {
+  try {
+    const { docEntry } = req.params;
+    const { reason } = req.body;
+
+    const order = await SalesOrder.findOneAndUpdate(
+      { DocEntry: docEntry },
+      {
+        Cancelled: "Y",
+        DocumentStatus: "bost_Cancelled",
+        UpdateDate: new Date(),
+        CancellationReason: reason || "Cancelled by user",
+      },
+      { new: true }
+    ).populate("salesAgent", "firstName lastName email");
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: `Order with DocEntry ${docEntry} not found`,
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Order cancelled successfully",
+      data: order,
+    });
+  } catch (error) {
+    console.error("Error cancelling order:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error cancelling order",
+      error: error.message,
+    });
+  }
+};
+
+// Get SAP order status
+exports.getSAPOrderStatus = async (req, res) => {
+  try {
+    const { docEntry } = req.params;
+
+    const order = await SalesOrder.findOne({ DocEntry: docEntry });
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: `Order with DocEntry ${docEntry} not found`,
+      });
+    }
+
+    if (!order.SAPDocEntry) {
+      return res.status(400).json({
+        success: false,
+        message: "Order is not synced with SAP",
+      });
+    }
+
+    try {
+      // Get order status from SAP
+      const sapOrder = await getSalesOrderFromSAP(order.SAPDocEntry);
+
+      // Update local order with SAP status
+      order.DocumentStatus = sapOrder.DocumentStatus;
+      order.UpdateDate = new Date();
+      await order.save();
+
+      res.status(200).json({
+        success: true,
+        message: "SAP order status retrieved successfully",
+        data: {
+          localOrder: order,
+          sapOrder: sapOrder,
+        },
+      });
+    } catch (sapError) {
+      res.status(500).json({
+        success: false,
+        message: "Error retrieving order from SAP",
+        error: sapError.message,
+      });
+    }
+  } catch (error) {
+    console.error("Error getting SAP order status:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error getting SAP order status",
+      error: error.message,
+    });
+  }
+};
+
+// Duplicate order
+exports.duplicateOrder = async (req, res) => {
+  try {
+    const { docEntry } = req.params;
+
+    const originalOrder = await SalesOrder.findOne({ DocEntry: docEntry });
+    if (!originalOrder) {
+      return res.status(404).json({
+        success: false,
+        message: `Order with DocEntry ${docEntry} not found`,
+      });
+    }
+
+    // Generate new DocEntry
+    const lastOrder = await SalesOrder.findOne().sort({ DocEntry: -1 });
+    const newDocEntry = lastOrder ? lastOrder.DocEntry + 1 : 1;
+
+    // Create duplicate order
+    const duplicateData = {
+      ...originalOrder.toObject(),
+      _id: undefined, // Remove the original _id
+      DocEntry: newDocEntry,
+      DocNum: newDocEntry,
+      DocDate: new Date(),
+      CreationDate: new Date(),
+      UpdateDate: new Date(),
+      SyncedWithSAP: false,
+      SAPDocEntry: null,
+      LocalStatus: "Created",
+      Payment_id: null,
+      payment_status: null,
+      Link_sent: false,
+      U_Notes: `Duplicated from order #${originalOrder.DocNum}. ${
+        originalOrder.U_Notes || ""
+      }`,
+    };
+
+    const newOrder = new SalesOrder(duplicateData);
+    await newOrder.save();
+
+    const populatedOrder = await SalesOrder.findById(newOrder._id).populate(
+      "salesAgent",
+      "firstName lastName email"
+    );
+
+    res.status(201).json({
+      success: true,
+      message: "Order duplicated successfully",
+      data: populatedOrder,
+    });
+  } catch (error) {
+    console.error("Error duplicating order:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error duplicating order",
+      error: error.message,
     });
   }
 };

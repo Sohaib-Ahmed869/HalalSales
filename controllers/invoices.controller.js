@@ -419,7 +419,7 @@ const calculateCustomerKPIs = async (customerId) => {
           monthlyTrends: [
             {
               $match: {
-                DocDate: {
+                CreationDate: {
                   $gte: new Date(
                     new Date().setMonth(new Date().getMonth() - 6)
                   ),
@@ -429,8 +429,8 @@ const calculateCustomerKPIs = async (customerId) => {
             {
               $group: {
                 _id: {
-                  year: { $year: "$DocDate" },
-                  month: { $month: "$DocDate" },
+                  year: { $year: "$CreationDate" },
+                  month: { $month: "$CreationDate" },
                 },
                 invoiceCount: { $sum: 1 },
                 totalAmount: { $sum: "$DocTotal" },
@@ -641,8 +641,8 @@ exports.getCustomersSummary = async (req, res) => {
           totalInvoices: { $sum: 1 },
           totalAmount: { $sum: "$DocTotal" },
           totalPaid: { $sum: "$PaidToDate" },
-          lastInvoiceDate: { $max: "$DocDate" },
-          firstInvoiceDate: { $min: "$DocDate" },
+          lastInvoiceDate: { $max: "$CreationDate" },
+          firstInvoiceDate: { $min: "$CreationDate" },
           posCount: {
             $sum: { $cond: [{ $eq: ["$isPOS", true] }, 1, 0] },
           },
@@ -760,7 +760,7 @@ exports.getGlobalKPIs = async (req, res) => {
     // Create a date filter that will be applied to all relevant pipelines
     const dateFilter = {};
     if (startDate && endDate) {
-      dateFilter.DocDate = {
+      dateFilter.CreationDate = {
         $gte: new Date(startDate),
         $lte: new Date(endDate),
       };
@@ -830,8 +830,8 @@ exports.getGlobalKPIs = async (req, res) => {
       {
         $group: {
           _id: {
-            year: { $year: "$DocDate" },
-            month: { $month: "$DocDate" },
+            year: { $year: "$CreationDate" },
+            month: { $month: "$CreationDate" },
           },
           invoiceCount: { $sum: 1 },
           totalAmount: { $sum: "$DocTotal" },
