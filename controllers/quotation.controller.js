@@ -548,7 +548,7 @@ exports.getQuotationStats = async (req, res) => {
     const { fromDate, toDate, salesAgent } = req.query;
 
     // Build filter query with role-based restrictions
-    let query = { IsActive: true };
+  let query = {};
 
     // Role-based filtering
     if (req.user.role === "sales_agent") {
@@ -1026,13 +1026,32 @@ exports.getAllQuotations = async (req, res) => {
     console.log("User role:", req.user.role);
     console.log("User ID:", req.user._id);
 
-    // Base query - only show active quotations by default
-    let query = { IsActive: true };
+    // Base query - show ALL quotations by default
+let query = {};
 
-    // Add option to show inactive quotations if requested
-    if (req.query.showInactive === "true") {
-      query = {};
-    }
+// Add specific filters based on status
+if (req.query.status) {
+  if (req.query.status === "active") {
+    query.IsActive = true;
+  } else if (req.query.status === "converted") {
+    query.ConvertedToOrderDocEntry = { $exists: true };
+    query.IsActive = false;
+  } else if (req.query.status === "cancelled") {
+    query.IsActive = false;
+    query.ConvertedToOrderDocEntry = { $exists: false };
+  } else if (req.query.status === "pending") {
+    query.approvalStatus = "pending";
+    query.IsActive = true;
+  } else if (req.query.status === "approved") {
+    query.approvalStatus = "approved";
+    query.IsActive = true;
+  } else if (req.query.status === "rejected") {
+    query.approvalStatus = "rejected";
+    query.IsActive = true;
+  }
+} else {
+  // Default: show all quotations (no filtering)
+}
 
     // Role-based filtering
     if (req.user.role === "sales_agent") {
@@ -1063,17 +1082,7 @@ exports.getAllQuotations = async (req, res) => {
       ];
     }
 
-    if (req.query.status) {
-      if (req.query.status === "converted") {
-        query.ConvertedToOrderDocEntry = { $exists: true };
-        query.IsActive = false;
-      } else if (req.query.status === "cancelled") {
-        query.IsActive = false;
-        query.ConvertedToOrderDocEntry = { $exists: false };
-      } else {
-        query.approvalStatus = req.query.status;
-      }
-    }
+
 
     if (req.query.fromDate && req.query.toDate) {
       query.DocDate = {

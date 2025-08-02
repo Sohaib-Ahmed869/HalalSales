@@ -11,7 +11,17 @@ const Invoice = require("../models/Invoice");
 const Quotation = require("../models/Quotation");
 const Deal = require("../models/Deal");
 const Cart = require("../models/Cart");
+const axios = require("axios");
+const RestaurantAnalysis = require("../models/RestaurantAnalysis");
+const { LambdaClient, InvokeCommand } = require("@aws-sdk/client-lambda");
 
+const lambdaClient = new LambdaClient({
+  region: process.env.AWS_REGION_LAMBDA || 'us-east-1',
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID_LAMBDA,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY_LAMBDA
+  }
+});
 const {
   getLastCustomerFromSAP,
   generateNextCardCode,
@@ -61,6 +71,220 @@ async function pushCustomerToSAPInternal(customer) {
     };
   }
 }
+
+// Updated function using AWS SDK v3
+exports.getPersonalizedRecommendations = async (req, res) => {
+  try {
+    const { cardCode } = req.params;
+    
+    if (!cardCode) {
+      return res.status(400).json({
+        success: false,
+        message: "CardCode is required"
+      });
+    }
+
+    // Verify customer exists in your database
+    const customer = await Customer.findOne({ CardCode: cardCode }).lean();
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found"
+      });
+    }
+
+    console.log(`Getting recommendations for customer: ${cardCode}`);
+
+    try {
+      // Prepare Lambda function parameters
+      const command = new InvokeCommand({
+        FunctionName: 'customer-recommendations2', // Your Lambda function name
+        Payload: JSON.stringify({
+          cardCode: cardCode
+        })
+      });
+
+      // Invoke Lambda function
+      const lambdaResult = await lambdaClient.send(command);
+      
+      // Parse Lambda response
+      const responsePayload = new TextDecoder().decode(lambdaResult.Payload);
+      const lambdaResponse = JSON.parse(responsePayload);
+      
+      if (lambdaResponse.statusCode === 200) {
+        const recommendations = JSON.parse(lambdaResponse.body);
+        
+        res.json({
+          success: true,
+          data: recommendations
+        });
+      } else {
+        const errorResponse = JSON.parse(lambdaResponse.body);
+        res.status(lambdaResponse.statusCode || 500).json({
+          success: false,
+          message: "Error from recommendation service",
+          error: errorResponse.error
+        });
+      }
+      
+    } catch (lambdaError) {
+      console.error('Lambda invocation error:', lambdaError);
+      res.status(500).json({
+        success: false,
+        message: "Error calling recommendation service",
+        error: lambdaError.message
+      });
+    }
+
+  } catch (error) {
+    console.error("Error getting personalized recommendations:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error getting personalized recommendations",
+      error: error.message
+    });
+  }
+};
+
+// Alternative HTTP method (if you prefer to use axios instead of Lambda SDK)
+exports.getPersonalizedRecommendationsHTTP = async (req, res) => {
+  try {
+    const { cardCode } = req.params;
+    
+    if (!cardCode) {
+      return res.status(400).json({
+        success: false,
+        message: "CardCode is required"
+      });
+    }
+
+    // Verify customer exists
+    const customer = await Customer.findOne({ CardCode: cardCode }).lean();
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found"
+      });
+    }
+
+    // Make HTTP request to Lambda via API Gateway (if you set up API Gateway)
+    const LAMBDA_API_URL = process.env.LAMBDA_API_URL; // Your API Gateway URL
+    
+    if (!LAMBDA_API_URL) {
+      return res.status(500).json({
+        success: false,
+        message: "Lambda API URL not configured"
+      });
+    }
+
+    const response = await axios.post(LAMBDA_API_URL, {
+      cardCode: cardCode
+    }, {
+      timeout: 30000,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    res.json({
+      success: true,
+      data: response.data
+    });
+
+  } catch (error) {
+    console.error("Error getting recommendations via HTTP:", error);
+    
+    if (error.code === 'ECONNABORTED') {
+      return res.status(408).json({
+        success: false,
+        message: "Recommendation request timed out"
+      });
+    }
+
+    if (error.response) {
+      return res.status(error.response.status || 500).json({
+        success: false,
+        message: "Error from recommendation service",
+        error: error.response.data?.error || "External service error"
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Error getting personalized recommendations",
+      error: error.message
+    });
+  }
+};
+
+// Get customer order history (unchanged - no AWS SDK needed)
+exports.getCustomerOrderHistory = async (req, res) => {
+  try {
+    const { cardCode } = req.params;
+    
+    if (!cardCode) {
+      return res.status(400).json({
+        success: false,
+        message: "CardCode is required"
+      });
+    }
+
+    // Verify customer exists
+    const customer = await Customer.findOne({ CardCode: cardCode }).lean();
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found"
+      });
+    }
+
+    // Get customer's invoices with items
+    const invoices = await Invoice.find({ CardCode: cardCode })
+      .select('DocNum DocDate DocTotal DocumentLines')
+      .sort({ DocDate: -1 })
+      .limit(50)
+      .lean();
+
+    // Extract order history
+    const orderHistory = [];
+    invoices.forEach(invoice => {
+      if (invoice.DocumentLines && Array.isArray(invoice.DocumentLines)) {
+        invoice.DocumentLines.forEach(line => {
+          if (line.Quantity > 0) {
+            orderHistory.push({
+              ItemCode: line.ItemCode,
+              ItemDescription: line.ItemDescription,
+              Quantity: line.Quantity,
+              Price: line.Price || 0,
+              LineTotal: line.LineTotal || 0,
+              DocDate: invoice.DocDate,
+              DocNum: invoice.DocNum,
+              DocTotal: invoice.DocTotal
+            });
+          }
+        });
+      }
+    });
+
+    res.json({
+      success: true,
+      customer: {
+        CardCode: customer.CardCode,
+        CardName: customer.CardName
+      },
+      orderHistory: orderHistory,
+      totalInvoices: invoices.length
+    });
+
+  } catch (error) {
+    console.error("Error getting customer order history:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error getting customer order history",
+      error: error.message
+    });
+  }
+};
 
 // Create a new customer (save to local DB and push to SAP)
 exports.createCustomer = async (req, res) => {
@@ -5509,6 +5733,446 @@ exports.updateCustomerDeliveryAddresses = async (req, res) => {
       success: false,
       message: "Error updating customer delivery addresses",
       error: error.message,
+    });
+  }
+};
+
+exports.startRestaurantAnalysis = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { restaurant_url } = req.body;
+
+    // Validate URL
+    if (!restaurant_url || !restaurant_url.includes("ubereats.com")) {
+      return res.status(400).json({
+        success: false,
+        error: "Valid UberEats URL is required",
+      });
+    }
+
+    // Find customer by ID or CardCode
+    let customer;
+    if (customerId.length === 24) {
+      // MongoDB ObjectId
+      customer = await Customer.findById(customerId);
+    } else {
+      // Assume it's a CardCode
+      customer = await Customer.findOne({ CardCode: customerId });
+    }
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        error: "Customer not found",
+      });
+    }
+
+    // Start analysis with restaurant matcher API
+    const SCRAPER_API_URL =
+      process.env.SCRAPER_API_URL || "https://hfs-ws.onrender.com";
+
+    console.log(
+      `Starting restaurant analysis for customer ${customer.CardCode} with URL: ${restaurant_url}`
+    );
+
+    const response = await axios.post(
+      `${SCRAPER_API_URL}/match-restaurant-inventory`,
+      {
+        restaurant_url: restaurant_url,
+      },
+      {
+        timeout: 30000, // 30 second timeout
+        headers: {
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    if (response.data.success) {
+      // Save or update restaurant analysis record
+      const analysisData = {
+        customerId: customer._id,
+        customerCode: customer.CardCode,
+        customerName: customer.CardName,
+        restaurant_url: restaurant_url,
+        job_id: response.data.job_id,
+        status: "running",
+        created_at: new Date(),
+        updated_at: new Date(),
+      };
+
+      const existingAnalysis = await RestaurantAnalysis.findOne({
+        customerId: customer._id,
+      });
+
+      if (existingAnalysis) {
+        // Update existing analysis
+        await RestaurantAnalysis.findByIdAndUpdate(
+          existingAnalysis._id,
+          analysisData
+        );
+        console.log(
+          `Updated existing analysis for customer ${customer.CardCode}`
+        );
+      } else {
+        // Create new analysis
+        await RestaurantAnalysis.create(analysisData);
+        console.log(`Created new analysis for customer ${customer.CardCode}`);
+      }
+
+      // Update customer with restaurant URL
+      await Customer.findByIdAndUpdate(customer._id, {
+        uberEatsUrl: restaurant_url,
+        lastRestaurantAnalysis: new Date(),
+      });
+
+      res.status(202).json({
+        success: true,
+        job_id: response.data.job_id,
+        message: "Restaurant analysis started successfully",
+        customer: {
+          id: customer._id,
+          CardCode: customer.CardCode,
+          CardName: customer.CardName,
+        },
+      });
+    } else {
+      res.status(400).json({
+        success: false,
+        error: response.data.error || "Failed to start analysis",
+      });
+    }
+  } catch (error) {
+    console.error("Error starting restaurant analysis:", error);
+
+    if (error.code === "ECONNABORTED") {
+      return res.status(408).json({
+        success: false,
+        error: "Request timeout - analysis service may be slow",
+      });
+    }
+
+    if (error.response) {
+      return res.status(error.response.status || 500).json({
+        success: false,
+        error: error.response.data?.error || "External service error",
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      details: error.message,
+    });
+  }
+};
+
+exports.getRestaurantAnalysis = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+
+    // Find customer by ID or CardCode
+    let customer;
+    if (customerId.length === 24) {
+      customer = await Customer.findById(customerId);
+    } else {
+      customer = await Customer.findOne({ CardCode: customerId });
+    }
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        error: "Customer not found",
+      });
+    }
+
+    const analysis = await RestaurantAnalysis.findOne({
+      customerId: customer._id,
+    }).sort({ created_at: -1 });
+
+    if (!analysis) {
+      return res.status(404).json({
+        success: false,
+        error: "No restaurant analysis found for this customer",
+      });
+    }
+
+    // If analysis is still running, check status and potentially get results
+    if (analysis.status === "running" || analysis.status === "processing") {
+      try {
+        const SCRAPER_API_URL =
+          process.env.SCRAPER_API_URL || "https://hfs-ws.onrender.com";
+
+        // Check job status
+        const statusResponse = await axios.get(
+          `${SCRAPER_API_URL}/inventory-matching-job/${analysis.job_id}`,
+          { timeout: 10000 }
+        );
+
+        if (statusResponse.data.success) {
+          const jobStatus = statusResponse.data.job_status;
+
+          // Update analysis with latest status
+          analysis.status = jobStatus.status;
+          analysis.progress = jobStatus.progress;
+          analysis.runtime_seconds = jobStatus.runtime_seconds;
+          analysis.updated_at = new Date();
+
+          if (jobStatus.status === "completed" && jobStatus.result) {
+            // Job completed, save results
+            analysis.restaurant_name = jobStatus.result.restaurant_name;
+            analysis.total_matches = jobStatus.result.total_matches;
+            analysis.restaurant_categories =
+              jobStatus.result.restaurant_categories;
+            analysis.llm_categorization_used =
+              jobStatus.result.llm_categorization_used;
+            analysis.openai_enhancement_used =
+              jobStatus.result.openai_enhancement_used;
+            analysis.matching_results = jobStatus.result.matching_results;
+            analysis.completed_at = new Date();
+
+            console.log(
+              `Analysis completed for customer ${customer.CardCode}: ${analysis.total_matches} matches found`
+            );
+          } else if (jobStatus.status === "failed") {
+            analysis.error_message =
+              jobStatus.progress?.error || "Analysis failed";
+            console.log(
+              `Analysis failed for customer ${customer.CardCode}: ${analysis.error_message}`
+            );
+          }
+
+          await analysis.save();
+        }
+      } catch (statusError) {
+        console.error("Error checking analysis status:", statusError);
+        // Continue with existing data - don't fail the request
+      }
+    }
+
+    res.json({
+      success: true,
+      data: analysis,
+    });
+  } catch (error) {
+    console.error("Error fetching restaurant analysis:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      details: error.message,
+    });
+  }
+};
+
+// Delete customer restaurant analysis
+exports.deleteRestaurantAnalysis = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+
+    // Find customer by ID or CardCode
+    let customer;
+    if (customerId.length === 24) {
+      customer = await Customer.findById(customerId);
+    } else {
+      customer = await Customer.findOne({ CardCode: customerId });
+    }
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        error: "Customer not found",
+      });
+    }
+
+    // Delete analysis record
+    const deletedAnalysis = await RestaurantAnalysis.findOneAndDelete({
+      customerId: customer._id,
+    });
+
+    // Remove restaurant URL from customer
+    await Customer.findByIdAndUpdate(customer._id, {
+      $unset: {
+        uberEatsUrl: 1,
+        lastRestaurantAnalysis: 1,
+      },
+    });
+
+    res.json({
+      success: true,
+      message: "Restaurant analysis deleted successfully",
+      deleted: deletedAnalysis ? true : false,
+    });
+  } catch (error) {
+    console.error("Error deleting restaurant analysis:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      details: error.message,
+    });
+  }
+};
+
+// Save restaurant URL to customer profile (without starting analysis)
+exports.saveRestaurantUrl = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { uberEatsUrl } = req.body;
+
+    // Validate URL
+    if (!uberEatsUrl || !uberEatsUrl.includes("ubereats.com")) {
+      return res.status(400).json({
+        success: false,
+        error: "Valid UberEats URL is required",
+      });
+    }
+
+    // Find customer by ID or CardCode
+    let customer;
+    if (customerId.length === 24) {
+      customer = await Customer.findByIdAndUpdate(
+        customerId,
+        { uberEatsUrl },
+        { new: true }
+      );
+    } else {
+      customer = await Customer.findOneAndUpdate(
+        { CardCode: customerId },
+        { uberEatsUrl },
+        { new: true }
+      );
+    }
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        error: "Customer not found",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Restaurant URL saved successfully",
+      data: {
+        id: customer._id,
+        CardCode: customer.CardCode,
+        CardName: customer.CardName,
+        uberEatsUrl: customer.uberEatsUrl,
+      },
+    });
+  } catch (error) {
+    console.error("Error saving restaurant URL:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      details: error.message,
+    });
+  }
+};
+
+// Get analysis status by job ID
+exports.getAnalysisStatus = async (req, res) => {
+  try {
+    const { jobId } = req.params;
+
+    const SCRAPER_API_URL =
+      process.env.SCRAPER_API_URL || "https://hfs-ws.onrender.com";
+
+    const response = await axios.get(
+      `${SCRAPER_API_URL}/inventory-matching-job/${jobId}`,
+      {
+        timeout: 10000,
+      }
+    );
+
+    // Update local analysis record if found
+    const analysis = await RestaurantAnalysis.findOne({ job_id: jobId });
+    if (analysis) {
+      analysis.status = response.data.status;
+      analysis.updated_at = new Date();
+
+      if (response.data.status === "completed") {
+        analysis.results = response.data.results;
+      } else if (response.data.status === "failed") {
+        analysis.error = response.data.error;
+      }
+
+      await analysis.save();
+    }
+
+    res.json({
+      success: true,
+      data: response.data,
+    });
+  } catch (error) {
+    console.error("Error getting analysis status:", error);
+
+    if (error.code === "ECONNABORTED") {
+      return res.status(408).json({
+        success: false,
+        error: "Request timeout",
+      });
+    }
+
+    if (error.response) {
+      return res.status(error.response.status || 500).json({
+        success: false,
+        error: error.response.data?.error || "External service error",
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      details: error.message,
+    });
+  }
+};
+
+// Get all restaurant analyses (admin function)
+exports.getAllRestaurantAnalyses = async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const skip = (page - 1) * limit;
+
+    const { status, search } = req.query;
+    const query = {};
+
+    // Filter by status if provided
+    if (status) {
+      query.status = status;
+    }
+
+    // Search by customer name or code
+    if (search) {
+      query.$or = [
+        { customerName: { $regex: search, $options: "i" } },
+        { customerCode: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const total = await RestaurantAnalysis.countDocuments(query);
+    const analyses = await RestaurantAnalysis.find(query)
+      .sort({ created_at: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    res.json({
+      success: true,
+      data: analyses,
+      pagination: {
+        total,
+        page,
+        pages: Math.ceil(total / limit),
+        limit,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching restaurant analyses:", error);
+    res.status(500).json({
+      success: false,
+      error: "Internal server error",
+      details: error.message,
     });
   }
 };

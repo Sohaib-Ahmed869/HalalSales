@@ -155,6 +155,16 @@ const CustomerSchema = new Schema({
     type: Boolean,
     default: false,
   },
+  uberEatsUrl: {
+    type: String,
+    validate: {
+      validator: function (v) {
+        return !v || v.includes("ubereats.com");
+      },
+      message: "Must be a valid UberEats URL",
+    },
+  },
+  lastRestaurantAnalysis: Date,
 });
 
 // Update timestamps on save

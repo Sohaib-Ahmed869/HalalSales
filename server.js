@@ -43,6 +43,7 @@ const { linkDocumentsToAgents } = require("./migrateAgentReferences");
 const { syncFromFeb21 } = require("./jobs/hubspotJob");
 const { fetchCallsFromMay2UntilToday } = require("./jobs/mayScript");
 const targetScheduler = require("./services/targetScheduler");
+require('./jobs/updateRestaurantAnalysis'); 
 
 // Initialize express app
 const app = express();

@@ -3,7 +3,7 @@ const axios = require("axios");
 const router = express.Router();
 
 // Python scraper service URL
-const PYTHON_SCRAPER_URL = "http://127.0.0.1:5005";
+const PYTHON_SCRAPER_URL = process.env.SCRAPER_API_URL;
 
 /**
  * POST /api/restaurant-matcher/analyze

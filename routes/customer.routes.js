@@ -178,6 +178,118 @@ router.get(
   customerController.getCustomersPaginated2
 );
 
+// Restaurant Analysis Routes
+// =========================
+
+// Start restaurant analysis for a customer
+router.post(
+  "/:customerId/restaurant-analysis",
+  auth,
+  checkRole(["admin", "sales_manager", "sales_agent"]),
+  customerController.startRestaurantAnalysis
+);
+
+// Get restaurant analysis for a customer
+router.get(
+  "/:customerId/restaurant-analysis",
+  auth,
+  customerController.getRestaurantAnalysis
+);
+
+// Delete restaurant analysis for a customer
+router.delete(
+  "/:customerId/restaurant-analysis",
+  auth,
+  checkRole(["admin", "sales_manager", "sales_agent"]),
+  customerController.deleteRestaurantAnalysis
+);
+
+// Save restaurant URL to customer profile (without starting analysis)
+router.post(
+  "/:customerId/restaurant-url",
+  auth,
+  checkRole(["admin", "sales_manager", "sales_agent"]),
+  customerController.saveRestaurantUrl
+);
+
+router.get(
+  "/:cardCode/personalized-recommendations",
+  auth,
+  updateLastLogin,
+  customerController.getPersonalizedRecommendations
+);
+
+router.get(
+  "/:cardCode/order-history",
+  auth,
+  updateLastLogin,
+  customerController.getCustomerOrderHistory
+);
+
+// Alternative routes using 'by-code' prefix
+router.get(
+  "/by-code/:cardCode/personalized-recommendations",
+  auth,
+  updateLastLogin,
+  customerController.getPersonalizedRecommendations
+);
+
+router.get(
+  "/by-code/:cardCode/order-history",
+  auth,
+  updateLastLogin,
+  customerController.getCustomerOrderHistory
+);
+
+// Get analysis status by job ID
+router.get(
+  "/analysis-status/:jobId",
+  auth,
+  customerController.getAnalysisStatus
+);
+
+// Get all restaurant analyses (admin only)
+router.get(
+  "/restaurant-analyses",
+  auth,
+  checkRole(["admin", "sales_manager"]),
+  customerController.getAllRestaurantAnalyses
+);
+
+// Alternative routes that use CardCode instead of customer ID
+// ===========================================================
+
+// Start restaurant analysis using CardCode
+router.post(
+  "/by-code/:cardCode/restaurant-analysis",
+  auth,
+  checkRole(["admin", "sales_manager", "sales_agent"]),
+  customerController.startRestaurantAnalysis
+);
+
+// Get restaurant analysis using CardCode
+router.get(
+  "/by-code/:cardCode/restaurant-analysis",
+  auth,
+  customerController.getRestaurantAnalysis
+);
+
+// Delete restaurant analysis using CardCode
+router.delete(
+  "/by-code/:cardCode/restaurant-analysis",
+  auth,
+  checkRole(["admin", "sales_manager", "sales_agent"]),
+  customerController.deleteRestaurantAnalysis
+);
+
+// Save restaurant URL using CardCode
+router.post(
+  "/by-code/:cardCode/restaurant-url",
+  auth,
+  checkRole(["admin", "sales_manager", "sales_agent"]),
+  customerController.saveRestaurantUrl
+);
+
 // Route to unassign a single customer
 router.post(
   "/:id/unassign",
