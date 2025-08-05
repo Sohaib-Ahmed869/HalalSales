@@ -169,7 +169,6 @@ CustomerTargetSchema.methods.getCurrentPeriodString = function () {
       return `${year}-${String(month).padStart(2, "0")}`;
   }
 };
-
 CustomerTargetSchema.methods.startNewPeriod = function () {
   // Store the current period's performance in history BEFORE resetting
   const currentPeriod = this.getCurrentPeriodString();
@@ -188,20 +187,34 @@ CustomerTargetSchema.methods.startNewPeriod = function () {
     });
   }
 
-  // Calculate the new period dates based on current date, not the old period end
-  const now = new Date();
+  // Calculate the NEW period dates based on the NEXT period, not current date
+  let newPeriodStart, newPeriodEnd;
 
   if (this.period === "monthly") {
-    this.currentPeriodStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    this.currentPeriodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+    // Move to next month
+    const nextMonth = new Date(this.currentPeriodEnd);
+    nextMonth.setDate(nextMonth.getDate() + 1); // Go to first day of next month
+    
+    newPeriodStart = new Date(nextMonth.getFullYear(), nextMonth.getMonth(), 1);
+    newPeriodEnd = new Date(nextMonth.getFullYear(), nextMonth.getMonth() + 1, 0);
   } else if (this.period === "quarterly") {
-    const quarter = Math.floor(now.getMonth() / 3);
-    this.currentPeriodStart = new Date(now.getFullYear(), quarter * 3, 1);
-    this.currentPeriodEnd = new Date(now.getFullYear(), (quarter + 1) * 3, 0);
+    // Move to next quarter
+    const nextQuarter = new Date(this.currentPeriodEnd);
+    nextQuarter.setDate(nextQuarter.getDate() + 1);
+    
+    const quarter = Math.floor(nextQuarter.getMonth() / 3);
+    newPeriodStart = new Date(nextQuarter.getFullYear(), quarter * 3, 1);
+    newPeriodEnd = new Date(nextQuarter.getFullYear(), (quarter + 1) * 3, 0);
   } else if (this.period === "yearly") {
-    this.currentPeriodStart = new Date(now.getFullYear(), 0, 1);
-    this.currentPeriodEnd = new Date(now.getFullYear(), 11, 31);
+    // Move to next year
+    const nextYear = this.currentPeriodStart.getFullYear() + 1;
+    newPeriodStart = new Date(nextYear, 0, 1);
+    newPeriodEnd = new Date(nextYear, 11, 31);
   }
+
+  // Update to the new period
+  this.currentPeriodStart = newPeriodStart;
+  this.currentPeriodEnd = newPeriodEnd;
 
   // Reset the current period's achievements
   this.achievedAmount = 0;

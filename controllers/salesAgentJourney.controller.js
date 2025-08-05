@@ -399,7 +399,12 @@ const salesAgentJourneyController = {
               ...dateFilter,
             },
           },
-          { $group: { _id: "$CardCode", totalAmount: { $sum: "$DocTotal" } } },
+          {
+            $group: {
+              _id: "$CardCode",
+              totalAmount: { $sum: { $subtract: ["$DocTotal", "$VatSum"] } },
+            },
+          },
         ]),
 
         // Sales Order counts

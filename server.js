@@ -126,6 +126,7 @@ mongoose
     process.exit(1);
   });
 
+  
 // Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/customers", customerRoutes);
