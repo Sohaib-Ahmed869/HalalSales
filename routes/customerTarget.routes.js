@@ -6,6 +6,8 @@ const targetScheduler = require("../services/targetScheduler");
 
 const { auth, checkRole, updateLastLogin } = require("../middleware/auth");
 
+
+
 // Get scheduler status
 router.get("/scheduler/status", auth, checkRole(["admin"]), (req, res) => {
   try {
@@ -95,6 +97,11 @@ router.get(
   auth,
   checkRole(["sales_manager", "admin"]),
   customerTargetController.getSalesManagerDashboard
+);
+
+router.post(
+  "/migrate-to-2025",
+  customerTargetController.migrateTargetsTo2025
 );
 // Create a new customer target - Admin and Sales Manager only
 router.post(

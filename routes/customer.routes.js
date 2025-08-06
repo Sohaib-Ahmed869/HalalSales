@@ -11,6 +11,7 @@ const {
   updateLastLogin,
 } = require("../middleware/auth");
 const customerController = require("../controllers/customer.controller");
+const { uploadToS3 } = require("../config/s3");
 
 // Ensure uploads directory exists
 const uploadsDir = path.join(process.cwd(), "uploads");
@@ -51,6 +52,36 @@ const upload = multer({
     fileSize: 10 * 1024 * 1024, // 10 MB file size limit
   },
 });
+
+// Document upload routes
+router.post(
+  "/:customerId/documents/upload",
+  auth,
+  uploadToS3.single("document"),
+  customerController.uploadCustomerDocument
+);
+
+// Get all documents for a customer
+router.get(
+  "/:customerId/documents",
+  auth,
+  customerController.getCustomerDocuments
+);
+
+// Delete a specific document
+router.delete(
+  "/:customerId/documents/:documentType",
+  auth,
+  checkRole(["admin", "sales_manager", "sales_agent"]),
+  customerController.deleteCustomerDocument
+);
+
+// Get download URL for a document
+router.get(
+  "/:customerId/documents/:documentType/download",
+  auth,
+  customerController.getDocumentDownloadUrl
+);
 
 router.post("/create", auth, customerController.createCustomer);
 

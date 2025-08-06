@@ -1,20 +1,53 @@
 const mongoose = require("mongoose");
 const Schema = mongoose.Schema;
 
+// Document sub-schema for uploaded files
+const DocumentSchema = new Schema({
+  filename: {
+    type: String,
+    required: true,
+  },
+  originalName: {
+    type: String,
+    required: true,
+  },
+  s3Key: {
+    type: String,
+    required: true,
+  },
+  s3Url: {
+    type: String,
+    required: true,
+  },
+  fileSize: {
+    type: Number,
+  },
+  mimeType: {
+    type: String,
+  },
+  uploadedAt: {
+    type: Date,
+    default: Date.now,
+  },
+  uploadedBy: {
+    type: Schema.Types.ObjectId,
+    ref: "User",
+  },
+});
+
 const CustomerSchema = new Schema({
-  // SAP Data
+  // ... (all existing fields remain the same)
   CardName: {
     type: String,
     required: true,
   },
   CardCode: {
     type: String,
-    index: true, // Still index for performance
+    index: true,
   },
   Email: {
     type: String,
   },
-  // Extended contact info
   firstName: {
     type: String,
     trim: true,
@@ -31,7 +64,6 @@ const CustomerSchema = new Schema({
     type: [String],
     default: [],
   },
-  // External System IDs
   hubspotId: {
     type: String,
     trim: true,
@@ -40,7 +72,6 @@ const CustomerSchema = new Schema({
     type: String,
     trim: true,
   },
-  // Assigned sales agent
   assignedTo: {
     type: Schema.Types.ObjectId,
     ref: "User",
@@ -49,13 +80,11 @@ const CustomerSchema = new Schema({
     type: String,
     trim: true,
   },
-  // Customer Type
   customerType: {
     type: String,
     enum: ["sap", "non-sap", "lead"],
     default: "non-sap",
   },
-  // Additional fields
   createdAt: {
     type: Date,
     default: Date.now,
@@ -64,7 +93,6 @@ const CustomerSchema = new Schema({
     type: Date,
     default: Date.now,
   },
-  // Track customer status
   status: {
     type: String,
     enum: ["active", "inactive", "lead", "prospect"],
@@ -78,7 +106,6 @@ const CustomerSchema = new Schema({
   notes: {
     type: String,
   },
-  // Additional contact information
   additionalEmails: [String],
   company: {
     type: String,
@@ -107,10 +134,9 @@ const CustomerSchema = new Schema({
     country: {
       type: String,
       trim: true,
-      default: "France", // Default value since your examples seem to be in France
+      default: "France",
     },
   },
-  // DELIVERY ADDRESS (NEW)
   deliveryAddress: {
     street: {
       type: String,
@@ -134,8 +160,6 @@ const CustomerSchema = new Schema({
     type: Number,
     default: 0,
   },
-  // NEW SAP SYNC FIELDS
-  // SAP Integration Status
   SyncedWithSAP: {
     type: Boolean,
     default: false,
@@ -165,6 +189,13 @@ const CustomerSchema = new Schema({
     },
   },
   lastRestaurantAnalysis: Date,
+
+  // NEW DOCUMENT FIELDS
+  documents: {
+    companyDoc: DocumentSchema,
+    managerId: DocumentSchema,
+    otherDocuments: [DocumentSchema],
+  },
 });
 
 // Update timestamps on save

@@ -14,13 +14,14 @@ const Cart = require("../models/Cart");
 const axios = require("axios");
 const RestaurantAnalysis = require("../models/RestaurantAnalysis");
 const { LambdaClient, InvokeCommand } = require("@aws-sdk/client-lambda");
+const { deleteFromS3, generatePresignedUrl } = require("../config/s3");
 
 const lambdaClient = new LambdaClient({
-  region: process.env.AWS_REGION_LAMBDA || 'us-east-1',
+  region: process.env.AWS_REGION_LAMBDA || "us-east-1",
   credentials: {
     accessKeyId: process.env.AWS_ACCESS_KEY_ID_LAMBDA,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY_LAMBDA
-  }
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY_LAMBDA,
+  },
 });
 const {
   getLastCustomerFromSAP,
@@ -76,11 +77,11 @@ async function pushCustomerToSAPInternal(customer) {
 exports.getPersonalizedRecommendations = async (req, res) => {
   try {
     const { cardCode } = req.params;
-    
+
     if (!cardCode) {
       return res.status(400).json({
         success: false,
-        message: "CardCode is required"
+        message: "CardCode is required",
       });
     }
 
@@ -89,7 +90,7 @@ exports.getPersonalizedRecommendations = async (req, res) => {
     if (!customer) {
       return res.status(404).json({
         success: false,
-        message: "Customer not found"
+        message: "Customer not found",
       });
     }
 
@@ -98,50 +99,48 @@ exports.getPersonalizedRecommendations = async (req, res) => {
     try {
       // Prepare Lambda function parameters
       const command = new InvokeCommand({
-        FunctionName: 'customer-recommendations2', // Your Lambda function name
+        FunctionName: "customer-recommendations2", // Your Lambda function name
         Payload: JSON.stringify({
-          cardCode: cardCode
-        })
+          cardCode: cardCode,
+        }),
       });
 
       // Invoke Lambda function
       const lambdaResult = await lambdaClient.send(command);
-      
+
       // Parse Lambda response
       const responsePayload = new TextDecoder().decode(lambdaResult.Payload);
       const lambdaResponse = JSON.parse(responsePayload);
-      
+
       if (lambdaResponse.statusCode === 200) {
         const recommendations = JSON.parse(lambdaResponse.body);
-        
+
         res.json({
           success: true,
-          data: recommendations
+          data: recommendations,
         });
       } else {
         const errorResponse = JSON.parse(lambdaResponse.body);
         res.status(lambdaResponse.statusCode || 500).json({
           success: false,
           message: "Error from recommendation service",
-          error: errorResponse.error
+          error: errorResponse.error,
         });
       }
-      
     } catch (lambdaError) {
-      console.error('Lambda invocation error:', lambdaError);
+      console.error("Lambda invocation error:", lambdaError);
       res.status(500).json({
         success: false,
         message: "Error calling recommendation service",
-        error: lambdaError.message
+        error: lambdaError.message,
       });
     }
-
   } catch (error) {
     console.error("Error getting personalized recommendations:", error);
     res.status(500).json({
       success: false,
       message: "Error getting personalized recommendations",
-      error: error.message
+      error: error.message,
     });
   }
 };
@@ -150,11 +149,11 @@ exports.getPersonalizedRecommendations = async (req, res) => {
 exports.getPersonalizedRecommendationsHTTP = async (req, res) => {
   try {
     const { cardCode } = req.params;
-    
+
     if (!cardCode) {
       return res.status(400).json({
         success: false,
-        message: "CardCode is required"
+        message: "CardCode is required",
       });
     }
 
@@ -163,41 +162,44 @@ exports.getPersonalizedRecommendationsHTTP = async (req, res) => {
     if (!customer) {
       return res.status(404).json({
         success: false,
-        message: "Customer not found"
+        message: "Customer not found",
       });
     }
 
     // Make HTTP request to Lambda via API Gateway (if you set up API Gateway)
     const LAMBDA_API_URL = process.env.LAMBDA_API_URL; // Your API Gateway URL
-    
+
     if (!LAMBDA_API_URL) {
       return res.status(500).json({
         success: false,
-        message: "Lambda API URL not configured"
+        message: "Lambda API URL not configured",
       });
     }
 
-    const response = await axios.post(LAMBDA_API_URL, {
-      cardCode: cardCode
-    }, {
-      timeout: 30000,
-      headers: {
-        'Content-Type': 'application/json'
+    const response = await axios.post(
+      LAMBDA_API_URL,
+      {
+        cardCode: cardCode,
+      },
+      {
+        timeout: 30000,
+        headers: {
+          "Content-Type": "application/json",
+        },
       }
-    });
+    );
 
     res.json({
       success: true,
-      data: response.data
+      data: response.data,
     });
-
   } catch (error) {
     console.error("Error getting recommendations via HTTP:", error);
-    
-    if (error.code === 'ECONNABORTED') {
+
+    if (error.code === "ECONNABORTED") {
       return res.status(408).json({
         success: false,
-        message: "Recommendation request timed out"
+        message: "Recommendation request timed out",
       });
     }
 
@@ -205,14 +207,14 @@ exports.getPersonalizedRecommendationsHTTP = async (req, res) => {
       return res.status(error.response.status || 500).json({
         success: false,
         message: "Error from recommendation service",
-        error: error.response.data?.error || "External service error"
+        error: error.response.data?.error || "External service error",
       });
     }
 
     res.status(500).json({
       success: false,
       message: "Error getting personalized recommendations",
-      error: error.message
+      error: error.message,
     });
   }
 };
@@ -221,11 +223,11 @@ exports.getPersonalizedRecommendationsHTTP = async (req, res) => {
 exports.getCustomerOrderHistory = async (req, res) => {
   try {
     const { cardCode } = req.params;
-    
+
     if (!cardCode) {
       return res.status(400).json({
         success: false,
-        message: "CardCode is required"
+        message: "CardCode is required",
       });
     }
 
@@ -234,22 +236,22 @@ exports.getCustomerOrderHistory = async (req, res) => {
     if (!customer) {
       return res.status(404).json({
         success: false,
-        message: "Customer not found"
+        message: "Customer not found",
       });
     }
 
     // Get customer's invoices with items
     const invoices = await Invoice.find({ CardCode: cardCode })
-      .select('DocNum DocDate DocTotal DocumentLines')
+      .select("DocNum DocDate DocTotal DocumentLines")
       .sort({ DocDate: -1 })
       .limit(50)
       .lean();
 
     // Extract order history
     const orderHistory = [];
-    invoices.forEach(invoice => {
+    invoices.forEach((invoice) => {
       if (invoice.DocumentLines && Array.isArray(invoice.DocumentLines)) {
-        invoice.DocumentLines.forEach(line => {
+        invoice.DocumentLines.forEach((line) => {
           if (line.Quantity > 0) {
             orderHistory.push({
               ItemCode: line.ItemCode,
@@ -259,7 +261,7 @@ exports.getCustomerOrderHistory = async (req, res) => {
               LineTotal: line.LineTotal || 0,
               DocDate: invoice.DocDate,
               DocNum: invoice.DocNum,
-              DocTotal: invoice.DocTotal
+              DocTotal: invoice.DocTotal,
             });
           }
         });
@@ -270,18 +272,17 @@ exports.getCustomerOrderHistory = async (req, res) => {
       success: true,
       customer: {
         CardCode: customer.CardCode,
-        CardName: customer.CardName
+        CardName: customer.CardName,
       },
       orderHistory: orderHistory,
-      totalInvoices: invoices.length
+      totalInvoices: invoices.length,
     });
-
   } catch (error) {
     console.error("Error getting customer order history:", error);
     res.status(500).json({
       success: false,
       message: "Error getting customer order history",
-      error: error.message
+      error: error.message,
     });
   }
 };
@@ -6173,6 +6174,361 @@ exports.getAllRestaurantAnalyses = async (req, res) => {
       success: false,
       error: "Internal server error",
       details: error.message,
+    });
+  }
+};
+
+exports.uploadCustomerDocument = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { documentType } = req.body;
+
+    console.log(
+      `Uploading document for customer ${customerId} with type ${documentType}`
+    );
+
+    // Validate customer exists
+    const customer = await Customer.findOne({
+      CardCode: customerId,
+    });
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found",
+      });
+    }
+
+    // Validate document type
+    const validDocumentTypes = ["companyDoc", "managerId", "otherDocuments"];
+    if (!validDocumentTypes.includes(documentType)) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid document type. Must be: companyDoc, managerId, or otherDocuments",
+      });
+    }
+
+    // Check if file was uploaded
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "No file uploaded",
+      });
+    }
+
+    // Create document object
+    const documentData = {
+      filename: req.file.key.split("/").pop(),
+      originalName: req.file.originalname,
+      s3Key: req.file.key,
+      s3Url: req.file.location,
+      fileSize: req.file.size,
+      mimeType: req.file.mimetype,
+      uploadedAt: new Date(),
+      uploadedBy: req.user ? req.user._id : null,
+    };
+
+    // Handle different document types
+    if (documentType === "companyDoc") {
+      // If there's an existing company document, delete it from S3
+      if (customer.documents?.companyDoc?.s3Key) {
+        try {
+          await deleteFromS3(customer.documents.companyDoc.s3Key);
+        } catch (error) {
+          console.error("Error deleting old company document:", error);
+        }
+      }
+
+      // Initialize documents object if it doesn't exist
+      if (!customer.documents) {
+        customer.documents = {};
+      }
+
+      customer.documents.companyDoc = documentData;
+    } else if (documentType === "managerId") {
+      // If there's an existing manager ID document, delete it from S3
+      if (customer.documents?.managerId?.s3Key) {
+        try {
+          await deleteFromS3(customer.documents.managerId.s3Key);
+        } catch (error) {
+          console.error("Error deleting old manager ID document:", error);
+        }
+      }
+
+      // Initialize documents object if it doesn't exist
+      if (!customer.documents) {
+        customer.documents = {};
+      }
+
+      customer.documents.managerId = documentData;
+    } else if (documentType === "otherDocuments") {
+      // Initialize documents object and otherDocuments array if they don't exist
+      if (!customer.documents) {
+        customer.documents = { otherDocuments: [] };
+      }
+      if (!customer.documents.otherDocuments) {
+        customer.documents.otherDocuments = [];
+      }
+
+      customer.documents.otherDocuments.push(documentData);
+    }
+
+    // Save customer with new document
+    await customer.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Document uploaded successfully",
+      document: documentData,
+    });
+  } catch (error) {
+    console.error("Error uploading customer document:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error uploading document",
+      error: error.message,
+    });
+  }
+};
+
+// Get customer documents with presigned URLs
+exports.getCustomerDocuments = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+
+    const customer = await Customer.findOne({
+      CardCode: customerId,
+    })
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found",
+      });
+    }
+
+    const documents = {
+      companyDoc: null,
+      managerId: null,
+      otherDocuments: [],
+    };
+
+    console.log(customer)
+
+    if (customer.documents) {
+      // Generate presigned URLs for company document
+      if (customer.documents.companyDoc) {
+        console.log(
+          `Generating presigned URL for company document: ${customer.documents.companyDoc.s3Key}`
+        );
+        try {
+          const presignedUrl = await generatePresignedUrl(
+            customer.documents.companyDoc.s3Key
+          );
+          documents.companyDoc = {
+            ...customer.documents.companyDoc.toObject(),
+            presignedUrl,
+          };
+        } catch (error) {
+          console.error(
+            "Error generating presigned URL for company doc:",
+            error
+          );
+          documents.companyDoc = customer.documents.companyDoc.toObject();
+        }
+      }
+
+      // Generate presigned URLs for manager ID document
+      if (customer.documents.managerId) {
+        try {
+          const presignedUrl = await generatePresignedUrl(
+            customer.documents.managerId.s3Key
+          );
+          documents.managerId = {
+            ...customer.documents.managerId.toObject(),
+            presignedUrl,
+          };
+        } catch (error) {
+          console.error(
+            "Error generating presigned URL for manager ID:",
+            error
+          );
+          documents.managerId = customer.documents.managerId.toObject();
+        }
+      }
+
+      // Generate presigned URLs for other documents
+      if (
+        customer.documents.otherDocuments &&
+        customer.documents.otherDocuments.length > 0
+      ) {
+        for (const doc of customer.documents.otherDocuments) {
+          try {
+            const presignedUrl = await generatePresignedUrl(doc.s3Key);
+            documents.otherDocuments.push({
+              ...doc.toObject(),
+              presignedUrl,
+            });
+          } catch (error) {
+            console.error(
+              "Error generating presigned URL for other document:",
+              error
+            );
+            documents.otherDocuments.push(doc.toObject());
+          }
+        }
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      documents,
+    });
+  } catch (error) {
+    console.error("Error getting customer documents:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error retrieving documents",
+      error: error.message,
+    });
+  }
+};
+
+// Delete specific document
+exports.deleteCustomerDocument = async (req, res) => {
+  try {
+    const { customerId, documentType } = req.params;
+    const { documentId } = req.query; // For other documents array
+
+    const customer = await Customer.findOne(
+      { CardCode: customerId },
+      { documents: 1 }
+    );
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found",
+      });
+    }
+
+    let documentToDelete = null;
+    let updateOperation = {};
+
+    if (documentType === "companyDoc") {
+      if (customer.documents?.companyDoc) {
+        documentToDelete = customer.documents.companyDoc;
+        updateOperation = { $unset: { "documents.companyDoc": 1 } };
+      }
+    } else if (documentType === "managerId") {
+      if (customer.documents?.managerId) {
+        documentToDelete = customer.documents.managerId;
+        updateOperation = { $unset: { "documents.managerId": 1 } };
+      }
+    } else if (documentType === "otherDocuments" && documentId) {
+      if (customer.documents?.otherDocuments) {
+        const docIndex = customer.documents.otherDocuments.findIndex(
+          (doc) => doc._id.toString() === documentId
+        );
+        if (docIndex !== -1) {
+          documentToDelete = customer.documents.otherDocuments[docIndex];
+          updateOperation = {
+            $pull: {
+              "documents.otherDocuments": { _id: documentId },
+            },
+          };
+        }
+      }
+    }
+
+    if (!documentToDelete) {
+      return res.status(404).json({
+        success: false,
+        message: "Document not found",
+      });
+    }
+
+    // Delete from S3
+    try {
+      await deleteFromS3(documentToDelete.s3Key);
+    } catch (s3Error) {
+      console.error("Error deleting from S3:", s3Error);
+      // Continue with database deletion even if S3 deletion fails
+    }
+
+    // Update database
+    await Customer.findByIdAndUpdate(customerId, updateOperation);
+
+    res.status(200).json({
+      success: true,
+      message: "Document deleted successfully",
+    });
+  } catch (error) {
+    console.error("Error deleting customer document:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error deleting document",
+      error: error.message,
+    });
+  }
+};
+
+// Get document download URL
+exports.getDocumentDownloadUrl = async (req, res) => {
+  try {
+    const { customerId, documentType } = req.params;
+    const { documentId } = req.query; // For other documents array
+
+    const customer = await Customer.findOne(
+      { CardCode: customerId },
+      { documents: 1 }
+    );
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found",
+      });
+    }
+
+    let document = null;
+
+    if (documentType === "companyDoc") {
+      document = customer.documents?.companyDoc;
+    } else if (documentType === "managerId") {
+      document = customer.documents?.managerId;
+    } else if (documentType === "otherDocuments" && documentId) {
+      if (customer.documents?.otherDocuments) {
+        document = customer.documents.otherDocuments.find(
+          (doc) => doc._id.toString() === documentId
+        );
+      }
+    }
+
+    if (!document) {
+      return res.status(404).json({
+        success: false,
+        message: "Document not found",
+      });
+    }
+
+    // Generate presigned URL valid for 1 hour
+    const presignedUrl = await generatePresignedUrl(document.s3Key, 3600);
+
+    res.status(200).json({
+      success: true,
+      downloadUrl: presignedUrl,
+      document: {
+        filename: document.filename,
+        originalName: document.originalName,
+        fileSize: document.fileSize,
+        mimeType: document.mimeType,
+        uploadedAt: document.uploadedAt,
+      },
+    });
+  } catch (error) {
+    console.error("Error generating document download URL:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error generating download URL",
+      error: error.message,
     });
   }
 };

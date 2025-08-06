@@ -11,7 +11,7 @@ const path = require("path");
 const s3Client = new S3Client({
   region: process.env.AWS_REGION || "eu-north-1",
   credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY || "AKIA3CFVLIWQYTNLM5NG",
+    accessKeyId: process.env.AWS_ACCESS_KEY,
     secretAccessKey: process.env.AWS_SECRET_KEY,
   },
 });

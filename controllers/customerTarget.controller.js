@@ -775,11 +775,141 @@ exports.createCustomerTarget = async (req, res) => {
   }
 };
 
+exports.migrateTargetsTo2025 = async (req, res) => {
+  try {
+   
+    // Find all targets that have 2024 dates
+    const targetsToMigrate = await CustomerTarget.find({
+      $or: [
+        {
+          currentPeriodStart: {
+            $gte: new Date("2024-01-01"),
+            $lt: new Date("2025-01-01"),
+          },
+        },
+        {
+          currentPeriodEnd: {
+            $gte: new Date("2024-01-01"),
+            $lt: new Date("2025-01-01"),
+          },
+        },
+        {
+          deadline: {
+            $gte: new Date("2024-01-01"),
+            $lt: new Date("2025-01-01"),
+          },
+        },
+      ],
+    });
+
+    console.log(`Found ${targetsToMigrate.length} targets to migrate from 2024 to 2025`);
+
+    let migratedCount = 0;
+    const migrationResults = [];
+
+    for (const target of targetsToMigrate) {
+      try {
+        const originalData = {
+          id: target._id,
+          cardName: target.cardName,
+          originalPeriodStart: target.currentPeriodStart,
+          originalPeriodEnd: target.currentPeriodEnd,
+          originalDeadline: target.deadline,
+        };
+
+        // Migrate dates from 2024 to 2025
+        if (target.currentPeriodStart) {
+          const originalStart = new Date(target.currentPeriodStart);
+          if (originalStart.getFullYear() === 2024) {
+            target.currentPeriodStart = new Date(
+              2025,
+              originalStart.getMonth(),
+              originalStart.getDate()
+            );
+          }
+        }
+
+        if (target.currentPeriodEnd) {
+          const originalEnd = new Date(target.currentPeriodEnd);
+          if (originalEnd.getFullYear() === 2024) {
+            target.currentPeriodEnd = new Date(
+              2025,
+              originalEnd.getMonth(),
+              originalEnd.getDate()
+            );
+          }
+        }
+
+        if (target.deadline) {
+          const originalDeadline = new Date(target.deadline);
+          if (originalDeadline.getFullYear() === 2024) {
+            target.deadline = new Date(
+              2025,
+              originalDeadline.getMonth(),
+              originalDeadline.getDate()
+            );
+          }
+        }
+
+        // Reset achievement data since we're moving to a new period
+        target.achievedAmount = 0;
+        target.achievementRate = 0;
+        target.orders = [];
+
+        // Ensure status is active for migrated targets
+        if (target.status === 'expired') {
+          target.status = 'active';
+        }
+
+        await target.save();
+        migratedCount++;
+
+        migrationResults.push({
+          ...originalData,
+          newPeriodStart: target.currentPeriodStart,
+          newPeriodEnd: target.currentPeriodEnd,
+          newDeadline: target.deadline,
+          status: 'migrated',
+        });
+
+        console.log(`Migrated target ${target._id} for ${target.cardName}`);
+      } catch (error) {
+        console.error(`Error migrating target ${target._id}:`, error);
+        migrationResults.push({
+          id: target._id,
+          cardName: target.cardName,
+          status: 'error',
+          error: error.message,
+        });
+      }
+    }
+
+    console.log(`Migration completed. Successfully migrated ${migratedCount} targets.`);
+
+    return res.status(200).json({
+      success: true,
+      message: `Successfully migrated ${migratedCount} targets from 2024 to 2025`,
+      data: {
+        totalFound: targetsToMigrate.length,
+        totalMigrated: migratedCount,
+        results: migrationResults,
+      },
+    });
+  } catch (error) {
+    console.error("Error in target migration:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error migrating targets to 2025",
+      error: error.message,
+    });
+  }
+};
+
 // Get all customer targets with filtering and pagination
 exports.getAllCustomerTargets = async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
-    const limit = 200;
+    const limit = 1000;
     const skip = (page - 1) * limit;
 
     // Base query
@@ -796,15 +926,8 @@ exports.getAllCustomerTargets = async (req, res) => {
       query.cardCode = req.query.cardCode;
     }
 
-    // Filter by status
-    if (req.query.status) {
-      query.status = req.query.status;
-    }
 
-    // Filter by period type
-    if (req.query.period) {
-      query.period = req.query.period;
-    }
+  
 
     // Restrict to agent's own targets if user is sales agent
     if (req.user.role === "sales_agent") {
