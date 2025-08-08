@@ -16,6 +16,7 @@ const jobLogSchema = new mongoose.Schema(
         "MANUAL_SYNC",
         "INVOICE_SYNC",
         "PAYMENT_SYNC",
+        "ORDER_SYNC",
         "CREDITNOTE_SYNC",
         "RETURN_SYNC",
         "PURCHASE_SYNC",
