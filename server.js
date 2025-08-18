@@ -20,6 +20,7 @@ const callDataRoutes = require("./routes/callData.routes");
 const dashboardRoutes = require("./routes/dashboard.routes");
 const customerJourneyRoutes = require("./routes/journey.routes");
 const recommendationRoutes = require("./routes/recommendations.routes");
+// const superChatRoutes = require("./routes/superChat.routes"); // REMOVED - conflicts with new routes
 const prestashopSyncService = require("./services/prestashopSyncService");
 const customerTargetRoutes = require("./routes/customerTarget.routes");
 const salesManagerRoutes = require("./routes/salesManager.routes");
@@ -43,7 +44,8 @@ const { linkDocumentsToAgents } = require("./migrateAgentReferences");
 const { syncFromFeb21 } = require("./jobs/hubspotJob");
 const { fetchCallsFromMay2UntilToday } = require("./jobs/mayScript");
 const targetScheduler = require("./services/targetScheduler");
-require('./jobs/updateRestaurantAnalysis'); 
+require('./jobs/updateRestaurantAnalysis');
+const SuperChatCronService = require('./services/superChatCronService'); 
 
 // Initialize express app
 const app = express();
@@ -120,6 +122,17 @@ mongoose
     } catch (error) {
       console.error("❌ Error initializing target scheduler:", error);
     }
+
+    // 📅 Initialize SuperChat cron jobs
+    try {
+      const superChatCronService = new SuperChatCronService();
+      superChatCronService.startDailySync();
+      superChatCronService.startHourlyIncrementalSync();
+      superChatCronService.startAllJobs();
+      console.log("📅 SuperChat cron jobs initialized and running");
+    } catch (error) {
+      console.error("❌ Error initializing SuperChat cron jobs:", error);
+    }
   })
   .catch((err) => {
     console.error("❌ MongoDB connection error:", err);
@@ -141,6 +154,17 @@ app.use("/api/restaurant-matcher", restaurantMatcherRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/customer-journey", customerJourneyRoutes);
 app.use("/api/recommendations", recommendationRoutes);
+// SuperChat Conversation Management routes
+const superChatConversationRoutes = require("./routes/superChatConversation.routes");
+app.use("/api/super-chat", superChatConversationRoutes);
+
+// SuperChat Batch Processing routes
+const superChatBatchRoutes = require("./routes/superChatBatch.routes");
+app.use("/api/super-chat-batch", superChatBatchRoutes);
+
+// SuperChat Analytics routes
+const superChatAnalyticsRoutes = require("./routes/superChatAnalytics.routes");
+app.use("/api/super-chat-analytics", superChatAnalyticsRoutes);
 app.use("/api/customer-targets", customerTargetRoutes);
 app.use("/api/sales-manager", salesManagerRoutes);
 app.use("/api/scraper", scraperRoutes);
