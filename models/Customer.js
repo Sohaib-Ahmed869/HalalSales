@@ -35,6 +35,60 @@ const DocumentSchema = new Schema({
   },
 });
 
+// NEW: Address sub-schema for multiple addresses
+const AddressSchema = new Schema({
+  addressName: {
+    type: String,
+    required: true,
+  },
+  street: {
+    type: String,
+    trim: true,
+  },
+  zipCode: {
+    type: String,
+    trim: true,
+  },
+  city: {
+    type: String,
+    trim: true,
+  },
+  country: {
+    type: String,
+    trim: true,
+    default: "France",
+  },
+  addressType: {
+    type: String,
+    enum: ["bo_BillTo", "bo_ShipTo"],
+    required: true,
+  },
+  isDefault: {
+    type: Boolean,
+    default: false,
+  },
+  // Additional SAP fields
+  block: String,
+  county: String,
+  state: String,
+  buildingFloorRoom: String,
+  addressName2: String,
+  addressName3: String,
+  streetNo: String,
+  rowNum: Number,
+  // SAP sync tracking
+  sapSynced: {
+    type: Boolean,
+    default: false,
+  },
+  lastSyncDate: Date,
+  createDate: Date,
+  createTime: String,
+}, {
+  timestamps: true
+});
+
+
 const CustomerSchema = new Schema({
   // ... (all existing fields remain the same)
   CardName: {
@@ -188,6 +242,9 @@ const CustomerSchema = new Schema({
       message: "Must be a valid UberEats URL",
     },
   },
+  // NEW: Multiple addresses array
+  addresses: [AddressSchema],
+
   lastRestaurantAnalysis: Date,
 
   // NEW DOCUMENT FIELDS

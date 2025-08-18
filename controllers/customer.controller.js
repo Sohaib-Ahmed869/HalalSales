@@ -6298,7 +6298,7 @@ exports.getCustomerDocuments = async (req, res) => {
 
     const documents = {
       companyDoc: null,
-      managerId: null,
+      managerId: null,  
       otherDocuments: [],
     };
 
