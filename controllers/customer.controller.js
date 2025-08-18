@@ -591,7 +591,7 @@ exports.mapHubspotEmailsAndPhones = async (req, res) => {
             (hubspotContact.firstName.toLowerCase() ===
               (customer.firstName || "").toLowerCase() &&
               hubspotContact.lastName.toLowerCase() ===
-                (customer.lastName || "").toLowerCase())
+              (customer.lastName || "").toLowerCase())
           ) {
             matchedCustomer = customer;
             matchType = "name";
@@ -1038,7 +1038,7 @@ exports.fastHubspotImportWithAgents = async (req, res) => {
           if (
             contact.assignedTo &&
             existingCustomer.assignedTo?.toString() !==
-              contact.assignedTo.toString()
+            contact.assignedTo.toString()
           ) {
             updateOperations.push({
               updateOne: {
@@ -1204,8 +1204,7 @@ exports.comprehensiveCustomerUpdate = async (req, res) => {
         .filter((customer) => customer !== null);
 
       console.log(
-        `Processed ${customersData.length} records in ${
-          Date.now() - startTime
+        `Processed ${customersData.length} records in ${Date.now() - startTime
         }ms`
       );
     } else {
@@ -1238,8 +1237,7 @@ exports.comprehensiveCustomerUpdate = async (req, res) => {
     ).lean();
 
     console.log(
-      `Found ${existingCustomers.length} existing customers in ${
-        Date.now() - startTime
+      `Found ${existingCustomers.length} existing customers in ${Date.now() - startTime
       }ms`
     );
 
@@ -2726,9 +2724,9 @@ const processHubspotExport = (filePath) => {
         // Handle additional emails if present
         const additionalEmails = row["Additional email addresses"]
           ? row["Additional email addresses"]
-              .split(/[,;]/)
-              .map((email) => email.trim())
-              .filter(Boolean)
+            .split(/[,;]/)
+            .map((email) => email.trim())
+            .filter(Boolean)
           : [];
 
         // Marketing status mapping
@@ -4042,9 +4040,9 @@ exports.getCustomerCallData = async (req, res) => {
     stats.answerRate =
       stats.totalCalls > 0
         ? (
-            ((stats.totalCalls - stats.missedCalls) / stats.totalCalls) *
-            100
-          ).toFixed(1)
+          ((stats.totalCalls - stats.missedCalls) / stats.totalCalls) *
+          100
+        ).toFixed(1)
         : 0;
 
     return res.status(200).json({
@@ -4168,7 +4166,7 @@ exports.mergeCustomersWithSameEmail = async (req, res) => {
           // Keep the active status if either customer is active
           status:
             primaryCustomer.status === "active" ||
-            secondaryCustomer.status === "active"
+              secondaryCustomer.status === "active"
               ? "active"
               : primaryCustomer.status,
 
@@ -4183,9 +4181,8 @@ exports.mergeCustomersWithSameEmail = async (req, res) => {
         // Here we'll keep it but mark it as inactive and add a note
         await Customer.findByIdAndUpdate(secondaryCustomer._id, {
           status: "inactive",
-          notes: `Merged with ${primaryCustomer.CardCode} (${
-            primaryCustomer.CardName
-          }) on ${new Date().toISOString()}. ${secondaryCustomer.notes || ""}`,
+          notes: `Merged with ${primaryCustomer.CardCode} (${primaryCustomer.CardName
+            }) on ${new Date().toISOString()}. ${secondaryCustomer.notes || ""}`,
           mergedInto: primaryCustomer._id,
         });
 
@@ -4890,12 +4887,9 @@ exports.removeZeroValueAbandonedCarts = async (req, res) => {
     console.log("Sample zero-value carts to be deleted:");
     sampleCarts.forEach((cart, index) => {
       console.log(
-        `${index + 1}. CartID: ${cart.cartId}, Email: ${
-          cart.customerEmail
-        }, TotalInc: ${cart.totalIncludingTaxes}, TotalExc: ${
-          cart.totalExcludingTaxes
-        }, Products: ${cart.products?.length || 0}, Status: ${
-          cart.status
+        `${index + 1}. CartID: ${cart.cartId}, Email: ${cart.customerEmail
+        }, TotalInc: ${cart.totalIncludingTaxes}, TotalExc: ${cart.totalExcludingTaxes
+        }, Products: ${cart.products?.length || 0}, Status: ${cart.status
         }, Abandoned: ${cart.isAbandoned}`
       );
     });
@@ -5128,10 +5122,8 @@ exports.removeCustomersWithSCardCode = async (req, res) => {
     console.log("Sample customers with 'S' CardCode to be deleted:");
     sampleCustomers.forEach((customer, index) => {
       console.log(
-        `${index + 1}. CardCode: ${customer.CardCode}, Name: ${
-          customer.CardName
-        }, Email: ${customer.Email}, Status: ${customer.status}, Type: ${
-          customer.customerType
+        `${index + 1}. CardCode: ${customer.CardCode}, Name: ${customer.CardName
+        }, Email: ${customer.Email}, Status: ${customer.status}, Type: ${customer.customerType
         }`
       );
     });
@@ -5314,8 +5306,7 @@ exports.comprehensiveCustomerUpdateWithDelivery = async (req, res) => {
         .filter((customer) => customer !== null);
 
       console.log(
-        `Processed ${customersData.length} records in ${
-          Date.now() - startTime
+        `Processed ${customersData.length} records in ${Date.now() - startTime
         }ms`
       );
     } else {
@@ -5349,8 +5340,7 @@ exports.comprehensiveCustomerUpdateWithDelivery = async (req, res) => {
     ).lean();
 
     console.log(
-      `Found ${existingCustomers.length} existing customers in ${
-        Date.now() - startTime
+      `Found ${existingCustomers.length} existing customers in ${Date.now() - startTime
       }ms`
     );
 
@@ -6455,7 +6445,10 @@ exports.deleteCustomerDocument = async (req, res) => {
     }
 
     // Update database
-    await Customer.findByIdAndUpdate(customerId, updateOperation);
+    await Customer.updateOne(
+      { CardCode: customerId },
+      updateOperation
+    );
 
     res.status(200).json({
       success: true,

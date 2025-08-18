@@ -37,6 +37,9 @@ const SalesManagerDashboardRoutes = require("./routes/salesManagerDashboardRoute
 const notificationRoutes = require("./routes/notification.routes");
 const restaurantMatcherRoutes = require("./routes/restaurantMatcher.routes");
 const jobLogRoutes = require("./routes/jobLog.routes");
+const postalCodeScrapingRoutes = require("./routes/postalCodeScraping.routes");
+const chatbotRoutes = require('./routes/chatbot.routes');
+const productAnalyticsRoutes = require('./routes/productAnalytics.routes')
 const config = require("./services/config");
 const desktimeJob = require("./jobs/desktimeJob");
 const { linkDocumentsToAgents } = require("./migrateAgentReferences");
@@ -156,6 +159,9 @@ app.use("/api/carts", CartRoutes); // Cart routes
 app.use("/api/sales-manager-dashboard", SalesManagerDashboardRoutes); // Sales manager dashboard routes
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/jobs", jobLogRoutes); // Job logs routes
+app.use("/api/postal-code-scraping", postalCodeScrapingRoutes); // Postal code scraping routes
+app.use('/api/chatbot', chatbotRoutes);
+app.use('/api/product-analytics', productAnalyticsRoutes);  
 
 // Health check route
 app.get("/health", (req, res) => {

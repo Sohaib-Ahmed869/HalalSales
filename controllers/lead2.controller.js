@@ -9,9 +9,18 @@ const path = require("path");
 const XLSX = require("xlsx");
 
 // Get all leads with filtering
+// Get all leads with filtering
 exports.getLeads = async (req, res) => {
   try {
-    const { status, tags, assignedTo, search } = req.query;
+    const {
+      status,
+      tags,
+      assignedTo,
+      search,
+      followUpStartDate,  // ADD THIS
+      followUpEndDate     // ADD THIS
+    } = req.query;
+
     const query = {};
 
     // Apply filters
@@ -43,6 +52,20 @@ exports.getLeads = async (req, res) => {
       ];
     }
 
+    // NEW: Add follow-up date range filter
+    if (followUpStartDate || followUpEndDate) {
+      query.nextFollowUp = {};
+      if (followUpStartDate) {
+        query.nextFollowUp.$gte = new Date(followUpStartDate);
+      }
+      if (followUpEndDate) {
+        // Include the end of the day
+        const endOfDay = new Date(followUpEndDate);
+        endOfDay.setHours(23, 59, 59, 999);
+        query.nextFollowUp.$lte = endOfDay;
+      }
+    }
+
     const leads = await Lead.find(query)
       .populate("assignedTo", "firstName lastName email")
       .populate("tasks")
@@ -63,13 +86,24 @@ exports.getLeads = async (req, res) => {
 };
 
 // Get paginated leads
+// Get paginated leads
 exports.getLeadsPaginated = async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
     const skip = (page - 1) * limit;
 
-    const { status, tags, assignedTo, search, sortBy, sortOrder } = req.query;
+    const {
+      status,
+      tags,
+      assignedTo,
+      search,
+      sortBy,
+      sortOrder,
+      followUpStartDate,  // ADD THIS
+      followUpEndDate     // ADD THIS
+    } = req.query;
+
     const query = {};
 
     // Apply filters
@@ -97,6 +131,20 @@ exports.getLeadsPaginated = async (req, res) => {
         { phoneNumber: { $regex: search, $options: "i" } },
         { notes: { $regex: search, $options: "i" } },
       ];
+    }
+
+    // NEW: Add follow-up date range filter
+    if (followUpStartDate || followUpEndDate) {
+      query.nextFollowUp = {};
+      if (followUpStartDate) {
+        query.nextFollowUp.$gte = new Date(followUpStartDate);
+      }
+      if (followUpEndDate) {
+        // Include the end of the day
+        const endOfDay = new Date(followUpEndDate);
+        endOfDay.setHours(23, 59, 59, 999);
+        query.nextFollowUp.$lte = endOfDay;
+      }
     }
 
     // Sorting
@@ -433,6 +481,8 @@ exports.assignLead = async (req, res) => {
   }
 };
 
+
+
 // Bulk assign leads
 exports.bulkAssignLeads = async (req, res) => {
   try {
@@ -688,9 +738,8 @@ exports.convertLeadToCustomer = async (req, res) => {
       assignedTo: lead.assignedTo,
       customerType: "non-sap", // Will be updated to "sap" after successful sync
       status: "active",
-      notes: `Converted from lead on ${new Date().toISOString()}. ${
-        lead.notes || ""
-      }`,
+      notes: `Converted from lead on ${new Date().toISOString()}. ${lead.notes || ""
+        }`,
       createdAt: new Date(),
       updatedAt: new Date(),
       SyncedWithSAP: false,
@@ -942,9 +991,8 @@ exports.addLeadNote = async (req, res) => {
     }
 
     // Append note with timestamp and user info
-    const noteWithMetadata = `${new Date().toISOString()} - ${
-      req.user.firstName
-    } ${req.user.lastName}: ${note.trim()}`;
+    const noteWithMetadata = `${new Date().toISOString()} - ${req.user.firstName
+      } ${req.user.lastName}: ${note.trim()}`;
     const updatedNotes = lead.notes
       ? `${lead.notes}\n\n${noteWithMetadata}`
       : noteWithMetadata;
@@ -991,16 +1039,7 @@ exports.setNextFollowUp = async (req, res) => {
       query.assignedTo = req.user._id;
     }
 
-    const lead = await Lead.findOneAndUpdate(
-      query,
-      {
-        nextFollowUp: new Date(nextFollowUp),
-        updatedAt: new Date(),
-      },
-      { new: true }
-    )
-      .populate("assignedTo", "firstName lastName email")
-      .populate("tasks");
+    const lead = await Lead.findOne(query);
 
     if (!lead) {
       return res.status(404).json({
@@ -1009,10 +1048,64 @@ exports.setNextFollowUp = async (req, res) => {
       });
     }
 
+    // Update lead with follow-up date
+    lead.nextFollowUp = new Date(nextFollowUp);
+    lead.updatedAt = new Date();
+    await lead.save();
+
+    // Create a follow-up task if lead is assigned to someone
+    let createdTask = null;
+    if (lead.assignedTo) {
+      const Task = require("../models/Task");
+      const NotificationService = require("../utils/notificationService");
+
+      const followUpTask = new Task({
+        leadId: lead._id,
+        title: `Follow up with ${lead.fullName}`,
+        description: `Follow up with lead: ${lead.fullName}${lead.company ? ` from ${lead.company}` : ''}${lead.email ? ` (${lead.email})` : ''}`,
+        dueDate: new Date(nextFollowUp),
+        priority: "medium",
+        type: "follow-up",
+        status: "pending",
+        assignedTo: lead.assignedTo,
+        createdBy: req.user._id,
+      });
+
+      await followUpTask.save();
+
+      // Add task to lead's tasks array
+      await Lead.findByIdAndUpdate(lead._id, {
+        $push: { tasks: followUpTask._id }
+      });
+
+      // Create notification if task is assigned to someone other than creator
+      if (followUpTask.assignedTo.toString() !== req.user._id.toString()) {
+        await NotificationService.createTaskAssignedNotification(
+          followUpTask,
+          req.user._id
+        );
+      }
+
+      createdTask = await Task.findById(followUpTask._id)
+        .populate("assignedTo", "firstName lastName email role")
+        .populate("createdBy", "firstName lastName email role")
+        .populate("leadId", "fullName email company");
+    }
+
+    // Get updated lead
+    const updatedLead = await Lead.findById(lead._id)
+      .populate("assignedTo", "firstName lastName email")
+      .populate("tasks");
+
     res.json({
       success: true,
-      message: "Follow-up date set successfully",
-      data: lead,
+      message: createdTask
+        ? "Follow-up date set and task created successfully"
+        : "Follow-up date set successfully",
+      data: {
+        lead: updatedLead,
+        task: createdTask
+      },
     });
   } catch (error) {
     console.error("Error setting follow-up date:", error);
@@ -1116,7 +1209,7 @@ exports.importLeads = async (req, res) => {
     );
 
     if (validLeads.length === 0) {
-      
+
       return res.status(400).json({
         success: false,
         message: "No valid lead data found in the file",
