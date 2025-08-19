@@ -26,6 +26,12 @@ router.put("/profile", auth, updateLastLogin, authController.updateProfile);
 // Change password
 router.put("/change-password", auth, authController.changePassword);
 
+// Forgot password - send reset email (no auth required)
+router.post("/forgot-password", authController.forgotPassword);
+
+// Reset password with token (no auth required)
+router.post("/reset-password", authController.resetPasswordWithToken);
+
 // Get users by role (admin and sales manager only)
 router.get(
   "/users",

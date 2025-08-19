@@ -204,6 +204,16 @@ CustomerSchema.pre("save", function (next) {
   next();
 });
 
+// Add compound indexes for common query patterns (PERFORMANCE BOOST)
+CustomerSchema.index({ status: 1, CardName: 1 }); // status + name sorting
+CustomerSchema.index({ assignedTo: 1, status: 1 }); // assigned agent filters
+CustomerSchema.index({ CardCode: 1 }); // SAP customer filtering
+CustomerSchema.index({ Email: 1 }); // email lookups
+CustomerSchema.index({ createdAt: -1 }); // date sorting
+CustomerSchema.index({ CardName: 1 }); // name sorting (most common)
+CustomerSchema.index({ status: 1, createdAt: -1 }); // status + date filters
+CustomerSchema.index({ assignedTo: 1, CardName: 1 }); // assigned agent + name sorting
+
 // Add text index for searching
 CustomerSchema.index({
   CardName: "text",

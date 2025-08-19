@@ -147,6 +147,7 @@ app.use("/api/prestashop", prestashopRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/items", itemRoutes);
 app.use("/api/sales-orders", salesOrderRoutes);
+app.use("/api/translation", require('./routes/translation.routes'));
 app.use("/api/invoices", invoiceRoutes);
 app.use("/api/desktime", desktimeRoutes);
 app.use("/api/call-data", callDataRoutes);
@@ -164,7 +165,9 @@ app.use("/api/super-chat-batch", superChatBatchRoutes);
 
 // SuperChat Analytics routes
 const superChatAnalyticsRoutes = require("./routes/superChatAnalytics.routes");
-app.use("/api/super-chat-analytics", superChatAnalyticsRoutes);
+app.use("/api/super-chat-analytics", require('./routes/superChatFullAnalytics.routes'));
+// Legacy analytics routes (keep for backward compatibility if needed)
+// app.use("/api/super-chat-analytics-old", superChatAnalyticsRoutes);
 app.use("/api/customer-targets", customerTargetRoutes);
 app.use("/api/sales-manager", salesManagerRoutes);
 app.use("/api/scraper", scraperRoutes);

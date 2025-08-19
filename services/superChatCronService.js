@@ -1,9 +1,11 @@
 const cron = require('node-cron');
 const SuperChatBatchService = require('./superChatBatchService');
+const superChatFullSyncService = require('./superChatFullSyncService');
 
 class SuperChatCronService {
   constructor() {
     this.batchService = new SuperChatBatchService();
+    this.fullSyncService = superChatFullSyncService;
     this.jobs = {};
   }
 
@@ -22,7 +24,7 @@ class SuperChatCronService {
         console.log('🌙 Starting scheduled daily SuperChat sync...');
         const startTime = new Date();
         
-        const result = await this.batchService.runFullBatchSync();
+        const result = await this.fullSyncService.runFullSync();
         
         const endTime = new Date();
         const duration = Math.round((endTime - startTime) / 1000);

@@ -117,6 +117,15 @@ const UserSchema = new Schema({
     type: Date,
     default: Date.now,
   },
+  // Password reset fields
+  resetPasswordToken: {
+    type: String,
+    sparse: true, // Allow multiple null values
+  },
+  resetPasswordExpires: {
+    type: Date,
+    sparse: true,
+  },
   // Reference to the user who created this user (admin or sales manager)
   createdBy: {
     type: Schema.Types.ObjectId,
