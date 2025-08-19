@@ -50,3 +50,4 @@ SuperChatSyncSchema.index({ syncStatus: 1, lastSyncAt: -1 });
 
 module.exports = mongoose.model('SuperChatSync', SuperChatSyncSchema);
 
+
