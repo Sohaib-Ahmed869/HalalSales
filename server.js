@@ -166,6 +166,10 @@ app.use("/api/super-chat-batch", superChatBatchRoutes);
 // SuperChat Analytics routes
 const superChatAnalyticsRoutes = require("./routes/superChatAnalytics.routes");
 app.use("/api/super-chat-analytics", require('./routes/superChatFullAnalytics.routes'));
+
+// SuperChat User Analytics routes
+app.use("/api/super-chat-user-analytics", require('./routes/superChatUserAnalytics.routes'));
+
 // Legacy analytics routes (keep for backward compatibility if needed)
 // app.use("/api/super-chat-analytics-old", superChatAnalyticsRoutes);
 app.use("/api/customer-targets", customerTargetRoutes);
