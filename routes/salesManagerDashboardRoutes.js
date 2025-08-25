@@ -8,6 +8,13 @@ const {auth} = require("../middleware/auth");
 router.use(auth);
 
 /**
+ * @route   GET /api/sales-manager-dashboard/analytics
+ * @desc    Get fast sales manager analytics for dashboard cards
+ * @access  Sales Manager, Admin
+ */
+router.get("/analytics", salesManagerDashboardController.getAnalytics);
+
+/**
  * @route   GET /api/sales-manager-dashboard
  * @desc    Get comprehensive sales manager dashboard data
  * @access  Sales Manager, Admin

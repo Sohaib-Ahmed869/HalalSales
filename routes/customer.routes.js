@@ -189,6 +189,30 @@ router.get(
   customerController.getCustomersPaginated
 );
 
+// FAST VERSION: Basic pagination without heavy metrics
+router.get(
+  "/paginated-fast",
+  auth,
+  updateLastLogin,
+  customerController.getCustomersPaginatedFast
+);
+
+// NEW: Customer Analytics - Fast overview metrics
+router.get(
+  "/analytics",
+  auth,
+  updateLastLogin,
+  customerController.getCustomerAnalytics
+);
+
+// NEW: Get metrics for specific customers (call separately)
+router.post(
+  "/metrics",
+  auth,
+  updateLastLogin,
+  customerController.getCustomerMetrics
+);
+
 router.post(
   "/check-add-new",
   upload.single("file"),

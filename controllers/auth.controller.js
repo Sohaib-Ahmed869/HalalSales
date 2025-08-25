@@ -470,6 +470,166 @@ exports.updateUser = async (req, res) => {
   }
 };
 
+// Forgot password - send reset email
+exports.forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
+
+    // Find user by email
+    const user = await User.findOne({ email, deactivated: false });
+    if (!user) {
+      // Don't reveal if email exists or not for security
+      return res.json({
+        message: "If this email exists in our system, you will receive a password reset link shortly.",
+      });
+    }
+
+    // Generate reset token
+    const crypto = require('crypto');
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    
+    // Hash the token before storing
+    const hashedToken = crypto.createHash('sha256').update(resetToken).digest('hex');
+    
+    // Set token and expiration (1 hour)
+    user.resetPasswordToken = hashedToken;
+    user.resetPasswordExpires = Date.now() + 60 * 60 * 1000; // 1 hour
+    await user.save();
+
+    // Send email with reset link
+    const emailService = require('../utils/emailService');
+    const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password?token=${resetToken}`;
+    
+    const emailHtml = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background-color: #007bff; color: white; text-align: center; padding: 20px; border-radius: 5px 5px 0 0; }
+          .content { background-color: #f9f9f9; padding: 30px; border-radius: 0 0 5px 5px; }
+          .button { display: inline-block; background-color: #007bff; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; margin: 20px 0; }
+          .footer { margin-top: 20px; font-size: 12px; color: #666; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1>Password Reset Request</h1>
+          </div>
+          <div class="content">
+            <p>Hello ${user.firstName} ${user.lastName},</p>
+            <p>We received a request to reset your password for your HalalSales account.</p>
+            <p>Click the button below to reset your password:</p>
+            <a href="${resetUrl}" class="button">Reset Password</a>
+            <p>Or copy and paste this link in your browser:</p>
+            <p style="word-break: break-all; background-color: #eee; padding: 10px; border-radius: 3px;">${resetUrl}</p>
+            <p><strong>This link will expire in 1 hour.</strong></p>
+            <p>If you didn't request this password reset, please ignore this email and your password will remain unchanged.</p>
+            <div class="footer">
+              <p>This is an automated email from HalalSales. Please do not reply to this email.</p>
+            </div>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    await emailService.sendEmail({
+      to: user.email,
+      subject: 'Password Reset Request - HalalSales',
+      text: `Hello ${user.firstName} ${user.lastName}, you requested a password reset. Please visit: ${resetUrl} (This link expires in 1 hour)`,
+      html: emailHtml
+    });
+
+    console.log(`Password reset email sent to ${user.email}`);
+
+    res.json({
+      message: "If this email exists in our system, you will receive a password reset link shortly.",
+    });
+
+  } catch (error) {
+    console.error("Forgot password error:", error);
+    
+    // Clear reset token on error
+    if (error.user) {
+      error.user.resetPasswordToken = undefined;
+      error.user.resetPasswordExpires = undefined;
+      await error.user.save();
+    }
+    
+    res.status(500).json({ 
+      message: "Error processing password reset request", 
+      error: error.message 
+    });
+  }
+};
+
+// Reset password with token
+exports.resetPasswordWithToken = async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+
+    if (!token || !newPassword) {
+      return res.status(400).json({ 
+        message: "Reset token and new password are required" 
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ 
+        message: "Password must be at least 6 characters long" 
+      });
+    }
+
+    // Hash the token to compare with stored hash
+    const crypto = require('crypto');
+    const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+
+    // Find user with valid token that hasn't expired
+    const user = await User.findOne({
+      resetPasswordToken: hashedToken,
+      resetPasswordExpires: { $gt: Date.now() },
+      deactivated: false
+    });
+
+    if (!user) {
+      return res.status(400).json({ 
+        message: "Invalid or expired reset token" 
+      });
+    }
+
+    // Hash new password
+    const bcrypt = require("bcryptjs");
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+    // Update password and clear reset fields
+    user.password = hashedPassword;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
+    await user.save();
+
+    console.log(`Password successfully reset for user: ${user.email}`);
+
+    res.json({ 
+      message: "Password has been reset successfully. You can now login with your new password." 
+    });
+
+  } catch (error) {
+    console.error("Reset password error:", error);
+    res.status(500).json({ 
+      message: "Error resetting password", 
+      error: error.message 
+    });
+  }
+};
+
 // Reset user password
 exports.resetPassword = async (req, res) => {
   try {

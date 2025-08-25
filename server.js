@@ -20,6 +20,7 @@ const callDataRoutes = require("./routes/callData.routes");
 const dashboardRoutes = require("./routes/dashboard.routes");
 const customerJourneyRoutes = require("./routes/journey.routes");
 const recommendationRoutes = require("./routes/recommendations.routes");
+// const superChatRoutes = require("./routes/superChat.routes"); // REMOVED - conflicts with new routes
 const prestashopSyncService = require("./services/prestashopSyncService");
 const customerTargetRoutes = require("./routes/customerTarget.routes");
 const salesManagerRoutes = require("./routes/salesManager.routes");
@@ -46,7 +47,8 @@ const { linkDocumentsToAgents } = require("./migrateAgentReferences");
 const { syncFromFeb21 } = require("./jobs/hubspotJob");
 const { fetchCallsFromMay2UntilToday } = require("./jobs/mayScript");
 const targetScheduler = require("./services/targetScheduler");
-require('./jobs/updateRestaurantAnalysis'); 
+require('./jobs/updateRestaurantAnalysis');
+const SuperChatCronService = require('./services/superChatCronService'); 
 
 // Initialize express app
 const app = express();
@@ -71,6 +73,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(
   cors({
     origin: [
+      "http://localhost:5174",
       "http://localhost:5173",
       "http://halalfoodsales.s3-website.eu-north-1.amazonaws.com",
       "https://sales.foodservices.live",
@@ -123,6 +126,17 @@ mongoose
     } catch (error) {
       console.error("❌ Error initializing target scheduler:", error);
     }
+
+    // 📅 Initialize SuperChat cron jobs
+    try {
+      const superChatCronService = new SuperChatCronService();
+      superChatCronService.startDailySync();
+      superChatCronService.startHourlyIncrementalSync();
+      superChatCronService.startAllJobs();
+      console.log("📅 SuperChat cron jobs initialized and running");
+    } catch (error) {
+      console.error("❌ Error initializing SuperChat cron jobs:", error);
+    }
   })
   .catch((err) => {
     console.error("❌ MongoDB connection error:", err);
@@ -137,6 +151,7 @@ app.use("/api/prestashop", prestashopRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/items", itemRoutes);
 app.use("/api/sales-orders", salesOrderRoutes);
+app.use("/api/translation", require('./routes/translation.routes'));
 app.use("/api/invoices", invoiceRoutes);
 app.use("/api/desktime", desktimeRoutes);
 app.use("/api/call-data", callDataRoutes);
@@ -144,6 +159,23 @@ app.use("/api/restaurant-matcher", restaurantMatcherRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/customer-journey", customerJourneyRoutes);
 app.use("/api/recommendations", recommendationRoutes);
+// SuperChat Conversation Management routes
+const superChatConversationRoutes = require("./routes/superChatConversation.routes");
+app.use("/api/super-chat", superChatConversationRoutes);
+
+// SuperChat Batch Processing routes
+const superChatBatchRoutes = require("./routes/superChatBatch.routes");
+app.use("/api/super-chat-batch", superChatBatchRoutes);
+
+// SuperChat Analytics routes
+const superChatAnalyticsRoutes = require("./routes/superChatAnalytics.routes");
+app.use("/api/super-chat-analytics", require('./routes/superChatFullAnalytics.routes'));
+
+// SuperChat User Analytics routes
+app.use("/api/super-chat-user-analytics", require('./routes/superChatUserAnalytics.routes'));
+
+// Legacy analytics routes (keep for backward compatibility if needed)
+// app.use("/api/super-chat-analytics-old", superChatAnalyticsRoutes);
 app.use("/api/customer-targets", customerTargetRoutes);
 app.use("/api/sales-manager", salesManagerRoutes);
 app.use("/api/scraper", scraperRoutes);
