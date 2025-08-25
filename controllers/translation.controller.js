@@ -217,6 +217,107 @@ const translationController = {
   },
 
   /**
+   * Translate pagination text specifically (preserves numbers and placeholders)
+   * POST /api/translation/translate-pagination
+   * Body: { texts: string[], targetLang: string, sourceLang?: string }
+   */
+  translatePaginationText: async (req, res) => {
+    try {
+      const { texts, targetLang, sourceLang = 'EN' } = req.body;
+
+      // Validation
+      if (!texts || !Array.isArray(texts) || texts.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'texts array is required and must not be empty',
+          data: { translations: [] }
+        });
+      }
+
+      if (!targetLang) {
+        return res.status(400).json({
+          success: false,
+          message: 'targetLang is required',
+          data: { translations: [] }
+        });
+      }
+
+      // Validate language code
+      if (!translationService.isValidLanguageCode(targetLang)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid target language code: ${targetLang}`,
+          data: { translations: [] }
+        });
+      }
+
+      // Skip translation if target is same as source
+      if (targetLang.toUpperCase() === sourceLang.toUpperCase()) {
+        return res.json({
+          success: true,
+          data: {
+            translations: texts.map(text => ({ text: text || '' })),
+            targetLanguage: targetLang,
+            sourceLanguage: sourceLang,
+            skipped: true,
+            reason: 'Target language same as source'
+          },
+          message: 'Translation skipped - same language'
+        });
+      }
+
+      // Use special pagination text translation
+      const result = await translationService.translatePaginationText(texts, targetLang, sourceLang);
+
+      // Determine response message based on result
+      let message = '';
+      let warning = null;
+      
+      if (result.fallback) {
+        if (result.errorCode === 429) {
+          message = `Rate limit exceeded. Showing pagination templates. Please try again in a few minutes.`;
+          warning = 'DeepL API rate limit hit. Consider upgrading your plan or try again later.';
+        } else if (result.reason === 'API key not configured') {
+          message = `API key not configured. Showing pagination templates.`;
+          warning = 'DeepL API key missing. Add DEEPL_API_KEY to environment variables.';
+        } else {
+          message = `Translation service unavailable. Showing pagination templates.`;
+          warning = result.error || 'Translation service temporarily unavailable';
+        }
+      } else if (result.cached) {
+        message = `Using cached pagination translations for ${targetLang}`;
+      } else {
+        message = `Successfully processed pagination texts for ${targetLang}`;
+      }
+
+      res.json({
+        success: true,
+        data: {
+          translations: result.translations,
+          originalTexts: texts,
+          targetLanguage: targetLang,
+          sourceLanguage: sourceLang,
+          usage: result.usage || { character_count: 0, character_limit: 0 },
+          cached: result.cached || false,
+          fallback: result.fallback || false,
+          reason: result.reason || null
+        },
+        message,
+        warning
+      });
+
+    } catch (error) {
+      console.error('Translate Pagination Text Error:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Pagination translation service error',
+        error: error.message,
+        data: { translations: [] }
+      });
+    }
+  },
+
+  /**
    * Get API usage statistics
    * GET /api/translation/usage
    */

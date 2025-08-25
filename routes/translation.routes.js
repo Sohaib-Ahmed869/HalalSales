@@ -20,11 +20,19 @@ router.get('/languages', auth, translationController.getSupportedLanguages);
 
 /**
  * @route   POST /api/translation/translate-ui
- * @desc    Translate UI text/labels only (NOT data)
+ * @desc    Translate UI text only (NOT data)
  * @access  Private (authenticated users)
  * @body    { texts: string[], targetLang: string, sourceLang?: string }
  */
 router.post('/translate-ui', auth, translationController.translateUIText);
+
+/**
+ * @route   POST /api/translation/translate-pagination
+ * @desc    Translate pagination text specifically (preserves numbers and placeholders)
+ * @access  Private (authenticated users)
+ * @body    { texts: string[], targetLang: string, sourceLang?: string }
+ */
+router.post('/translate-pagination', auth, translationController.translatePaginationText);
 
 /**
  * @route   POST /api/translation/translate
