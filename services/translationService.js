@@ -259,6 +259,15 @@ class TranslationService {
         };
       }
 
+      // Check if any of the texts are pagination-related
+      const hasPaginationText = uiOnlyTexts.some(text => this.isPaginationText(text));
+      
+      if (hasPaginationText) {
+        console.log('🔢 Detected pagination text, using special handling');
+        // Use pagination-aware translation for UI texts that contain pagination
+        return await this.translatePaginationText(uiTexts, targetLang, sourceLang);
+      }
+
       const result = await this.translateText(uiOnlyTexts, targetLang, sourceLang);
       
       // Map filtered results back to original array
@@ -402,6 +411,275 @@ class TranslationService {
   isValidLanguageCode(langCode) {
     const supportedCodes = ['EN', 'FR', 'ES', 'DE', 'IT', 'PT', 'RU', 'JA', 'ZH', 'AR', 'NL', 'PL', 'SV', 'DA', 'NO', 'FI'];
     return supportedCodes.includes(langCode.toUpperCase());
+  }
+
+  /**
+   * Special handling for pagination text to preserve numbers and placeholders
+   * This ensures pagination text always returns English templates with placeholders
+   */
+  async translatePaginationText(text, targetLang, sourceLang = 'EN') {
+    try {
+      // For pagination text, we want to preserve numbers and return English templates
+      // This prevents issues like "10 per page" becoming "nombre de PLACEMENTS per page"
+      
+      if (targetLang.toUpperCase() === 'EN') {
+        // If target is English, return the original text
+        return {
+          success: true,
+          translations: Array.isArray(text) 
+            ? text.map(t => ({ text: t || '' }))
+            : [{ text: text || '' }],
+          originalText: text,
+          targetLanguage: targetLang,
+          sourceLanguage: sourceLang,
+          cached: false,
+          fallback: false,
+          reason: 'Pagination text kept in English template format'
+        };
+      }
+
+      // For non-English targets, we need to be careful about what we translate
+      // We'll identify pagination patterns and handle them specially
+      const textArray = Array.isArray(text) ? text : [text];
+      
+      const processedTexts = textArray.map(t => {
+        if (!t || typeof t !== 'string') return t;
+        
+        // Check if this looks like pagination text
+        const isPaginationText = this.isPaginationText(t);
+        
+        if (isPaginationText) {
+          // For pagination text, return English template with placeholders
+          return this.getPaginationTemplate(t);
+        }
+        
+        // For non-pagination text, proceed with normal translation
+        return t;
+      });
+
+      // Only translate non-pagination texts
+      const nonPaginationTexts = processedTexts.filter(t => 
+        t && typeof t === 'string' && !this.isPaginationText(t)
+      );
+
+      if (nonPaginationTexts.length === 0) {
+        // All texts were pagination-related, return templates
+        return {
+          success: true,
+          translations: processedTexts.map(t => ({ text: t || '' })),
+          originalText: text,
+          targetLanguage: targetLang,
+          sourceLanguage: sourceLang,
+          cached: false,
+          fallback: false,
+          reason: 'All texts were pagination templates'
+        };
+      }
+
+      // Translate only the non-pagination texts
+      const translationResult = await this.translateText(nonPaginationTexts, targetLang, sourceLang);
+      
+      if (!translationResult.success) {
+        // If translation fails, return pagination templates with original text for non-pagination
+        return {
+          success: true,
+          translations: processedTexts.map(t => ({ text: t || '' })),
+          originalText: text,
+          targetLanguage: targetLang,
+          sourceLanguage: sourceLang,
+          cached: false,
+          fallback: true,
+          reason: 'Translation failed, returning pagination templates'
+        };
+      }
+
+      // Map translation results back to the full array
+      let translationIndex = 0;
+      const finalTranslations = processedTexts.map(processedText => {
+        if (this.isPaginationText(processedText)) {
+          // Keep pagination template
+          return { text: processedText };
+        } else {
+          // Use translated text
+          return translationResult.translations[translationIndex++];
+        }
+      });
+
+      return {
+        success: true,
+        translations: finalTranslations,
+        originalText: text,
+        targetLanguage: targetLang,
+        sourceLanguage: sourceLang,
+        cached: false,
+        fallback: false,
+        usage: translationResult.usage
+      };
+
+    } catch (error) {
+      console.error('Pagination Text Translation Error:', error);
+      // Return pagination templates as fallback
+      const textArray = Array.isArray(text) ? text : [text];
+      const fallbackTexts = textArray.map(t => this.getPaginationTemplate(t));
+      
+      return {
+        success: true,
+        translations: fallbackTexts.map(t => ({ text: t || '' })),
+        originalText: text,
+        targetLanguage: targetLang,
+        sourceLanguage: sourceLang,
+        cached: false,
+        fallback: true,
+        error: error.message,
+        reason: 'Error in pagination translation, returning templates'
+      };
+    }
+  }
+
+  /**
+   * Check if text looks like pagination text
+   */
+  isPaginationText(text) {
+    if (!text || typeof text !== 'string') return false;
+    
+    const lowerText = text.toLowerCase();
+    
+    // Common pagination patterns
+    const paginationPatterns = [
+      /\d+\s+per\s+page/i,           // "10 per page"
+      /showing\s+\d+\s+to\s+\d+\s+of\s+\d+\s+results/i,  // "Showing 1 to 10 of 100 results"
+      /show:/i,                       // "Show:"
+      /page\s+\d+\s+of\s+\d+/i,      // "Page 1 of 5"
+      /items?\s+per\s+page/i,        // "items per page"
+      /results?\s+per\s+page/i,      // "results per page"
+      /entries?\s+per\s+page/i,      // "entries per page"
+      /display\s+\d+\s+to\s+\d+\s+of\s+\d+/i,  // "Display 1 to 10 of 100"
+      /viewing\s+\d+\s+to\s+\d+\s+of\s+\d+/i,  // "Viewing 1 to 10 of 100"
+      /^\d+\s+per\s+page$/i,         // Exact match for "10 per page"
+      /^\d+\s+results?\s+per\s+page$/i,  // "10 results per page"
+      /^\d+\s+items?\s+per\s+page$/i,   // "10 items per page"
+      /^\d+\s+entries?\s+per\s+page$/i, // "10 entries per page"
+      /showing\s+\d+\s*-\s*\d+\s+of\s+\d+/i,  // "Showing 1-10 of 100"
+      /display\s+\d+\s*-\s*\d+\s+of\s+\d+/i,  // "Display 1-10 of 100"
+      /viewing\s+\d+\s*-\s*\d+\s+of\s+\d+/i   // "Viewing 1-10 of 100"
+    ];
+    
+    // Also check for common pagination keywords
+    const paginationKeywords = [
+      'per page',
+      'showing',
+      'display',
+      'viewing',
+      'page',
+      'results',
+      'items',
+      'entries'
+    ];
+    
+    const hasPattern = paginationPatterns.some(pattern => pattern.test(text));
+    const hasKeywords = paginationKeywords.some(keyword => lowerText.includes(keyword));
+    
+    // Consider it pagination text if it has patterns OR contains keywords with numbers
+    return hasPattern || (hasKeywords && /\d/.test(text));
+  }
+
+  /**
+   * Convert pagination text to English template with placeholders
+   */
+  getPaginationTemplate(text) {
+    if (!text || typeof text !== 'string') return text;
+    
+    const lowerText = text.toLowerCase();
+    
+    // Replace specific pagination patterns with templates
+    if (/^\d+\s+per\s+page$/i.test(text)) {
+      return "{count} per page";
+    }
+    
+    if (/^\d+\s+results?\s+per\s+page$/i.test(text)) {
+      return "{count} per page";
+    }
+    
+    if (/^\d+\s+items?\s+per\s+page$/i.test(text)) {
+      return "{count} per page";
+    }
+    
+    if (/^\d+\s+entries?\s+per\s+page$/i.test(text)) {
+      return "{count} per page";
+    }
+    
+    if (/showing\s+\d+\s+to\s+\d+\s+of\s+\d+\s+results/i.test(text)) {
+      return "Showing {from} to {to} of {total} results";
+    }
+    
+    if (/showing\s+\d+\s*-\s*\d+\s+of\s+\d+/i.test(text)) {
+      return "Showing {from} to {to} of {total}";
+    }
+    
+    if (/show:/i.test(text)) {
+      return "Show:";
+    }
+    
+    if (/page\s+\d+\s+of\s+\d+/i.test(text)) {
+      return "Page {current} of {total}";
+    }
+    
+    if (/items?\s+per\s+page/i.test(text)) {
+      return "{count} per page";
+    }
+    
+    if (/results?\s+per\s+page/i.test(text)) {
+      return "{count} per page";
+    }
+    
+    if (/entries?\s+per\s+page/i.test(text)) {
+      return "{count} per page";
+    }
+    
+    if (/display\s+\d+\s+to\s+\d+\s+of\s+\d+/i.test(text)) {
+      return "Display {from} to {to} of {total}";
+    }
+    
+    if (/display\s+\d+\s*-\s*\d+\s+of\s+\d+/i.test(text)) {
+      return "Display {from} to {to} of {total}";
+    }
+    
+    if (/viewing\s+\d+\s+to\s+\d+\s+of\s+\d+/i.test(text)) {
+      return "Viewing {from} to {to} of {total}";
+    }
+    
+    if (/viewing\s+\d+\s*-\s*\d+\s+of\s+\d+/i.test(text)) {
+      return "Viewing {from} to {to} of {total}";
+    }
+    
+    // Generic fallback for any text with numbers and pagination keywords
+    if (/\d/.test(text) && (lowerText.includes('per page') || lowerText.includes('showing') || lowerText.includes('page'))) {
+      // Extract numbers and replace with placeholders
+      let template = text;
+      
+      // Replace first number with {count} for "per page" patterns
+      if (lowerText.includes('per page')) {
+        template = template.replace(/^\d+/, '{count}');
+      }
+      
+      // Replace numbers in "showing X to Y of Z" patterns
+      if (lowerText.includes('showing') || lowerText.includes('display') || lowerText.includes('viewing')) {
+        template = template.replace(/^\d+/, '{from}');
+        template = template.replace(/(\d+)(?=\s+of\s+\d+)/, '{to}');
+        template = template.replace(/(\d+)(?=\s*$)/, '{total}');
+      }
+      
+      // Replace numbers in "page X of Y" patterns
+      if (lowerText.includes('page')) {
+        template = template.replace(/^\d+/, '{current}');
+        template = template.replace(/(\d+)(?=\s*$)/, '{total}');
+      }
+      
+      return template;
+    }
+    
+    // If no specific pattern matches, return the original text
+    return text;
   }
 }
 
