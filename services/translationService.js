@@ -263,7 +263,7 @@ class TranslationService {
       const hasPaginationText = uiOnlyTexts.some(text => this.isPaginationText(text));
       
       if (hasPaginationText) {
-        console.log('🔢 Detected pagination text, using special handling');
+       
         // Use pagination-aware translation for UI texts that contain pagination
         return await this.translatePaginationText(uiTexts, targetLang, sourceLang);
       }
