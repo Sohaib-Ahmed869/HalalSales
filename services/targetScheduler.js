@@ -11,144 +11,144 @@ class TargetScheduler {
   }
 
   getNextPeriodString(currentPeriodEnd, periodType) {
-  const nextPeriodStart = new Date(currentPeriodEnd);
-  nextPeriodStart.setDate(nextPeriodStart.getDate() + 1); // Move to first day of next period
-  
-  return this.getPeriodString(nextPeriodStart, periodType);
-}
+    const nextPeriodStart = new Date(currentPeriodEnd);
+    nextPeriodStart.setDate(nextPeriodStart.getDate() + 1); // Move to first day of next period
 
-// ONE-TIME RECOVERY FUNCTION: Create July targets based on current August targets
-async recoverJulyTargets() {
-  console.log("🔄 Starting July targets recovery...");
-  
-  try {
-    // Find all current August targets (assuming they're currently active)
-    const augustTargets = await CustomerTarget.find({
-      isRecurring: true,
-      status: "active",
-      period: "monthly",
-      // Current period should be August 2024
-      currentPeriodStart: {
-        $gte: new Date("2025-08-01"),
-        $lt: new Date("2025-09-01")
-      }
-    }).populate("salesAgent", "firstName lastName email");
-
-    console.log(`Found ${augustTargets.length} August targets to create July versions for`);
-
-    let createdCount = 0;
-    let errorCount = 0;
-    let skippedCount = 0;
-
-    for (const augustTarget of augustTargets) {
-      try {
-        // Check if July target already exists for this customer/agent combination
-        const existingJulyTarget = await CustomerTarget.findOne({
-          cardCode: augustTarget.cardCode,
-          salesAgent: augustTarget.salesAgent._id,
-          period: "monthly",
-          currentPeriodStart: {
-            $gte: new Date("2024-07-01"),
-            $lt: new Date("2024-08-01")
-          }
-        });
-
-        if (existingJulyTarget) {
-          console.log(`⚠️ July target already exists for ${augustTarget.cardName}, skipping`);
-          skippedCount++;
-          continue;
-        }
-
-        // Create July target based on August target
-        const julyTarget = new CustomerTarget({
-          cardCode: augustTarget.cardCode,
-          cardName: augustTarget.cardName,
-          targetAmount: augustTarget.targetAmount,
-          isRecurring: augustTarget.isRecurring,
-          period: "monthly",
-          currentPeriodStart: new Date("2024-07-01"),
-          currentPeriodEnd: new Date("2024-07-31"),
-          deadline: new Date("2024-07-31"),
-          startDate: new Date("2024-07-01"),
-          achievedAmount: 0, // You may want to recalculate this from actual July data
-          achievementRate: 0,
-          status: "completed", // Assuming July is over
-          salesAgent: augustTarget.salesAgent._id,
-          createdBy: augustTarget.createdBy,
-          clientExistingAverage: augustTarget.clientExistingAverage,
-          notes: `Recovered July target based on August target - ${augustTarget.notes || ''}`,
-          achievementSource: augustTarget.achievementSource,
-          lastRecalculated: new Date(),
-          orders: [], // Empty for now, you may want to populate with actual July orders
-          transactions: [], // Empty for now, you may want to populate with actual July transactions
-          historicalPerformance: []
-        });
-
-        await julyTarget.save();
-        createdCount++;
-        
-        console.log(`✅ Created July target for ${augustTarget.cardName} (${augustTarget.salesAgent.firstName} ${augustTarget.salesAgent.lastName})`);
-      } catch (error) {
-        errorCount++;
-        console.error(`❌ Error creating July target for ${augustTarget._id}:`, error);
-      }
-    }
-
-    console.log("🔄 Now updating August targets to have correct historical data...");
-    
-    // Update August targets to have July in their historical performance
-    let historyUpdatedCount = 0;
-    
-    for (const augustTarget of augustTargets) {
-      try {
-        // Check if July period is already in history
-        const julyPeriod = "2024-07";
-        const existingJulyHistory = augustTarget.historicalPerformance.find(
-          (h) => h.period === julyPeriod
-        );
-        
-        if (!existingJulyHistory) {
-          // Add July to historical performance with zero values (you may want to update with actual data)
-          augustTarget.historicalPerformance.push({
-            period: julyPeriod,
-            targetAmount: augustTarget.targetAmount,
-            achievedAmount: 0, // You may want to calculate actual July achievement
-            achievementRate: 0
-          });
-          
-          await augustTarget.save();
-          historyUpdatedCount++;
-        }
-      } catch (error) {
-        console.error(`❌ Error updating history for ${augustTarget._id}:`, error);
-      }
-    }
-
-    return {
-      success: true,
-      totalAugustTargets: augustTargets.length,
-      julyTargetsCreated: createdCount,
-      skipped: skippedCount,
-      errors: errorCount,
-      historyUpdated: historyUpdatedCount,
-      message: `Recovery completed: Created ${createdCount} July targets, updated ${historyUpdatedCount} August targets with July history`
-    };
-  } catch (error) {
-    console.error("Error in July recovery:", error);
-    return {
-      success: false,
-      error: error.message,
-    };
+    return this.getPeriodString(nextPeriodStart, periodType);
   }
-}
 
-// Method to manually trigger the recovery (call this once)
-async triggerJulyRecovery() {
-  console.log("🚨 MANUAL RECOVERY: Starting July targets recovery...");
-  const result = await this.recoverJulyTargets();
-  console.log("📊 Recovery Result:", result);
-  return result;
-}
+  // ONE-TIME RECOVERY FUNCTION: Create July targets based on current August targets
+  async recoverJulyTargets() {
+    console.log("🔄 Starting July targets recovery...");
+
+    try {
+      // Find all current August targets (assuming they're currently active)
+      const augustTargets = await CustomerTarget.find({
+        isRecurring: true,
+        status: "active",
+        period: "monthly",
+        // Current period should be August 2024
+        currentPeriodStart: {
+          $gte: new Date("2025-09-01"),
+          $lt: new Date("2025-10-01")
+        }
+      }).populate("salesAgent", "firstName lastName email");
+
+      console.log(`Found ${augustTargets.length} August targets to create July versions for`);
+
+      let createdCount = 0;
+      let errorCount = 0;
+      let skippedCount = 0;
+
+      for (const augustTarget of augustTargets) {
+        try {
+          // Check if July target already exists for this customer/agent combination
+          const existingJulyTarget = await CustomerTarget.findOne({
+            cardCode: augustTarget.cardCode,
+            salesAgent: augustTarget.salesAgent._id,
+            period: "monthly",
+            currentPeriodStart: {
+              $gte: new Date("2025-08-01"),
+              $lt: new Date("2025-09-01")
+            }
+          });
+
+          if (existingJulyTarget) {
+            console.log(`⚠️ July target already exists for ${augustTarget.cardName}, skipping`);
+            skippedCount++;
+            continue;
+          }
+
+          // Create July target based on August target
+          const julyTarget = new CustomerTarget({
+            cardCode: augustTarget.cardCode,
+            cardName: augustTarget.cardName,
+            targetAmount: augustTarget.targetAmount,
+            isRecurring: augustTarget.isRecurring,
+            period: "monthly",
+            currentPeriodStart: new Date("2025-08-01"),
+            currentPeriodEnd: new Date("2025-08-31"),
+            deadline: new Date("2025-08-31"),
+            startDate: new Date("2025-08-01"),
+            achievedAmount: 0, // You may want to recalculate this from actual July data
+            achievementRate: 0,
+            status: "completed", // Assuming July is over
+            salesAgent: augustTarget.salesAgent._id,
+            createdBy: augustTarget.createdBy,
+            clientExistingAverage: augustTarget.clientExistingAverage,
+            notes: `Recovered July target based on August target - ${augustTarget.notes || ''}`,
+            achievementSource: augustTarget.achievementSource,
+            lastRecalculated: new Date(),
+            orders: [], // Empty for now, you may want to populate with actual July orders
+            transactions: [], // Empty for now, you may want to populate with actual July transactions
+            historicalPerformance: []
+          });
+
+          await julyTarget.save();
+          createdCount++;
+
+          console.log(`✅ Created July target for ${augustTarget.cardName} (${augustTarget.salesAgent.firstName} ${augustTarget.salesAgent.lastName})`);
+        } catch (error) {
+          errorCount++;
+          console.error(`❌ Error creating July target for ${augustTarget._id}:`, error);
+        }
+      }
+
+      console.log("🔄 Now updating August targets to have correct historical data...");
+
+      // Update August targets to have July in their historical performance
+      let historyUpdatedCount = 0;
+
+      for (const augustTarget of augustTargets) {
+        try {
+          // Check if July period is already in history
+          const julyPeriod = "2024-07";
+          const existingJulyHistory = augustTarget.historicalPerformance.find(
+            (h) => h.period === julyPeriod
+          );
+
+          if (!existingJulyHistory) {
+            // Add July to historical performance with zero values (you may want to update with actual data)
+            augustTarget.historicalPerformance.push({
+              period: julyPeriod,
+              targetAmount: augustTarget.targetAmount,
+              achievedAmount: 0, // You may want to calculate actual July achievement
+              achievementRate: 0
+            });
+
+            await augustTarget.save();
+            historyUpdatedCount++;
+          }
+        } catch (error) {
+          console.error(`❌ Error updating history for ${augustTarget._id}:`, error);
+        }
+      }
+
+      return {
+        success: true,
+        totalAugustTargets: augustTargets.length,
+        julyTargetsCreated: createdCount,
+        skipped: skippedCount,
+        errors: errorCount,
+        historyUpdated: historyUpdatedCount,
+        message: `Recovery completed: Created ${createdCount} July targets, updated ${historyUpdatedCount} August targets with July history`
+      };
+    } catch (error) {
+      console.error("Error in July recovery:", error);
+      return {
+        success: false,
+        error: error.message,
+      };
+    }
+  }
+
+  // Method to manually trigger the recovery (call this once)
+  async triggerJulyRecovery() {
+    console.log("🚨 MANUAL RECOVERY: Starting July targets recovery...");
+    const result = await this.recoverJulyTargets();
+    console.log("📊 Recovery Result:", result);
+    return result;
+  }
 
   // Initialize all scheduled jobs
   initializeScheduler() {
@@ -272,93 +272,93 @@ async triggerJulyRecovery() {
     console.log("📅 Daily target check scheduled");
   }
 
- // Rollover targets for a specific period type
-async rolloverTargetsByPeriod(periodType) {
-  try {
-    const now = new Date();
+  // Rollover targets for a specific period type
+  async rolloverTargetsByPeriod(periodType) {
+    try {
+      const now = new Date();
 
-    // Find all recurring targets of this period type that need rollover
-    const targetsToRollover = await CustomerTarget.find({
-      isRecurring: true,
-      status: "active",
-      period: periodType,
-      currentPeriodEnd: { $lt: now },
-    }).populate("salesAgent", "firstName lastName email");
+      // Find all recurring targets of this period type that need rollover
+      const targetsToRollover = await CustomerTarget.find({
+        isRecurring: true,
+        status: "active",
+        period: periodType,
+        currentPeriodEnd: { $lt: now },
+      }).populate("salesAgent", "firstName lastName email");
 
-    console.log(
-      `Found ${targetsToRollover.length} ${periodType} targets to rollover`
-    );
+      console.log(
+        `Found ${targetsToRollover.length} ${periodType} targets to rollover`
+      );
 
-    let rolledOverCount = 0;
-    let errorCount = 0;
-    let skippedCount = 0;
+      let rolledOverCount = 0;
+      let errorCount = 0;
+      let skippedCount = 0;
 
-    for (const target of targetsToRollover) {
-      try {
-        // Store current period performance in history before rollover
-        const currentPeriod = this.getPeriodString(
-          target.currentPeriodStart,
-          periodType
-        );
+      for (const target of targetsToRollover) {
+        try {
+          // Store current period performance in history before rollover
+          const currentPeriod = this.getPeriodString(
+            target.currentPeriodStart,
+            periodType
+          );
 
-        // SAFETY CHECK: Only rollover if the current period hasn't already been processed
-        const existingHistory = target.historicalPerformance.find(
-          (h) => h.period === currentPeriod
-        );
+          // SAFETY CHECK: Only rollover if the current period hasn't already been processed
+          const existingHistory = target.historicalPerformance.find(
+            (h) => h.period === currentPeriod
+          );
 
-        // Additional check: Make sure we're not accidentally rolling over the same period twice
-        const expectedNextPeriod = this.getNextPeriodString(target.currentPeriodEnd, periodType);
-        const nextPeriodAlreadyExists = target.historicalPerformance.find(
-          (h) => h.period === expectedNextPeriod
-        );
+          // Additional check: Make sure we're not accidentally rolling over the same period twice
+          const expectedNextPeriod = this.getNextPeriodString(target.currentPeriodEnd, periodType);
+          const nextPeriodAlreadyExists = target.historicalPerformance.find(
+            (h) => h.period === expectedNextPeriod
+          );
 
-        if (nextPeriodAlreadyExists) {
-          console.log(`⚠️ Target ${target._id} already has next period ${expectedNextPeriod}, skipping rollover`);
-          skippedCount++;
-          continue;
+          if (nextPeriodAlreadyExists) {
+            console.log(`⚠️ Target ${target._id} already has next period ${expectedNextPeriod}, skipping rollover`);
+            skippedCount++;
+            continue;
+          }
+
+          // Only add to history if it's not already there
+          if (!existingHistory) {
+            target.historicalPerformance.push({
+              period: currentPeriod,
+              targetAmount: target.targetAmount,
+              achievedAmount: target.achievedAmount,
+              achievementRate: target.achievementRate,
+            });
+          }
+
+          // Start new period
+          target.startNewPeriod();
+          await target.save();
+
+          rolledOverCount++;
+          console.log(
+            `✅ Rolled over ${periodType} target for ${target.cardName} (${target.salesAgent.firstName} ${target.salesAgent.lastName}) from ${currentPeriod} to ${this.getPeriodString(target.currentPeriodStart, periodType)}`
+          );
+        } catch (error) {
+          errorCount++;
+          console.error(`❌ Error rolling over target ${target._id}:`, error);
         }
-
-        // Only add to history if it's not already there
-        if (!existingHistory) {
-          target.historicalPerformance.push({
-            period: currentPeriod,
-            targetAmount: target.targetAmount,
-            achievedAmount: target.achievedAmount,
-            achievementRate: target.achievementRate,
-          });
-        }
-
-        // Start new period
-        target.startNewPeriod();
-        await target.save();
-
-        rolledOverCount++;
-        console.log(
-          `✅ Rolled over ${periodType} target for ${target.cardName} (${target.salesAgent.firstName} ${target.salesAgent.lastName}) from ${currentPeriod} to ${this.getPeriodString(target.currentPeriodStart, periodType)}`
-        );
-      } catch (error) {
-        errorCount++;
-        console.error(`❌ Error rolling over target ${target._id}:`, error);
       }
-    }
 
-    return {
-      success: true,
-      periodType,
-      totalFound: targetsToRollover.length,
-      rolledOver: rolledOverCount,
-      skipped: skippedCount,
-      errors: errorCount,
-      message: `Successfully rolled over ${rolledOverCount} ${periodType} targets, skipped ${skippedCount}`,
-    };
-  } catch (error) {
-    console.error(`Error in ${periodType} rollover:`, error);
-    return {
-      success: false,
-      error: error.message,
-    };
+      return {
+        success: true,
+        periodType,
+        totalFound: targetsToRollover.length,
+        rolledOver: rolledOverCount,
+        skipped: skippedCount,
+        errors: errorCount,
+        message: `Successfully rolled over ${rolledOverCount} ${periodType} targets, skipped ${skippedCount}`,
+      };
+    } catch (error) {
+      console.error(`Error in ${periodType} rollover:`, error);
+      return {
+        success: false,
+        error: error.message,
+      };
+    }
   }
-}
 
   // Update expired targets
   async updateExpiredTargets() {

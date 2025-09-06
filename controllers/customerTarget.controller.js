@@ -49,50 +49,75 @@ const calculateTargetAchievement = async (target) => {
     }
 
     // Get invoices for this customer in the target period
-    const invoices = await Invoice.find({
-      CardCode: target.cardCode,
-      DocDate: dateQuery,
-    });
+    // Get invoices and credit notes for this customer in the target period
+    const [invoices, creditNotes] = await Promise.all([
+      Invoice.find({
+        CardCode: target.cardCode,
+        DocDate: dateQuery,
+      }),
+      require("../models/CreditNotes").find({
+        CardCode: target.cardCode,
+        DocDate: dateQuery,
+      }),
+    ]);
 
     // Calculate total achieved amount WITHOUT VAT
-    const achievedAmount = invoices.reduce((sum, invoice) => {
+    // Calculate invoice totals WITHOUT VAT
+    const invoiceAmount = invoices.reduce((sum, invoice) => {
       // Calculate amount without VAT
-      // Method 1: Use DocTotal - VatSum if VatSum is available
       if (invoice.VatSum && invoice.VatSum > 0) {
         return sum + (invoice.DocTotal - invoice.VatSum);
       }
 
-      // Method 2: If VatPercent is available, calculate net amount
       if (invoice.VatPercent && invoice.VatPercent > 0) {
         const vatMultiplier = 1 + invoice.VatPercent / 100;
         return sum + invoice.DocTotal / vatMultiplier;
       }
 
-      // Method 3: Calculate from DocumentLines (most accurate)
       if (invoice.DocumentLines && invoice.DocumentLines.length > 0) {
         const lineTotal = invoice.DocumentLines.reduce((lineSum, line) => {
-          // Use Price * Quantity for net amount (before VAT)
           return lineSum + (line.Quantity || 0) * (line.Price || 0);
         }, 0);
         return sum + lineTotal;
       }
 
-      // Fallback: Assume DocTotal includes VAT, estimate 20% VAT rate if no VAT info available
-      // You can adjust this default VAT rate based on your region
-      const defaultVatRate = 0.2; // 20% VAT
+      const defaultVatRate = 0.2;
       const estimatedNetAmount = invoice.DocTotal / (1 + defaultVatRate);
       return sum + estimatedNetAmount;
     }, 0);
+
+    // Calculate credit note totals WITHOUT VAT (same logic as invoices)
+    const creditNoteAmount = creditNotes.reduce((sum, creditNote) => {
+      if (creditNote.VatSum && creditNote.VatSum > 0) {
+        return sum + (creditNote.DocTotal - creditNote.VatSum);
+      }
+
+      if (creditNote.VatPercent && creditNote.VatPercent > 0) {
+        const vatMultiplier = 1 + creditNote.VatPercent / 100;
+        return sum + creditNote.DocTotal / vatMultiplier;
+      }
+
+      if (creditNote.DocumentLines && creditNote.DocumentLines.length > 0) {
+        const lineTotal = creditNote.DocumentLines.reduce((lineSum, line) => {
+          return lineSum + (line.Quantity || 0) * (line.Price || 0);
+        }, 0);
+        return sum + lineTotal;
+      }
+
+      const defaultVatRate = 0.2;
+      const estimatedNetAmount = creditNote.DocTotal / (1 + defaultVatRate);
+      return sum + estimatedNetAmount;
+    }, 0);
+
+    // Net achieved amount (invoices minus credit notes)
+    const achievedAmount = invoiceAmount - creditNoteAmount;
 
     const achievementRate =
       target.targetAmount > 0
         ? (achievedAmount / target.targetAmount) * 100
         : 0;
 
-    console.log(
-      `Target ${target._id}: Calculated achievement ${achievedAmount} (excl. VAT) from ${invoices.length} invoices`
-    );
-
+   
     return {
       achievedAmount: parseFloat(achievedAmount.toFixed(2)),
       achievementRate: parseFloat(achievementRate.toFixed(2)),
@@ -777,7 +802,7 @@ exports.createCustomerTarget = async (req, res) => {
 
 exports.migrateTargetsTo2025 = async (req, res) => {
   try {
-   
+
     // Find all targets that have 2024 dates
     const targetsToMigrate = await CustomerTarget.find({
       $or: [
@@ -927,7 +952,7 @@ exports.getAllCustomerTargets = async (req, res) => {
     }
 
 
-  
+
 
     // Restrict to agent's own targets if user is sales agent
     if (req.user.role === "sales_agent") {

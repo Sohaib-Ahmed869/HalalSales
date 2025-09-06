@@ -74,22 +74,29 @@ const salesAgentJourneyController = {
         getAgentCurrentTargetProgress(agent),
       ]);
 
-      // *** FIX: Use consistent invoice fetching logic ***
-      const [invoices, salesOrders] = await Promise.all([
+      const [invoices, salesOrders, creditNotes] = await Promise.all([
         // Get invoices for assigned customers
         customerCodes.length > 0
           ? Invoice.find({
-              CardCode: { $in: customerCodes },
-              DocDate: { $gte: start, $lte: end },
-            }).lean()
+            CardCode: { $in: customerCodes },
+            DocDate: { $gte: start, $lte: end },
+          }).lean()
           : [],
 
         // Get sales orders for assigned customers
         customerCodes.length > 0
           ? SalesOrder.find({
-              CardCode: { $in: customerCodes },
-              DocDate: { $gte: start, $lte: end },
-            }).lean()
+            CardCode: { $in: customerCodes },
+            DocDate: { $gte: start, $lte: end },
+          }).lean()
+          : [],
+
+        // Get credit notes for assigned customers
+        customerCodes.length > 0
+          ? require("../models/CreditNotes").find({
+            CardCode: { $in: customerCodes },
+            DocDate: { $gte: start, $lte: end },
+          }).lean()
           : [],
       ]);
 
@@ -98,9 +105,49 @@ const salesAgentJourneyController = {
         0
       );
 
-      // STEP 4: Now calculate commission eligible sales
-      const commissionEligibleSales = totalSales - totalClientAverages;
+      // Calculate net total sales (invoices minus credit notes, both without VAT)
+      const invoiceTotal = invoices.reduce((sum, invoice) => {
+        if (invoice.VatSum && invoice.VatSum > 0) {
+          return sum + (invoice.DocTotal - invoice.VatSum);
+        }
+        if (invoice.VatPercent && invoice.VatPercent > 0) {
+          const vatMultiplier = 1 + invoice.VatPercent / 100;
+          return sum + invoice.DocTotal / vatMultiplier;
+        }
+        if (invoice.DocumentLines && invoice.DocumentLines.length > 0) {
+          const lineTotal = invoice.DocumentLines.reduce((lineSum, line) => {
+            return lineSum + (line.Quantity || 0) * (line.Price || 0);
+          }, 0);
+          return sum + lineTotal;
+        }
+        const defaultVatRate = 0.2;
+        const estimatedNetAmount = invoice.DocTotal / (1 + defaultVatRate);
+        return sum + estimatedNetAmount;
+      }, 0);
 
+      const creditNoteTotal = creditNotes.reduce((sum, creditNote) => {
+        if (creditNote.VatSum && creditNote.VatSum > 0) {
+          return sum + (creditNote.DocTotal - creditNote.VatSum);
+        }
+        if (creditNote.VatPercent && creditNote.VatPercent > 0) {
+          const vatMultiplier = 1 + creditNote.VatPercent / 100;
+          return sum + creditNote.DocTotal / vatMultiplier;
+        }
+        if (creditNote.DocumentLines && creditNote.DocumentLines.length > 0) {
+          const lineTotal = creditNote.DocumentLines.reduce((lineSum, line) => {
+            return lineSum + (line.Quantity || 0) * (line.Price || 0);
+          }, 0);
+          return sum + lineTotal;
+        }
+        const defaultVatRate = 0.2;
+        const estimatedNetAmount = creditNote.DocTotal / (1 + defaultVatRate);
+        return sum + estimatedNetAmount;
+      }, 0);
+
+      const netTotalSales = invoiceTotal - creditNoteTotal;
+
+      // STEP 4: Now calculate commission eligible sales using net sales
+      const commissionEligibleSales = netTotalSales - totalClientAverages;
       // Calculate attendance metrics (4+ hours = half day, 7+ hours = full day)
       let totalWorkingDays = 0;
       let totalFullDays = 0;
@@ -143,16 +190,68 @@ const salesAgentJourneyController = {
 
         // Sales metrics - Use invoices for consistency
         totalOrders: invoices.length,
-        totalSales: invoices.reduce(
-          (sum, invoice) => sum + (invoice.DocTotal || 0),
-          0
-        ),
+        // REPLACE the existing totalSales calculation:
+        totalSales: (() => {
+          // Calculate invoice totals (without VAT)
+          const invoiceTotal = invoices.reduce((sum, invoice) => {
+            // Calculate amount without VAT
+            if (invoice.VatSum && invoice.VatSum > 0) {
+              return sum + (invoice.DocTotal - invoice.VatSum);
+            }
+
+            // If VatPercent is available, calculate net amount
+            if (invoice.VatPercent && invoice.VatPercent > 0) {
+              const vatMultiplier = 1 + invoice.VatPercent / 100;
+              return sum + invoice.DocTotal / vatMultiplier;
+            }
+
+            // If DocumentLines are available (most accurate)
+            if (invoice.DocumentLines && invoice.DocumentLines.length > 0) {
+              const lineTotal = invoice.DocumentLines.reduce((lineSum, line) => {
+                return lineSum + (line.Quantity || 0) * (line.Price || 0);
+              }, 0);
+              return sum + lineTotal;
+            }
+
+            // Fallback: Assume DocTotal includes VAT, estimate with default VAT rate
+            const defaultVatRate = 0.2; // 20% VAT - adjust based on your region
+            const estimatedNetAmount = invoice.DocTotal / (1 + defaultVatRate);
+            return sum + estimatedNetAmount;
+          }, 0);
+
+          // Calculate credit note totals (without VAT) - these will be subtracted
+          const creditNoteTotal = creditNotes.reduce((sum, creditNote) => {
+            // Same VAT calculation logic for credit notes
+            if (creditNote.VatSum && creditNote.VatSum > 0) {
+              return sum + (creditNote.DocTotal - creditNote.VatSum);
+            }
+
+            if (creditNote.VatPercent && creditNote.VatPercent > 0) {
+              const vatMultiplier = 1 + creditNote.VatPercent / 100;
+              return sum + creditNote.DocTotal / vatMultiplier;
+            }
+
+            if (creditNote.DocumentLines && creditNote.DocumentLines.length > 0) {
+              const lineTotal = creditNote.DocumentLines.reduce((lineSum, line) => {
+                return lineSum + (line.Quantity || 0) * (line.Price || 0);
+              }, 0);
+              return sum + lineTotal;
+            }
+
+            const defaultVatRate = 0.2;
+            const estimatedNetAmount = creditNote.DocTotal / (1 + defaultVatRate);
+            return sum + estimatedNetAmount;
+          }, 0);
+
+          // Return net sales (invoices minus credit notes)
+          return invoiceTotal - creditNoteTotal;
+        })(),
         averageOrderValue:
           invoices.length > 0
             ? invoices.reduce(
-                (sum, invoice) => sum + (invoice.DocTotal || 0),
-                0
-              ) / invoices.length
+              (sum, invoice) => sum + (invoice.DocTotal || 0),
+              0
+            ) / invoices.length
             : 0,
         totalClientAverages: parseFloat(totalClientAverages.toFixed(2)),
         commissionEligibleSales: parseFloat(commissionEligibleSales.toFixed(2)),
@@ -176,9 +275,9 @@ const salesAgentJourneyController = {
         averageCallDuration:
           callData.length > 0
             ? callData.reduce(
-                (sum, call) => sum + (call.inCallDuration || 0),
-                0
-              ) / callData.length
+              (sum, call) => sum + (call.inCallDuration || 0),
+              0
+            ) / callData.length
             : 0,
 
         // Updated productivity metrics
@@ -193,14 +292,14 @@ const salesAgentJourneyController = {
         averageProductivity:
           desktimeData.length > 0
             ? (desktimeData.reduce(
-                (sum, record) => sum + (record.productiveTimeHours || 0),
+              (sum, record) => sum + (record.productiveTimeHours || 0),
+              0
+            ) /
+              desktimeData.reduce(
+                (sum, record) => sum + (record.totalDeskTimeHours || 0),
                 0
-              ) /
-                desktimeData.reduce(
-                  (sum, record) => sum + (record.totalDeskTimeHours || 0),
-                  0
-                )) *
-              100
+              )) *
+            100
             : 0,
 
         // New attendance metrics
@@ -217,9 +316,9 @@ const salesAgentJourneyController = {
         averageHoursPerDay:
           totalWorkingDays > 0
             ? desktimeData.reduce(
-                (sum, record) => sum + (record.totalDeskTimeHours || 0),
-                0
-              ) / totalWorkingDays
+              (sum, record) => sum + (record.totalDeskTimeHours || 0),
+              0
+            ) / totalWorkingDays
             : 0,
 
         // Target metrics
@@ -229,7 +328,6 @@ const salesAgentJourneyController = {
         remainingTarget: (agent.target || 0) - (targetProgress.achieved || 0),
       };
 
-      console.log("Sales Agent Dashboard Summary:", summary);
 
       // Format numbers for consistency
       Object.keys(summary).forEach((key) => {
@@ -375,6 +473,7 @@ const salesAgentJourneyController = {
       const [
         invoiceCounts,
         invoiceTotals,
+        creditNoteTotals, // ADD this line
         orderCounts,
         orderTotals,
         quotationCounts,
@@ -393,6 +492,22 @@ const salesAgentJourneyController = {
 
         // Invoice totals (SAP Turnover)
         Invoice.aggregate([
+          {
+            $match: {
+              CardCode: { $in: customerCodes },
+              ...dateFilter,
+            },
+          },
+          {
+            $group: {
+              _id: "$CardCode",
+              totalAmount: { $sum: { $subtract: ["$DocTotal", "$VatSum"] } },
+            },
+          },
+        ]),
+
+        // Credit notes aggregation
+        require("../models/CreditNotes").aggregate([
           {
             $match: {
               CardCode: { $in: customerCodes },
@@ -490,13 +605,24 @@ const salesAgentJourneyController = {
       });
 
       // Enhance customers with metrics
+      // ADD credit note mapping after the existing maps:
+      const creditNoteTotalMap = {};
+      creditNoteTotals.forEach((item) => {
+        creditNoteTotalMap[item._id] = item.totalAmount;
+      });
+
+      // MODIFY the enhancedCustomers mapping:
       const enhancedCustomers = allCustomers.map((customer) => {
+        const invoiceTotal = invoiceTotalMap[customer.CardCode] || 0;
+        const creditNoteTotal = creditNoteTotalMap[customer.CardCode] || 0;
+        const netSapTurnover = invoiceTotal - creditNoteTotal; // Subtract credit notes
+
         return {
           ...customer,
           metrics: {
             invoiceCount: invoiceCountMap[customer.CardCode] || 0,
-            sapTurnover: invoiceTotalMap[customer.CardCode] || 0,
-            clientAverage: clientAveragesMap[customer.CardCode] || 0, // 🎯 ADD: Client average
+            sapTurnover: netSapTurnover, // Net amount after subtracting credit notes
+            clientAverage: clientAveragesMap[customer.CardCode] || 0,
             orderCount: orderCountMap[customer.CardCode] || 0,
             orderTotal: orderTotalMap[customer.CardCode] || 0,
             quotationCount: quotationCountMap[customer.CardCode] || 0,
@@ -894,9 +1020,9 @@ const salesAgentJourneyController = {
       const salesData =
         customerCodes.length > 0
           ? await Invoice.find({
-              CardCode: { $in: customerCodes },
-              DocDate: { $gte: start, $lte: end },
-            })
+            CardCode: { $in: customerCodes },
+            DocDate: { $gte: start, $lte: end },
+          })
           : [];
 
       // Group data by day, week, or month
@@ -1453,8 +1579,8 @@ const salesAgentJourneyController = {
         verificationRate:
           allInvoicesForStats.length > 0
             ? parseFloat(
-                ((totalVerified / allInvoicesForStats.length) * 100).toFixed(2)
-              )
+              ((totalVerified / allInvoicesForStats.length) * 100).toFixed(2)
+            )
             : 0,
         paymentMethods: paymentMethodStats,
       };
@@ -1501,8 +1627,13 @@ const salesAgentJourneyController = {
         ? new Date(startDate)
         : new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
 
-      const customers = await Customer.find({ assignedTo: agentId }).lean();
+      // Get customers once with minimal fields
+      const customers = await Customer.find({ assignedTo: agentId })
+        .select('CardCode CardName')
+        .lean();
+
       const customerCodes = customers.map((c) => c.CardCode);
+
       if (customerCodes.length === 0) {
         return res.status(200).json({
           success: true,
@@ -1525,29 +1656,17 @@ const salesAgentJourneyController = {
         });
       }
 
-      // Query base using assigned customers
-      const ordersQuery = {
+      // Base query for reuse
+      const baseQuery = {
         CardCode: { $in: customerCodes },
         DocDate: { $gte: start, $lte: end },
       };
 
-      const invoicesQuery = {
-        CardCode: { $in: customerCodes },
-        DocDate: { $gte: start, $lte: end },
-      };
-
-      // Execute analytics queries in parallel
-      const [
-        orderStats,
-        invoiceStats,
-        topCustomers,
-        monthlyOrders,
-        monthlyInvoices,
-        conversionStats,
-      ] = await Promise.all([
+      // Optimized: Run only essential aggregations in parallel
+      const [orderStats, invoiceStats, monthlyOrders] = await Promise.all([
         // Orders summary
         SalesOrder.aggregate([
-          { $match: ordersQuery },
+          { $match: baseQuery },
           {
             $group: {
               _id: null,
@@ -1560,9 +1679,9 @@ const salesAgentJourneyController = {
           },
         ]),
 
-        // Invoices summary
+        // Invoices summary  
         Invoice.aggregate([
-          { $match: invoicesQuery },
+          { $match: baseQuery },
           {
             $group: {
               _id: null,
@@ -1570,32 +1689,15 @@ const salesAgentJourneyController = {
               total: { $sum: "$DocTotal" },
               totalNoVat: { $sum: { $subtract: ["$DocTotal", "$VatSum"] } },
               average: { $avg: "$DocTotal" },
-              averageNoVat: { $avg: "$TotalBeforeVat" },
               min: { $min: "$DocTotal" },
               max: { $max: "$DocTotal" },
             },
           },
         ]),
 
-        // Top customers by order and invoice value
+        // Simplified monthly orders only
         SalesOrder.aggregate([
-          { $match: ordersQuery },
-          {
-            $group: {
-              _id: "$CardCode",
-              customerName: { $first: "$CardName" },
-              orderCount: { $sum: 1 },
-              orderTotal: { $sum: "$DocTotal" },
-              lastOrderDate: { $max: "$DocDate" },
-            },
-          },
-          { $sort: { orderTotal: -1 } },
-          { $limit: 5 },
-        ]),
-
-        // Monthly orders trend
-        SalesOrder.aggregate([
-          { $match: ordersQuery },
+          { $match: baseQuery },
           {
             $group: {
               _id: {
@@ -1607,125 +1709,100 @@ const salesAgentJourneyController = {
             },
           },
           { $sort: { "_id.year": 1, "_id.month": 1 } },
-        ]),
-
-        // Monthly invoices trend
-        Invoice.aggregate([
-          { $match: invoicesQuery },
-          {
-            $group: {
-              _id: {
-                year: { $year: "$DocDate" },
-                month: { $month: "$DocDate" },
-              },
-              count: { $sum: 1 },
-              total: { $sum: "$DocTotal" },
-            },
-          },
-          { $sort: { "_id.year": 1, "_id.month": 1 } },
-        ]),
-
-        // Order to Invoice conversion rate (placeholder - customize based on your data structure)
-        // This assumes each order would ideally be converted to an invoice
-        SalesOrder.aggregate([
-          { $match: ordersQuery },
-          {
-            $lookup: {
-              from: "invoices",
-              let: { orderDocEntry: "$DocEntry" },
-              pipeline: [
-                {
-                  $match: {
-                    $expr: {
-                      $and: [
-                        { $eq: ["$BaseEntry", "$$orderDocEntry"] },
-                        { $eq: ["$BaseType", 17] }, // Assuming 17 is the code for Sales Orders
-                      ],
-                    },
-                  },
-                },
-              ],
-              as: "matchedInvoices",
-            },
-          },
-          {
-            $project: {
-              _id: 1,
-              DocEntry: 1,
-              DocNum: 1,
-              CardCode: 1,
-              CardName: 1,
-              DocDate: 1,
-              DocTotal: 1,
-              hasInvoice: {
-                $cond: [
-                  { $gt: [{ $size: "$matchedInvoices" }, 0] },
-                  true,
-                  false,
-                ],
-              },
-            },
-          },
-          {
-            $group: {
-              _id: null,
-              totalOrders: { $sum: 1 },
-              convertedOrders: { $sum: { $cond: ["$hasInvoice", 1, 0] } },
-            },
-          },
         ]),
       ]);
 
-      // Process monthly trends to fill gaps and format for charts
-      const monthlyData = processMonthlyData(
-        monthlyOrders,
-        monthlyInvoices,
-        start,
-        end
-      );
+      // Get monthly invoices separately to avoid complex lookups
+      const monthlyInvoices = await Invoice.aggregate([
+        { $match: baseQuery },
+        {
+          $group: {
+            _id: {
+              year: { $year: "$DocDate" },
+              month: { $month: "$DocDate" },
+            },
+            count: { $sum: 1 },
+            total: { $sum: "$DocTotal" },
+          },
+        },
+        { $sort: { "_id.year": 1, "_id.month": 1 } },
+      ]);
+
+      // Get simple top customers (limit to 3 for speed)
+      const topCustomers = await SalesOrder.aggregate([
+        { $match: baseQuery },
+        {
+          $group: {
+            _id: "$CardCode",
+            customerName: { $first: "$CardName" },
+            orderCount: { $sum: 1 },
+            orderTotal: { $sum: "$DocTotal" },
+          },
+        },
+        { $sort: { orderTotal: -1 } },
+        { $limit: 3 },
+      ]);
+
+      // Simplified monthly data processing
+      const monthlyMap = {};
+
+      // Process orders
+      monthlyOrders.forEach((item) => {
+        const key = `${item._id.year}-${item._id.month}`;
+        monthlyMap[key] = {
+          date: `${new Date(0, item._id.month - 1).toLocaleString('default', { month: 'short' })} ${item._id.year}`,
+          year: item._id.year,
+          month: item._id.month,
+          orders: { count: item.count, total: item.total },
+          invoices: { count: 0, total: 0 },
+        };
+      });
+
+      // Add invoices to existing months only
+      monthlyInvoices.forEach((item) => {
+        const key = `${item._id.year}-${item._id.month}`;
+        if (monthlyMap[key]) {
+          monthlyMap[key].invoices = { count: item.count, total: item.total };
+        }
+      });
+
+      const monthlyData = Object.values(monthlyMap).sort((a, b) => {
+        if (a.year !== b.year) return a.year - b.year;
+        return a.month - b.month;
+      });
+
+      // Simple conversion calculation
+      const totalOrders = orderStats.length > 0 ? orderStats[0].count : 0;
+      const totalInvoices = invoiceStats.length > 0 ? invoiceStats[0].count : 0;
 
       return res.status(200).json({
         success: true,
         summary: {
           orders: {
-            count: orderStats.length > 0 ? orderStats[0].count : 0,
+            count: totalOrders,
             total: orderStats.length > 0 ? orderStats[0].total : 0,
             average: orderStats.length > 0 ? orderStats[0].average : 0,
             min: orderStats.length > 0 ? orderStats[0].min : 0,
             max: orderStats.length > 0 ? orderStats[0].max : 0,
           },
           invoices: {
-            count: invoiceStats.length > 0 ? invoiceStats[0].count : 0,
+            count: totalInvoices,
             total: invoiceStats.length > 0 ? invoiceStats[0].total : 0,
-            totalNoVat:
-              invoiceStats.length > 0 ? invoiceStats[0].totalNoVat : 0,
+            totalNoVat: invoiceStats.length > 0 ? invoiceStats[0].totalNoVat : 0,
             average: invoiceStats.length > 0 ? invoiceStats[0].average : 0,
-            averageNoVat:
-              invoiceStats.length > 0 ? invoiceStats[0].averageNoVat : 0,
+            averageNoVat: invoiceStats.length > 0 ? (invoiceStats[0].totalNoVat / totalInvoices) : 0,
             min: invoiceStats.length > 0 ? invoiceStats[0].min : 0,
             max: invoiceStats.length > 0 ? invoiceStats[0].max : 0,
           },
           conversion: {
-            rate:
-              conversionStats.length > 0 && conversionStats[0].totalOrders > 0
-                ? (conversionStats[0].convertedOrders /
-                    conversionStats[0].totalOrders) *
-                  100
-                : 0,
-            totalOrders:
-              conversionStats.length > 0 ? conversionStats[0].totalOrders : 0,
-            convertedOrders:
-              conversionStats.length > 0
-                ? conversionStats[0].convertedOrders
-                : 0,
+            rate: totalOrders > 0 ? parseFloat(((totalInvoices / totalOrders) * 100).toFixed(2)) : 0,
+            totalOrders,
+            convertedOrders: totalInvoices,
           },
         },
         topCustomers,
         monthlyData,
-        dateRange: {
-          start,
-          end,
-        },
+        dateRange: { start, end },
       });
     } catch (error) {
       console.error("Error fetching orders and invoices analytics:", error);
@@ -1953,8 +2030,8 @@ async function getAgentCurrentTargetProgress(agent) {
     // Find target entry for current period
     const targetEntry = agent.targetHistory
       ? agent.targetHistory.find(
-          (entry) => entry.year === currentYear && entry.month === currentMonth
-        )
+        (entry) => entry.year === currentYear && entry.month === currentMonth
+      )
       : null;
 
     if (!targetEntry) {
@@ -2089,9 +2166,9 @@ async function calculateAgentTrends(agentId, agent, startDate, endDate) {
     const invoices =
       customerCodes.length > 0
         ? await Invoice.find({
-            CardCode: { $in: customerCodes },
-            DocDate: { $gte: startDate, $lte: endDate },
-          }).lean()
+          CardCode: { $in: customerCodes },
+          DocDate: { $gte: startDate, $lte: endDate },
+        }).lean()
         : [];
 
     // Process invoices
@@ -2313,23 +2390,23 @@ async function getRecentActivities(agentId, agent, startDate, endDate) {
       // Recent sales orders for assigned customers
       customerCodes.length > 0
         ? SalesOrder.find({
-            CardCode: { $in: customerCodes },
-            DocDate: { $gte: startDate, $lte: endDate },
-          })
-            .sort({ DocDate: -1 })
-            .limit(5)
-            .lean()
+          CardCode: { $in: customerCodes },
+          DocDate: { $gte: startDate, $lte: endDate },
+        })
+          .sort({ DocDate: -1 })
+          .limit(5)
+          .lean()
         : [],
 
       // Recent invoices for assigned customers
       customerCodes.length > 0
         ? Invoice.find({
-            CardCode: { $in: customerCodes },
-            DocDate: { $gte: startDate, $lte: endDate },
-          })
-            .sort({ DocDate: -1 })
-            .limit(5)
-            .lean()
+          CardCode: { $in: customerCodes },
+          DocDate: { $gte: startDate, $lte: endDate },
+        })
+          .sort({ DocDate: -1 })
+          .limit(5)
+          .lean()
         : [],
 
       // Recent calls with updated agent matching
@@ -2384,14 +2461,13 @@ async function getRecentActivities(agentId, agent, startDate, endDate) {
       ...recentCalls.map((call) => ({
         type: "call",
         date: call.startTime,
-        title: `${call.direction === "in" ? "Received" : "Made"} a call ${
-          call.missed === "Y" ||
+        title: `${call.direction === "in" ? "Received" : "Made"} a call ${call.missed === "Y" ||
           call.missed === "true" ||
           call.missed === true ||
           call.missed === "1"
-            ? "(Missed)"
-            : ""
-        }`,
+          ? "(Missed)"
+          : ""
+          }`,
         contact: call.contact || call.fromNumber || call.toNumber,
         duration: call.inCallDuration,
         direction: call.direction,
