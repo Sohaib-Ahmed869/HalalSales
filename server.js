@@ -22,7 +22,7 @@ const customerJourneyRoutes = require("./routes/journey.routes");
 const recommendationRoutes = require("./routes/recommendations.routes");
 const prestashopSyncService = require("./services/prestashopSyncService");
 const config = require("./services/config");
-
+const cartFetcherRoutes = require("./routes/cartFetcher.routes");
 
 // Initialize express app
 const app = express();
@@ -91,7 +91,7 @@ app.use("/api/call-data", callDataRoutes);
 app.use('/api/dashboard', dashboardRoutes); 
 app.use("/api/customer-journey", customerJourneyRoutes);
 app.use("/api/recommendations", recommendationRoutes);
-
+app.use("/api/cart-fetcher", cartFetcherRoutes);
 
 // Health check route
 app.get("/health", (req, res) => {
