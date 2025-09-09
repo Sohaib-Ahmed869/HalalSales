@@ -5,8 +5,8 @@ const { v4: uuidv4 } = require("uuid");
 const UberEatsData = require('../models/UberEats.model')
 
 // Configuration
-const SCRAPER_API_URL = process.env.SCRAPER_API_URL || "https://msf-datascraper.foodservices.live/api";
-const SCRAPER_API_TIMEOUT = 300000; // 30 seconds
+const SCRAPER_API_URL = process.env.SCRAPER_API_URL || "https://hfs-ws.onrender.com/api";
+const SCRAPER_API_TIMEOUT = 30000000; // 30 seconds
 
 /**
  * Start a new postal code scraping job
@@ -34,13 +34,7 @@ exports.startPostalCodeScraping = async (req, res) => {
             });
         }
 
-        // Validate postal code format (basic validation)
-        if (!/^\d{5}$/.test(postal_code)) {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid postal code format. Expected 5 digits.",
-            });
-        }
+      
 
         // Validate optional parameters
         if (max_restaurants !== undefined && (!Number.isInteger(max_restaurants) || max_restaurants <= 0)) {

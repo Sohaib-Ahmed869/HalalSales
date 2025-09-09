@@ -183,78 +183,22 @@ const salesAgentJourneyController = {
       }
 
       // Calculate summary metrics using the same invoice data
+      // Calculate summary metrics using invoices without VAT
       const summary = {
         // Customer metrics
         totalCustomers: customers.length,
         activeCustomers: customers.filter((c) => c.status === "active").length,
 
-        // Sales metrics - Use invoices for consistency
+        // Sales metrics - Use net totals (without VAT) consistently
         totalOrders: invoices.length,
-        // REPLACE the existing totalSales calculation:
-        totalSales: (() => {
-          // Calculate invoice totals (without VAT)
-          const invoiceTotal = invoices.reduce((sum, invoice) => {
-            // Calculate amount without VAT
-            if (invoice.VatSum && invoice.VatSum > 0) {
-              return sum + (invoice.DocTotal - invoice.VatSum);
-            }
+        totalSales: netTotalSales, // This is already calculated without VAT above
 
-            // If VatPercent is available, calculate net amount
-            if (invoice.VatPercent && invoice.VatPercent > 0) {
-              const vatMultiplier = 1 + invoice.VatPercent / 100;
-              return sum + invoice.DocTotal / vatMultiplier;
-            }
+        // FIXED: Calculate average order value without VAT
+        averageOrderValue: invoices.length > 0 ? netTotalSales / invoices.length : 0,
 
-            // If DocumentLines are available (most accurate)
-            if (invoice.DocumentLines && invoice.DocumentLines.length > 0) {
-              const lineTotal = invoice.DocumentLines.reduce((lineSum, line) => {
-                return lineSum + (line.Quantity || 0) * (line.Price || 0);
-              }, 0);
-              return sum + lineTotal;
-            }
-
-            // Fallback: Assume DocTotal includes VAT, estimate with default VAT rate
-            const defaultVatRate = 0.2; // 20% VAT - adjust based on your region
-            const estimatedNetAmount = invoice.DocTotal / (1 + defaultVatRate);
-            return sum + estimatedNetAmount;
-          }, 0);
-
-          // Calculate credit note totals (without VAT) - these will be subtracted
-          const creditNoteTotal = creditNotes.reduce((sum, creditNote) => {
-            // Same VAT calculation logic for credit notes
-            if (creditNote.VatSum && creditNote.VatSum > 0) {
-              return sum + (creditNote.DocTotal - creditNote.VatSum);
-            }
-
-            if (creditNote.VatPercent && creditNote.VatPercent > 0) {
-              const vatMultiplier = 1 + creditNote.VatPercent / 100;
-              return sum + creditNote.DocTotal / vatMultiplier;
-            }
-
-            if (creditNote.DocumentLines && creditNote.DocumentLines.length > 0) {
-              const lineTotal = creditNote.DocumentLines.reduce((lineSum, line) => {
-                return lineSum + (line.Quantity || 0) * (line.Price || 0);
-              }, 0);
-              return sum + lineTotal;
-            }
-
-            const defaultVatRate = 0.2;
-            const estimatedNetAmount = creditNote.DocTotal / (1 + defaultVatRate);
-            return sum + estimatedNetAmount;
-          }, 0);
-
-          // Return net sales (invoices minus credit notes)
-          return invoiceTotal - creditNoteTotal;
-        })(),
-        averageOrderValue:
-          invoices.length > 0
-            ? invoices.reduce(
-              (sum, invoice) => sum + (invoice.DocTotal || 0),
-              0
-            ) / invoices.length
-            : 0,
         totalClientAverages: parseFloat(totalClientAverages.toFixed(2)),
         commissionEligibleSales: parseFloat(commissionEligibleSales.toFixed(2)),
+
         // Sales Orders metrics (separate from invoices)
         totalSalesOrders: salesOrders.length,
         totalSalesOrderAmount: salesOrders.reduce(
@@ -265,8 +209,7 @@ const salesAgentJourneyController = {
         // Call metrics
         totalCalls: callData.length,
         inboundCalls: callData.filter((call) => call.direction === "in").length,
-        outboundCalls: callData.filter((call) => call.direction === "out")
-          .length,
+        outboundCalls: callData.filter((call) => call.direction === "out").length,
         missedCalls: callData.filter((call) => call.missed).length,
         totalCallDuration: callData.reduce(
           (sum, call) => sum + (call.inCallDuration || 0),
@@ -280,7 +223,7 @@ const salesAgentJourneyController = {
             ) / callData.length
             : 0,
 
-        // Updated productivity metrics
+        // Productivity metrics
         totalDeskTime: desktimeData.reduce(
           (sum, record) => sum + (record.totalDeskTimeHours || 0),
           0
@@ -302,7 +245,7 @@ const salesAgentJourneyController = {
             100
             : 0,
 
-        // New attendance metrics
+        // Attendance metrics
         totalWorkingDays,
         totalFullDays,
         totalHalfDays,
@@ -376,6 +319,147 @@ const salesAgentJourneyController = {
       return res.status(500).json({
         success: false,
         message: "Error fetching sales agent dashboard",
+        error: error.message,
+      });
+    }
+  },
+
+  /**
+ * Get all quotations for a sales agent
+ */
+  getAgentQuotations: async (req, res) => {
+    try {
+      const { agentId } = req.params;
+      const {
+        page = 1,
+        limit = 10,
+        startDate,
+        endDate,
+        status,
+        customerCode,
+        sortBy = "DocDate",
+        sortDirection = -1,
+        export: isExport = false,
+      } = req.query;
+
+      // Validate sales agent
+      const agent = await User.findById(agentId);
+      if (!agent || agent.role !== "sales_agent") {
+        return res.status(404).json({
+          success: false,
+          message: "Sales agent not found",
+        });
+      }
+
+      // Set default date range if not provided (last 30 days)
+      const end = endDate ? new Date(endDate) : new Date();
+      const start = startDate
+        ? new Date(startDate)
+        : new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+      // Get customers assigned to this agent first
+      const customers = await Customer.find({ assignedTo: agentId }).lean();
+      const customerCodes = customers.map((c) => c.CardCode);
+
+      if (customerCodes.length === 0) {
+        return res.status(200).json({
+          success: true,
+          count: 0,
+          total: 0,
+          page: parseInt(page),
+          pages: 0,
+          stats: {
+            totalQuotations: 0,
+            totalAmount: 0,
+            averageQuotationValue: 0,
+            conversionRate: 0,
+            convertedQuotations: 0,
+          },
+          data: [],
+        });
+      }
+
+      // Build query using customer codes
+      const query = {
+        CardCode: { $in: customerCodes },
+        DocDate: { $gte: start, $lte: end },
+      };
+
+      // Add additional filters
+      if (status) {
+        query.DocumentStatus = status;
+      }
+
+      if (customerCode) {
+        query.CardCode = customerCode;
+      }
+
+      let quotations;
+      let total;
+
+      // Handle export vs pagination
+      if (isExport === "true" || isExport === true) {
+        quotations = await Quotation.find(query).sort({
+          [sortBy]: parseInt(sortDirection),
+        });
+        total = quotations.length;
+      } else {
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+        quotations = await Quotation.find(query)
+          .skip(skip)
+          .limit(parseInt(limit))
+          .sort({ [sortBy]: parseInt(sortDirection) });
+        total = await Quotation.countDocuments(query);
+      }
+
+      // Calculate quotation statistics
+      const allQuotationsForStats = await Quotation.find(query);
+
+      const totalAmount = allQuotationsForStats.reduce(
+        (sum, quotation) => sum + (quotation.DocTotal || 0),
+        0
+      );
+
+      const avgAmount =
+        allQuotationsForStats.length > 0
+          ? totalAmount / allQuotationsForStats.length
+          : 0;
+
+      // Calculate conversion rate (quotations that became orders)
+      const convertedQuotations = await Invoice.countDocuments({
+        CardCode: { $in: customerCodes },
+        DocDate: { $gte: start, $lte: end },
+        BaseType: 23, // SAP object type for quotations
+      });
+
+      const conversionRate =
+        allQuotationsForStats.length > 0
+          ? (convertedQuotations / allQuotationsForStats.length) * 100
+          : 0;
+
+      const stats = {
+        totalQuotations: allQuotationsForStats.length,
+        totalAmount: parseFloat(totalAmount.toFixed(2)),
+        averageQuotationValue: parseFloat(avgAmount.toFixed(2)),
+        conversionRate: parseFloat(conversionRate.toFixed(2)),
+        convertedQuotations,
+      };
+
+      return res.status(200).json({
+        success: true,
+        count: quotations.length,
+        total: isExport ? quotations.length : total,
+        page: isExport ? 1 : parseInt(page),
+        pages: isExport ? 1 : Math.ceil(total / parseInt(limit)),
+        stats: stats,
+        data: quotations,
+        isExport: isExport === "true" || isExport === true,
+      });
+    } catch (error) {
+      console.error("Error fetching agent quotations:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Error fetching agent quotations",
         error: error.message,
       });
     }
@@ -1638,6 +1722,7 @@ const salesAgentJourneyController = {
         return res.status(200).json({
           success: true,
           summary: {
+            quotations: { count: 0, total: 0, average: 0, min: 0, max: 0 },
             orders: { count: 0, total: 0, average: 0, min: 0, max: 0 },
             invoices: {
               count: 0,
@@ -1648,7 +1733,15 @@ const salesAgentJourneyController = {
               min: 0,
               max: 0,
             },
-            conversion: { rate: 0, totalOrders: 0, convertedOrders: 0 },
+            creditNotes: {
+              count: 0,
+              total: 0,
+              totalNoVat: 0,
+              average: 0,
+              averageNoVat: 0,
+            },
+            netSales: 0, // invoices - credit notes (without VAT)
+            conversion: { rate: 0, totalQuotations: 0, convertedQuotations: 0 },
           },
           topCustomers: [],
           monthlyData: [],
@@ -1662,9 +1755,24 @@ const salesAgentJourneyController = {
         DocDate: { $gte: start, $lte: end },
       };
 
-      // Optimized: Run only essential aggregations in parallel
-      const [orderStats, invoiceStats, monthlyOrders] = await Promise.all([
-        // Orders summary
+      // Run aggregations in parallel
+      const [quotationStats, orderStats, invoiceStats, creditNoteStats, monthlyQuotations, monthlyOrders, monthlyInvoices] = await Promise.all([
+        // Quotations summary
+        Quotation.aggregate([
+          { $match: baseQuery },
+          {
+            $group: {
+              _id: null,
+              count: { $sum: 1 },
+              total: { $sum: "$DocTotal" },
+              average: { $avg: "$DocTotal" },
+              min: { $min: "$DocTotal" },
+              max: { $max: "$DocTotal" },
+            },
+          },
+        ]),
+
+        // Orders summary (Sales Orders - keep with VAT for comparison)
         SalesOrder.aggregate([
           { $match: baseQuery },
           {
@@ -1679,7 +1787,7 @@ const salesAgentJourneyController = {
           },
         ]),
 
-        // Invoices summary  
+        // Invoices summary (without VAT for net calculation)
         Invoice.aggregate([
           { $match: baseQuery },
           {
@@ -1687,7 +1795,7 @@ const salesAgentJourneyController = {
               _id: null,
               count: { $sum: 1 },
               total: { $sum: "$DocTotal" },
-              totalNoVat: { $sum: { $subtract: ["$DocTotal", "$VatSum"] } },
+              totalNoVat: { $sum: { $subtract: ["$DocTotal", { $ifNull: ["$VatSum", 0] }] } },
               average: { $avg: "$DocTotal" },
               min: { $min: "$DocTotal" },
               max: { $max: "$DocTotal" },
@@ -1695,7 +1803,37 @@ const salesAgentJourneyController = {
           },
         ]),
 
-        // Simplified monthly orders only
+        // Credit Notes summary (without VAT)
+        require("../models/CreditNotes").aggregate([
+          { $match: baseQuery },
+          {
+            $group: {
+              _id: null,
+              count: { $sum: 1 },
+              total: { $sum: "$DocTotal" },
+              totalNoVat: { $sum: { $subtract: ["$DocTotal", { $ifNull: ["$VatSum", 0] }] } },
+              average: { $avg: "$DocTotal" },
+            },
+          },
+        ]),
+
+        // Monthly quotations
+        Quotation.aggregate([
+          { $match: baseQuery },
+          {
+            $group: {
+              _id: {
+                year: { $year: "$DocDate" },
+                month: { $month: "$DocDate" },
+              },
+              count: { $sum: 1 },
+              total: { $sum: "$DocTotal" },
+            },
+          },
+          { $sort: { "_id.year": 1, "_id.month": 1 } },
+        ]),
+
+        // Monthly orders
         SalesOrder.aggregate([
           { $match: baseQuery },
           {
@@ -1710,59 +1848,66 @@ const salesAgentJourneyController = {
           },
           { $sort: { "_id.year": 1, "_id.month": 1 } },
         ]),
-      ]);
 
-      // Get monthly invoices separately to avoid complex lookups
-      const monthlyInvoices = await Invoice.aggregate([
-        { $match: baseQuery },
-        {
-          $group: {
-            _id: {
-              year: { $year: "$DocDate" },
-              month: { $month: "$DocDate" },
+        // Monthly invoices (without VAT)
+        Invoice.aggregate([
+          { $match: baseQuery },
+          {
+            $group: {
+              _id: {
+                year: { $year: "$DocDate" },
+                month: { $month: "$DocDate" },
+              },
+              count: { $sum: 1 },
+              total: { $sum: "$DocTotal" },
+              totalNoVat: { $sum: { $subtract: ["$DocTotal", { $ifNull: ["$VatSum", 0] }] } },
             },
-            count: { $sum: 1 },
-            total: { $sum: "$DocTotal" },
           },
-        },
-        { $sort: { "_id.year": 1, "_id.month": 1 } },
+          { $sort: { "_id.year": 1, "_id.month": 1 } },
+        ]),
       ]);
 
-      // Get simple top customers (limit to 3 for speed)
-      const topCustomers = await SalesOrder.aggregate([
-        { $match: baseQuery },
-        {
-          $group: {
-            _id: "$CardCode",
-            customerName: { $first: "$CardName" },
-            orderCount: { $sum: 1 },
-            orderTotal: { $sum: "$DocTotal" },
-          },
-        },
-        { $sort: { orderTotal: -1 } },
-        { $limit: 3 },
-      ]);
-
-      // Simplified monthly data processing
+      // Process monthly data
       const monthlyMap = {};
 
-      // Process orders
-      monthlyOrders.forEach((item) => {
+      // Add all months from all data sources
+      [...monthlyQuotations, ...monthlyOrders, ...monthlyInvoices].forEach((item) => {
         const key = `${item._id.year}-${item._id.month}`;
-        monthlyMap[key] = {
-          date: `${new Date(0, item._id.month - 1).toLocaleString('default', { month: 'short' })} ${item._id.year}`,
-          year: item._id.year,
-          month: item._id.month,
-          orders: { count: item.count, total: item.total },
-          invoices: { count: 0, total: 0 },
-        };
+        if (!monthlyMap[key]) {
+          monthlyMap[key] = {
+            date: `${new Date(0, item._id.month - 1).toLocaleString('default', { month: 'short' })} ${item._id.year}`,
+            year: item._id.year,
+            month: item._id.month,
+            quotations: { count: 0, total: 0 },
+            orders: { count: 0, total: 0 },
+            invoices: { count: 0, total: 0, totalNoVat: 0 },
+          };
+        }
       });
 
-      // Add invoices to existing months only
+      // Fill in the data
+      monthlyQuotations.forEach((item) => {
+        const key = `${item._id.year}-${item._id.month}`;
+        if (monthlyMap[key]) {
+          monthlyMap[key].quotations = { count: item.count, total: item.total };
+        }
+      });
+
+      monthlyOrders.forEach((item) => {
+        const key = `${item._id.year}-${item._id.month}`;
+        if (monthlyMap[key]) {
+          monthlyMap[key].orders = { count: item.count, total: item.total };
+        }
+      });
+
       monthlyInvoices.forEach((item) => {
         const key = `${item._id.year}-${item._id.month}`;
         if (monthlyMap[key]) {
-          monthlyMap[key].invoices = { count: item.count, total: item.total };
+          monthlyMap[key].invoices = {
+            count: item.count,
+            total: item.total,
+            totalNoVat: item.totalNoVat
+          };
         }
       });
 
@@ -1771,13 +1916,25 @@ const salesAgentJourneyController = {
         return a.month - b.month;
       });
 
-      // Simple conversion calculation
+      // Calculate net sales (invoices - credit notes, both without VAT)
+      const invoiceNoVatTotal = invoiceStats.length > 0 ? invoiceStats[0].totalNoVat : 0;
+      const creditNoteNoVatTotal = creditNoteStats.length > 0 ? creditNoteStats[0].totalNoVat : 0;
+      const netSales = invoiceNoVatTotal - creditNoteNoVatTotal;
+
+      // Simple conversion calculation (quotations to orders)
+      const totalQuotations = quotationStats.length > 0 ? quotationStats[0].count : 0;
       const totalOrders = orderStats.length > 0 ? orderStats[0].count : 0;
-      const totalInvoices = invoiceStats.length > 0 ? invoiceStats[0].count : 0;
 
       return res.status(200).json({
         success: true,
         summary: {
+          quotations: {
+            count: totalQuotations,
+            total: quotationStats.length > 0 ? quotationStats[0].total : 0,
+            average: quotationStats.length > 0 ? quotationStats[0].average : 0,
+            min: quotationStats.length > 0 ? quotationStats[0].min : 0,
+            max: quotationStats.length > 0 ? quotationStats[0].max : 0,
+          },
           orders: {
             count: totalOrders,
             total: orderStats.length > 0 ? orderStats[0].total : 0,
@@ -1786,21 +1943,28 @@ const salesAgentJourneyController = {
             max: orderStats.length > 0 ? orderStats[0].max : 0,
           },
           invoices: {
-            count: totalInvoices,
+            count: invoiceStats.length > 0 ? invoiceStats[0].count : 0,
             total: invoiceStats.length > 0 ? invoiceStats[0].total : 0,
-            totalNoVat: invoiceStats.length > 0 ? invoiceStats[0].totalNoVat : 0,
+            totalNoVat: invoiceNoVatTotal,
             average: invoiceStats.length > 0 ? invoiceStats[0].average : 0,
-            averageNoVat: invoiceStats.length > 0 ? (invoiceStats[0].totalNoVat / totalInvoices) : 0,
+            averageNoVat: invoiceStats.length > 0 ? (invoiceNoVatTotal / invoiceStats[0].count) : 0,
             min: invoiceStats.length > 0 ? invoiceStats[0].min : 0,
             max: invoiceStats.length > 0 ? invoiceStats[0].max : 0,
           },
+          creditNotes: {
+            count: creditNoteStats.length > 0 ? creditNoteStats[0].count : 0,
+            total: creditNoteStats.length > 0 ? creditNoteStats[0].total : 0,
+            totalNoVat: creditNoteNoVatTotal,
+            average: creditNoteStats.length > 0 ? creditNoteStats[0].average : 0,
+            averageNoVat: creditNoteStats.length > 0 ? (creditNoteNoVatTotal / creditNoteStats[0].count) : 0,
+          },
+          netSales: parseFloat(netSales.toFixed(2)),
           conversion: {
-            rate: totalOrders > 0 ? parseFloat(((totalInvoices / totalOrders) * 100).toFixed(2)) : 0,
-            totalOrders,
-            convertedOrders: totalInvoices,
+            rate: totalQuotations > 0 ? parseFloat(((totalOrders / totalQuotations) * 100).toFixed(2)) : 0,
+            totalQuotations,
+            convertedQuotations: totalOrders,
           },
         },
-        topCustomers,
         monthlyData,
         dateRange: { start, end },
       });
@@ -2275,9 +2439,9 @@ async function getTopCustomers(agentId, startDate, endDate) {
       };
     }
 
-    // *** UPDATED: Use invoices for customer performance metrics ***
-    const [topByRevenue, topByFrequency, recentCustomers] = await Promise.all([
-      // Get top customers by invoice amount
+    // Get invoice totals (without VAT) and credit note totals (without VAT) for each customer
+    const [invoiceData, creditNoteData] = await Promise.all([
+      // Invoice aggregation (without VAT)
       Invoice.aggregate([
         {
           $match: {
@@ -2288,18 +2452,16 @@ async function getTopCustomers(agentId, startDate, endDate) {
         {
           $group: {
             _id: "$CardCode",
-            totalSpent: { $sum: "$DocTotal" },
+            invoiceTotal: { $sum: { $subtract: ["$DocTotal", { $ifNull: ["$VatSum", 0] }] } },
             invoiceCount: { $sum: 1 },
             lastInvoiceDate: { $max: "$DocDate" },
             customerName: { $first: "$CardName" },
           },
         },
-        { $sort: { totalSpent: -1 } },
-        { $limit: 5 },
       ]),
 
-      // Get top customers by invoice frequency
-      Invoice.aggregate([
+      // Credit notes aggregation (without VAT)
+      require("../models/CreditNotes").aggregate([
         {
           $match: {
             CardCode: { $in: customerCodes },
@@ -2309,60 +2471,59 @@ async function getTopCustomers(agentId, startDate, endDate) {
         {
           $group: {
             _id: "$CardCode",
-            totalSpent: { $sum: "$DocTotal" },
-            invoiceCount: { $sum: 1 },
-            lastInvoiceDate: { $max: "$DocDate" },
-            customerName: { $first: "$CardName" },
+            creditNoteTotal: { $sum: { $subtract: ["$DocTotal", { $ifNull: ["$VatSum", 0] }] } },
           },
         },
-        { $sort: { invoiceCount: -1 } },
-        { $limit: 5 },
-      ]),
-
-      // Get most recent customer invoices
-      Invoice.aggregate([
-        {
-          $match: {
-            CardCode: { $in: customerCodes },
-            DocDate: { $gte: startDate, $lte: endDate },
-          },
-        },
-        {
-          $group: {
-            _id: "$CardCode",
-            totalSpent: { $sum: "$DocTotal" },
-            invoiceCount: { $sum: 1 },
-            lastInvoiceDate: { $max: "$DocDate" },
-            customerName: { $first: "$CardName" },
-          },
-        },
-        { $sort: { lastInvoiceDate: -1 } },
-        { $limit: 5 },
       ]),
     ]);
 
+    // Create maps for quick lookup
+    const invoiceMap = {};
+    invoiceData.forEach((item) => {
+      invoiceMap[item._id] = item;
+    });
+
+    const creditNoteMap = {};
+    creditNoteData.forEach((item) => {
+      creditNoteMap[item._id] = item.creditNoteTotal;
+    });
+
+    // Calculate net totals (invoices - credit notes) for each customer
+    const customerNetTotals = invoiceData.map((customer) => {
+      const invoiceTotal = customer.invoiceTotal || 0;
+      const creditNoteTotal = creditNoteMap[customer._id] || 0;
+      const netTotal = invoiceTotal - creditNoteTotal;
+
+      return {
+        cardCode: customer._id,
+        cardName: customer.customerName || customer._id,
+        totalSpent: parseFloat(netTotal.toFixed(2)),
+        orderCount: customer.invoiceCount,
+        lastOrderDate: customer.lastInvoiceDate,
+      };
+    });
+
+    // Sort by different criteria
+    const topByRevenue = [...customerNetTotals]
+      .sort((a, b) => b.totalSpent - a.totalSpent)
+      .slice(0, 5);
+
+    const topByFrequency = [...customerNetTotals]
+      .sort((a, b) => b.orderCount - a.orderCount)
+      .slice(0, 5);
+
+    const recentCustomers = [...customerNetTotals]
+      .sort((a, b) => {
+        if (!a.lastOrderDate) return 1;
+        if (!b.lastOrderDate) return -1;
+        return new Date(b.lastOrderDate) - new Date(a.lastOrderDate);
+      })
+      .slice(0, 5);
+
     return {
-      topByRevenue: topByRevenue.map((c) => ({
-        cardCode: c._id,
-        cardName: c.customerName || c._id,
-        totalSpent: parseFloat(c.totalSpent.toFixed(2)),
-        orderCount: c.invoiceCount,
-        lastOrderDate: c.lastInvoiceDate,
-      })),
-      topByFrequency: topByFrequency.map((c) => ({
-        cardCode: c._id,
-        cardName: c.customerName || c._id,
-        totalSpent: parseFloat(c.totalSpent.toFixed(2)),
-        orderCount: c.invoiceCount,
-        lastOrderDate: c.lastInvoiceDate,
-      })),
-      recentCustomers: recentCustomers.map((c) => ({
-        cardCode: c._id,
-        cardName: c.customerName || c._id,
-        totalSpent: parseFloat(c.totalSpent.toFixed(2)),
-        orderCount: c.invoiceCount,
-        lastOrderDate: c.lastInvoiceDate,
-      })),
+      topByRevenue,
+      topByFrequency,
+      recentCustomers,
     };
   } catch (error) {
     console.error("Error getting top customers:", error);
@@ -2373,7 +2534,6 @@ async function getTopCustomers(agentId, startDate, endDate) {
     };
   }
 }
-
 /**
  * Get recent sales activities for an agent
  */

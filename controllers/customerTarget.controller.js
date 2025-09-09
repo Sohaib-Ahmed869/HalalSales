@@ -117,7 +117,7 @@ const calculateTargetAchievement = async (target) => {
         ? (achievedAmount / target.targetAmount) * 100
         : 0;
 
-   
+
     return {
       achievedAmount: parseFloat(achievedAmount.toFixed(2)),
       achievementRate: parseFloat(achievementRate.toFixed(2)),
@@ -951,8 +951,23 @@ exports.getAllCustomerTargets = async (req, res) => {
       query.cardCode = req.query.cardCode;
     }
 
+    // ADD THIS DATE FILTERING HERE:
+    if (req.query.startDate || req.query.endDate) {
+      const dateFilter = {};
 
+      if (req.query.startDate) {
+        dateFilter.$gte = new Date(req.query.startDate);
+      }
 
+      if (req.query.endDate) {
+        dateFilter.$lte = new Date(req.query.endDate);
+      }
+
+      query.$or = [
+        { currentPeriodEnd: dateFilter },
+        { deadline: dateFilter }
+      ];
+    }
 
     // Restrict to agent's own targets if user is sales agent
     if (req.user.role === "sales_agent") {

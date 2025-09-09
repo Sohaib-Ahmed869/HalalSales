@@ -4,6 +4,7 @@ const Customer = require("../models/Customer");
 const Invoice = require("../models/Invoice");
 const SalesOrder = require("../models/SalesOrder");
 const Quotation = require("../models/Quotation");
+const CreditNote = require("../models/CreditNotes");
 const CallData = require("../models/CallData");
 const mongoose = require("mongoose");
 
@@ -25,7 +26,7 @@ const salesManagerDashboardController = {
   getAnalytics: async (req, res) => {
     try {
       const managerId = req.user._id;
-      
+
       // Calculate date ranges for performance comparison
       const now = new Date();
       const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
@@ -39,7 +40,7 @@ const salesManagerDashboardController = {
           manager: managerId
         }),
         User.countDocuments({
-          role: "sales_agent", 
+          role: "sales_agent",
           manager: managerId,
           lastLogin: { $gte: thirtyDaysAgo } // Active in last 30 days
         })
@@ -78,8 +79,8 @@ const salesManagerDashboardController = {
 
         // Calculate performance score based on team performance
         User.aggregate([
-          { 
-            $match: { 
+          {
+            $match: {
               role: "sales_agent",
               manager: managerId,
               target: { $gt: 0 }, // Only agents with targets
@@ -89,8 +90,8 @@ const salesManagerDashboardController = {
           {
             $group: {
               _id: null,
-              avgPerformance: { 
-                $avg: { 
+              avgPerformance: {
+                $avg: {
                   $multiply: [
                     { $divide: ["$targetAchieved", "$target"] },
                     100
@@ -114,8 +115,8 @@ const salesManagerDashboardController = {
 
       // Get previous quarter performance for comparison
       const previousQuarterPerformance = await User.aggregate([
-        { 
-          $match: { 
+        {
+          $match: {
             role: "sales_agent",
             manager: managerId,
             target: { $gt: 0 }
@@ -124,8 +125,8 @@ const salesManagerDashboardController = {
         {
           $group: {
             _id: null,
-            avgPerformance: { 
-              $avg: { 
+            avgPerformance: {
+              $avg: {
                 $multiply: [
                   { $divide: [{ $ifNull: ["$previousTargetAchieved", 0] }, "$target"] },
                   100
@@ -194,8 +195,7 @@ const salesManagerDashboardController = {
         .select("firstName lastName email phone target targetAchieved")
         .lean();
 
-      console.log(managerId, "Team Members Count:", teamMembers);
-
+ 
       if (teamMembers.length === 0) {
         return res.status(200).json({
           success: true,
@@ -225,25 +225,25 @@ const salesManagerDashboardController = {
           // Get invoices for team's customers
           customerCodes.length > 0
             ? Invoice.find({
-                CardCode: { $in: customerCodes },
-                DocDate: { $gte: start, $lte: end },
-              }).lean()
+              CardCode: { $in: customerCodes },
+              DocDate: { $gte: start, $lte: end },
+            }).lean()
             : [],
 
           // Get sales orders for team's customers
           customerCodes.length > 0
             ? SalesOrder.find({
-                CardCode: { $in: customerCodes },
-                DocDate: { $gte: start, $lte: end },
-              }).lean()
+              CardCode: { $in: customerCodes },
+              DocDate: { $gte: start, $lte: end },
+            }).lean()
             : [],
 
           // Get quotations for team's customers
           customerCodes.length > 0
             ? Quotation.find({
-                CardCode: { $in: customerCodes },
-                DocDate: { $gte: start, $lte: end },
-              }).lean()
+              CardCode: { $in: customerCodes },
+              DocDate: { $gte: start, $lte: end },
+            }).lean()
             : [],
 
           // Get call data for team
@@ -254,22 +254,28 @@ const salesManagerDashboardController = {
         ]);
 
       // Calculate summary metrics
-      const summary = calculateSummaryMetrics(
+      const summary = await calculateSummaryMetrics(
         teamMembers,
         invoices,
         salesOrders,
         quotations,
-        callData
+        callData,
+        customerCodes, // ✅ ADD: Pass customerCodes
+        start,         // ✅ ADD: Pass start date
+        end            // ✅ ADD: Pass end date
       );
 
+
       // Calculate charts data
-      const charts = calculateChartsData(
+      const charts = await calculateChartsData(
         invoices,
         salesOrders,
+
         quotations,
         callData,
         start,
-        end
+        end,
+        customerCodes // ✅ ADD: Pass customerCodes
       );
 
       // Get recent activities
@@ -489,9 +495,9 @@ const salesManagerDashboardController = {
         averageDuration:
           callData.length > 0
             ? callData.reduce(
-                (sum, call) => sum + (call.inCallDuration || 0),
-                0
-              ) / callData.length
+              (sum, call) => sum + (call.inCallDuration || 0),
+              0
+            ) / callData.length
             : 0,
       };
 
@@ -559,11 +565,17 @@ async function calculateTeamPerformance(
     customerAgentMap[customer.CardCode] = customer.assignedTo;
   });
 
-  console.log("Customer to Agent Map:", customerAgentMap);
+
 
   // Get all data in parallel
-  const [invoices, salesOrders, quotations, callData] = await Promise.all([
+  const [invoices, creditNotes, salesOrders, quotations, callData] = await Promise.all([
     Invoice.find({
+      CardCode: { $in: customerCodes },
+      DocDate: { $gte: startDate, $lte: endDate },
+    }).lean(),
+
+    // ✅ ADD: Get credit notes
+    require("../models/CreditNotes").find({
       CardCode: { $in: customerCodes },
       DocDate: { $gte: startDate, $lte: endDate },
     }).lean(),
@@ -592,6 +604,8 @@ async function calculateTeamPerformance(
       agentId,
       totalSales: 0,
       invoicesCount: 0,
+      creditNotesAmount: 0, // ✅ ADD: Track credit notes
+      creditNotesCount: 0,
       salesOrdersCount: 0,
       salesOrdersAmount: 0,
       quotationsCount: 0,
@@ -602,13 +616,14 @@ async function calculateTeamPerformance(
     };
   });
 
-  // Process invoices
+  // ✅ UPDATED: Process invoices without VAT
   invoices.forEach((invoice) => {
     const agentId = customerAgentMap[invoice.CardCode];
     if (agentId) {
       const agentIdStr = agentId.toString();
       if (agentPerformance[agentIdStr]) {
-        agentPerformance[agentIdStr].totalSales += invoice.DocTotal || 0;
+        const netAmount = (invoice.DocTotal || 0) - (invoice.VatSum || 0);
+        agentPerformance[agentIdStr].totalSales += netAmount;
         agentPerformance[agentIdStr].invoicesCount += 1;
 
         const invoiceDate = new Date(invoice.DocDate);
@@ -618,6 +633,20 @@ async function calculateTeamPerformance(
         ) {
           agentPerformance[agentIdStr].lastActivity = invoiceDate;
         }
+      }
+    }
+  });
+
+  // ✅ ADD: Process credit notes (subtract from sales)
+  creditNotes.forEach((creditNote) => {
+    const agentId = customerAgentMap[creditNote.CardCode];
+    if (agentId) {
+      const agentIdStr = agentId.toString();
+      if (agentPerformance[agentIdStr]) {
+        const netAmount = (creditNote.DocTotal || 0) - (creditNote.VatSum || 0);
+        agentPerformance[agentIdStr].totalSales -= netAmount; // Subtract from total sales
+        agentPerformance[agentIdStr].creditNotesAmount += netAmount;
+        agentPerformance[agentIdStr].creditNotesCount += 1;
       }
     }
   });
@@ -663,7 +692,6 @@ async function calculateTeamPerformance(
     }
   });
 
-  // Calculate unique customers per agent
   const agentCustomers = {};
   customerToAgent.forEach((customer) => {
     const agentIdStr = customer.assignedTo.toString();
@@ -684,23 +712,48 @@ async function calculateTeamPerformance(
 /**
  * Calculate summary metrics
  */
-function calculateSummaryMetrics(
+/**
+ * Calculate summary metrics with credit notes deduction
+ */
+async function calculateSummaryMetrics(
   teamMembers,
   invoices,
   salesOrders,
   quotations,
-  callData
+  callData,
+  customerCodes,
+  startDate,
+  endDate
 ) {
+  // Calculate invoice totals without VAT
+  const invoiceTotal = invoices.reduce((sum, invoice) => {
+    const netAmount = (invoice.DocTotal || 0) - (invoice.VatSum || 0);
+    return sum + netAmount;
+  }, 0);
+
+  // Get and calculate credit notes without VAT
+  const creditNotes = customerCodes.length > 0
+    ? await require("../models/CreditNotes").find({
+      CardCode: { $in: customerCodes },
+      DocDate: { $gte: startDate, $lte: endDate },
+    }).lean()
+    : [];
+
+  const creditNoteTotal = creditNotes.reduce((sum, creditNote) => {
+    const netAmount = (creditNote.DocTotal || 0) - (creditNote.VatSum || 0);
+    return sum + netAmount;
+  }, 0);
+
+  // Calculate net sales (invoices - credit notes, both without VAT)
+  const netTotalSales = invoiceTotal - creditNoteTotal;
+
   const totalTarget = teamMembers.reduce(
     (sum, member) => sum + (member.target || 0),
     0
   );
-  const totalSales = invoices.reduce(
-    (sum, invoice) => sum + (invoice.DocTotal || 0),
-    0
-  );
+
   const achievementRate =
-    totalTarget > 0 ? (totalSales / totalTarget) * 100 : 0;
+    totalTarget > 0 ? (netTotalSales / totalTarget) * 100 : 0;
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -708,7 +761,7 @@ function calculateSummaryMetrics(
     (call) => new Date(call.startTime) >= today
   ).length;
 
-  // Calculate orders metrics
+  // Calculate orders metrics (keep with VAT for comparison with SAP)
   const totalOrdersAmount = salesOrders.reduce(
     (sum, order) => sum + (order.DocTotal || 0),
     0
@@ -741,7 +794,10 @@ function calculateSummaryMetrics(
   return {
     teamSize: teamMembers.length,
     totalTarget: Math.round(totalTarget),
-    totalSales: Math.round(totalSales),
+    totalSales: Math.round(netTotalSales), // ✅ NOW: Net sales without VAT and after credit notes
+    totalSalesWithVat: Math.round(invoiceTotal + (invoices.reduce((sum, inv) => sum + (inv.VatSum || 0), 0))), // Gross for reference
+    creditNotesAmount: Math.round(creditNoteTotal), // Credit notes amount for transparency
+    creditNotesCount: creditNotes.length,
     achievementRate: Math.round(achievementRate * 100) / 100,
     totalInvoices: invoices.length,
     totalCalls: callData.length,
@@ -749,13 +805,13 @@ function calculateSummaryMetrics(
     averageCallDuration:
       callData.length > 0
         ? Math.round(
-            callData.reduce(
-              (sum, call) => sum + (call.inCallDuration || 0),
-              0
-            ) / callData.length
-          )
+          callData.reduce(
+            (sum, call) => sum + (call.inCallDuration || 0),
+            0
+          ) / callData.length
+        )
         : 0,
-    // New metrics for orders and quotations
+    // Orders and quotations metrics
     totalOrders: salesOrders.length,
     totalOrdersAmount: Math.round(totalOrdersAmount),
     ordersThisMonth: ordersThisMonth.length,
@@ -770,22 +826,33 @@ function calculateSummaryMetrics(
     ),
   };
 }
-
 /**
  * Calculate chart data
  */
-function calculateChartsData(
+/**
+ * Calculate chart data with credit notes
+ */
+async function calculateChartsData(
   invoices,
   salesOrders,
   quotations,
   callData,
   startDate,
-  endDate
+  endDate,
+  customerCodes // ✅ ADD: customerCodes parameter
 ) {
+  // ✅ ADD: Fetch credit notes within the function
+  const creditNotes = customerCodes.length > 0
+    ? await CreditNote.find({
+      CardCode: { $in: customerCodes },
+      DocDate: { $gte: startDate, $lte: endDate },
+    }).lean()
+    : [];
+
   // Monthly trends for all three types
   const monthlyData = {};
 
-  // Process invoices
+  // ✅ UPDATED: Process invoices without VAT
   invoices.forEach((invoice) => {
     const date = new Date(invoice.DocDate);
     const monthKey = `${date.getFullYear()}-${String(
@@ -805,12 +872,46 @@ function calculateChartsData(
         invoices: 0,
         ordersCount: 0,
         quotationsCount: 0,
+        creditNotes: 0, // ✅ ADD: Track credit notes
         date: new Date(date.getFullYear(), date.getMonth(), 1),
       };
     }
 
-    monthlyData[monthKey].sales += invoice.DocTotal || 0;
+    const netAmount = (invoice.DocTotal || 0) - (invoice.VatSum || 0);
+    monthlyData[monthKey].sales += netAmount;
     monthlyData[monthKey].invoices += 1;
+  });
+
+  // ✅ ADD: Process credit notes (subtract from monthly sales)
+  creditNotes.forEach((creditNote) => {
+    const date = new Date(creditNote.DocDate);
+    const monthKey = `${date.getFullYear()}-${String(
+      date.getMonth() + 1
+    ).padStart(2, "0")}`;
+
+    if (monthlyData[monthKey]) {
+      const netAmount = (creditNote.DocTotal || 0) - (creditNote.VatSum || 0);
+      monthlyData[monthKey].sales -= netAmount; // Subtract from sales
+      monthlyData[monthKey].creditNotes += netAmount;
+    } else {
+      // Create month if credit note exists but no invoices
+      const monthLabel = date.toLocaleDateString("en-US", {
+        month: "short",
+        year: "numeric",
+      });
+
+      monthlyData[monthKey] = {
+        month: monthLabel,
+        sales: -(netAmount), // Negative sales due to credit note
+        orders: 0,
+        quotations: 0,
+        invoices: 0,
+        ordersCount: 0,
+        quotationsCount: 0,
+        creditNotes: netAmount,
+        date: new Date(date.getFullYear(), date.getMonth(), 1),
+      };
+    }
   });
 
   // Process sales orders
@@ -833,6 +934,7 @@ function calculateChartsData(
         invoices: 0,
         ordersCount: 0,
         quotationsCount: 0,
+        creditNotes: 0,
         date: new Date(date.getFullYear(), date.getMonth(), 1),
       };
     }
@@ -861,6 +963,7 @@ function calculateChartsData(
         invoices: 0,
         ordersCount: 0,
         quotationsCount: 0,
+        creditNotes: 0,
         date: new Date(date.getFullYear(), date.getMonth(), 1),
       };
     }
@@ -874,12 +977,13 @@ function calculateChartsData(
     .slice(-6) // Last 6 months
     .map((item) => ({
       month: item.month,
-      sales: Math.round(item.sales),
+      sales: Math.round(item.sales), // ✅ Now net sales after credit notes
       orders: Math.round(item.orders),
       quotations: Math.round(item.quotations),
       invoices: item.invoices,
       ordersCount: item.ordersCount,
       quotationsCount: item.quotationsCount,
+      creditNotes: Math.round(item.creditNotes),
     }));
 
   // Daily calls trend (last 7 days)

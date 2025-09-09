@@ -17,6 +17,12 @@ router.get(
   salesAgentJourneyController.getDashboard
 );
 
+
+router.get(
+  "/:agentId/quotations",
+  salesAgentJourneyController.getAgentQuotations
+);
+
 /**
  * @route   GET /api/sales-agent-journey/:agentId/customers
  * @desc    Get customers assigned to a sales agent

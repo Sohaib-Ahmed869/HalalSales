@@ -41,6 +41,8 @@ const jobLogRoutes = require("./routes/jobLog.routes");
 const postalCodeScrapingRoutes = require("./routes/postalCodeScraping.routes");
 const chatbotRoutes = require('./routes/chatbot.routes');
 const productAnalyticsRoutes = require('./routes/productAnalytics.routes')
+const restaurantScraperRoutes = require("./routes/restaurantScraper.routes");
+
 const config = require("./services/config");
 const desktimeJob = require("./jobs/desktimeJob");
 const { linkDocumentsToAgents } = require("./migrateAgentReferences");
@@ -159,6 +161,8 @@ app.use("/api/restaurant-matcher", restaurantMatcherRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/customer-journey", customerJourneyRoutes);
 app.use("/api/recommendations", recommendationRoutes);
+app.use("/api/restaurant-scraper", restaurantScraperRoutes);
+
 // SuperChat Conversation Management routes
 const superChatConversationRoutes = require("./routes/superChatConversation.routes");
 app.use("/api/super-chat", superChatConversationRoutes);
