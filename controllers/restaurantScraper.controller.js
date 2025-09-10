@@ -2,7 +2,7 @@
 const Restaurant = require('../models/Restaurant');
 const axios = require('axios');
 
-const SCRAPER_BASE_URL = process.env.SCRAPER_BASE_URL || 'https://france-scraper-hfs.onrender.com';
+const SCRAPER_BASE_URL = process.env.SCRAPER_BASE_URL || 'http://localhost:3000';
 
 const restaurantScraperController = {
   /**
