@@ -28,6 +28,266 @@ const transporter = nodemailer.createTransport({
     pass: process.env.SMTP_PASSWORD,
   },
 });
+// Helper function to get VAT rate based on VAT group and company
+const getVATRate = (vatGroup, company) => {
+  if (company === "ms-foods") {
+    // ms-foods company uses simple 20% and 0% system
+    switch (vatGroup) {
+      case "STD20":
+      case "STANDARD":
+        return 0.2; // 20%
+      case "ZERO":
+      case "EXEMPT":
+        return 0.0; // 0%
+      default:
+        return 0.2; // Default to 20%
+    }
+  } else {
+    // Other companies (PQF and default) use C4/C3/C5 system
+    switch (vatGroup) {
+      case "C4":
+        return 0.2; // 20%
+      case "C3":
+        return 0.055; // 5.5%
+      case "C5":
+        return 0.0; // 0% (zero rated)
+      default:
+        return 0.055; // Default to 5.5%
+    }
+  }
+};
+// Edit quotation specifically for ms-foods company
+exports.editQuotationForMsFoods = async (req, res) => {
+  try {
+    const { docEntry } = req.params;
+    const { DocumentLines, Comments, DocDueDate } = req.body;
+
+    // Check if user is from ms-foods company
+    const isAdminEdit = req.user.role === "admin" || req.user.role === "superAdmin";
+
+    // Find the quotation
+    const quotation = await Quotation.findOne({
+      DocEntry: docEntry,
+      IsActive: true,
+    }).populate('salesAgent', 'firstName lastName email');
+
+    if (!quotation) {
+      return res.status(404).json({
+        success: false,
+        message: `Active quotation with DocEntry ${docEntry} not found`,
+      });
+    }
+
+
+    // Check permissions for sales agents
+    if (
+      req.user.role === "sales_agent" &&
+      quotation.salesAgent &&
+      quotation.salesAgent._id.toString() !== req.user._id.toString()
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to update this quotation",
+      });
+    }
+
+    // Update quotation fields
+    if (Comments !== undefined) {
+      quotation.Comments = Comments;
+    }
+
+    if (DocDueDate !== undefined) {
+      quotation.DocDueDate = new Date(DocDueDate);
+    }
+
+    // Update document lines if provided
+    if (DocumentLines && Array.isArray(DocumentLines)) {
+      // Validate document lines
+      if (DocumentLines.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "At least one item must be present in the quotation",
+        });
+      }
+
+      // Process and validate each line
+      const processedLines = DocumentLines.map((line, index) => {
+        if (!line.ItemCode || !line.ItemDescription) {
+          throw new Error(`Line ${index + 1}: Item code and description are required`);
+        }
+
+        const quantity = parseFloat(line.Quantity) || 0;
+        const price = parseFloat(line.Price) || 0;
+
+        if (quantity <= 0) {
+          throw new Error(`Line ${index + 1}: Quantity must be greater than 0`);
+        }
+
+        if (price < 0) {
+          throw new Error(`Line ${index + 1}: Price cannot be negative`);
+        }
+
+        // Determine company from user or default
+        const userCompany = req.user.company || "default";
+
+        // Set appropriate VAT group based on company
+        let defaultVatGroup;
+        if (userCompany === "ms-foods") {
+          defaultVatGroup = "STD20"; // 20% for ms-foods
+        } else {
+          defaultVatGroup = "C3"; // 5.5% for default/PQF companies
+        }
+
+        const vatGroup = line.VatGroup || defaultVatGroup;
+
+        // Calculate VAT using the helper function
+        const vatRate = getVATRate(vatGroup, userCompany);
+        const priceAfterVAT = price * (1 + vatRate);
+        const lineTotal = quantity * price;
+        const lineTotalWithVAT = quantity * priceAfterVAT;
+
+        return {
+          ...line,
+          LineNum: index,
+          Quantity: quantity,
+          Price: price,
+          LineTotal: lineTotal,
+          LineTotalWithVAT: lineTotalWithVAT,
+          VatGroup: vatGroup,
+          PriceAfterVAT: priceAfterVAT,
+        };
+      });
+
+      quotation.DocumentLines = processedLines;
+
+      // Recalculate totals
+      let totalExVAT = 0;
+      let totalIncVAT = 0;
+
+      for (const line of quotation.DocumentLines) {
+        totalExVAT += line.LineTotal;
+        totalIncVAT += line.LineTotalWithVAT;
+      }
+
+      quotation.DocTotal = totalExVAT;
+      quotation.DocTotalWithVAT = totalIncVAT;
+      quotation.VatSum = totalIncVAT - totalExVAT;
+    }
+
+    // Update the UpdateDate
+    quotation.UpdateDate = new Date();
+
+    // Set quotation status to approved since editing is complete
+    console.log("Before update - approvalStatus:", quotation.approvalStatus);
+
+    quotation.approvalStatus = "approved";
+    quotation.approvedBy = req.user._id;
+    quotation.approvedDate = new Date();
+    quotation.rejectedBy = undefined;
+    quotation.rejectedDate = undefined;
+    quotation.rejectionReason = undefined;
+    quotation.approvalComments = undefined;
+
+    // Clear the approval task reference since it's no longer needed
+    quotation.approvalTask = undefined;
+
+    console.log("After update - approvalStatus:", quotation.approvalStatus);
+    console.log("Quotation object before save:", {
+      DocEntry: quotation.DocEntry,
+      approvalStatus: quotation.approvalStatus,
+      approvedBy: quotation.approvedBy,
+      approvedDate: quotation.approvedDate
+    });
+
+    // Complete all existing approval tasks for this quotation
+    try {
+      // First, find the tasks to see what we're working with
+      const existingTasks = await Task.find({
+        relatedQuotation: quotation.DocEntry,  // Use DocEntry instead of _id
+        type: "approval",
+        status: { $in: ["pending", "pending_approval"] },
+      });
+
+      console.log(`Found ${existingTasks.length} approval tasks for quotation ${quotation.DocEntry}:`, existingTasks.map(t => ({ id: t._id, status: t.status })));
+
+      if (existingTasks.length > 0) {
+        const taskUpdateResult = await Task.updateMany(
+          {
+            relatedQuotation: quotation.DocEntry,  // Use DocEntry instead of _id
+            type: "approval",
+            status: { $in: ["pending", "pending_approval"] },
+          },
+          {
+            status: "completed",
+            completedDate: new Date(),
+            comments: `Task completed automatically when quotation was edited and approved by ${req.user.firstName} ${req.user.lastName}`,
+          }
+        );
+
+        console.log(`Updated ${taskUpdateResult.modifiedCount} approval tasks for quotation ${quotation.DocEntry}`);
+      } else {
+        console.log("No approval tasks found to update");
+      }
+    } catch (taskError) {
+      console.error("Error updating approval tasks:", taskError);
+      // Continue with quotation update even if task update fails
+    }
+
+    // Save the updated quotation
+    console.log("Saving quotation with approvalStatus:", quotation.approvalStatus);
+    await quotation.save();
+    console.log("Quotation saved successfully with new status:", quotation.approvalStatus);
+
+    // Create notification for sales agent if admin edited the quotation
+    if (isAdminEdit && quotation.salesAgent && quotation.salesAgent._id.toString() !== req.user._id.toString()) {
+      try {
+        const NotificationService = require("../utils/notificationService");
+        await NotificationService.createNotification({
+          recipient: quotation.salesAgent._id,
+          sender: req.user._id,
+          type: "quotation_edited_by_admin",
+          title: "Quotation Edited by Admin",
+          message: `Your quotation #${quotation.DocNum} for ${quotation.CardName} has been edited and approved by an administrator.`,
+        });
+        console.log("Notification sent to sales agent for admin edit");
+      } catch (notificationError) {
+        console.error("Error creating notification for admin edit:", notificationError);
+        // Continue even if notification fails
+      }
+    }
+
+    // Verify the quotation was saved correctly by fetching it again
+    const savedQuotation = await Quotation.findById(quotation._id);
+    console.log("Verification - saved quotation approvalStatus:", savedQuotation.approvalStatus);
+
+    res.json({
+      success: true,
+      message: "Quotation updated successfully",
+      quotation: {
+        DocEntry: quotation.DocEntry,
+        DocNum: quotation.DocNum,
+        DocTotal: quotation.DocTotal,
+        DocTotalWithVAT: quotation.DocTotalWithVAT,
+        VatSum: quotation.VatSum,
+        DocumentLines: quotation.DocumentLines,
+        Comments: quotation.Comments,
+        DocDueDate: quotation.DocDueDate,
+        approvalStatus: quotation.approvalStatus,
+        UpdateDate: quotation.UpdateDate,
+        // Include verification data
+        savedApprovalStatus: savedQuotation.approvalStatus,
+        savedApprovedBy: savedQuotation.approvedBy,
+        savedApprovedDate: savedQuotation.approvedDate,
+      },
+    });
+  } catch (error) {
+    console.error("Error editing quotation for ms-foods:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Internal server error",
+    });
+  }
+};
 
 // Generate payment link for quotation
 exports.generatePaymentLinkForQuotation = async (req, res) => {
@@ -182,37 +442,36 @@ exports.generatePaymentLinkForQuotation = async (req, res) => {
 </thead>
 <tbody>
 ${quotation.DocumentLines.map(
-  (line) => `
+      (line) => `
   <tr>
   <td style="padding: 8px; border: 1px solid #ddd;">${line.ItemDescription}</td>
   <td style="padding: 8px; border: 1px solid #ddd;">${line.Quantity}</td>
   <td style="padding: 8px; border: 1px solid #ddd;">${new Intl.NumberFormat(
-    "fr-FR",
-    {
-      style: "currency",
-      currency: "EUR",
-    }
-  ).format(line.Price)}</td>
-  <td style="padding: 8px; border: 1px solid #ddd;">${
-    line.VatGroup || "C4"
-  }</td>
+        "fr-FR",
+        {
+          style: "currency",
+          currency: "EUR",
+        }
+      ).format(line.Price)}</td>
+  <td style="padding: 8px; border: 1px solid #ddd;">${line.VatGroup || "C4"
+        }</td>
   <td style="padding: 8px; border: 1px solid #ddd;">${new Intl.NumberFormat(
-    "fr-FR",
-    {
-      style: "currency",
-      currency: "EUR",
-    }
-  ).format(line.PriceAfterVAT || line.Price * 1.2)}</td>
+          "fr-FR",
+          {
+            style: "currency",
+            currency: "EUR",
+          }
+        ).format(line.PriceAfterVAT || line.Price * 1.2)}</td>
   <td style="padding: 8px; border: 1px solid #ddd;">${new Intl.NumberFormat(
-    "fr-FR",
-    {
-      style: "currency",
-      currency: "EUR",
-    }
-  ).format(line.LineTotalWithVAT || line.LineTotal * 1.2)}</td>
+          "fr-FR",
+          {
+            style: "currency",
+            currency: "EUR",
+          }
+        ).format(line.LineTotalWithVAT || line.LineTotal * 1.2)}</td>
   </tr>
   `
-).join("")}
+    ).join("")}
 </tbody>
 <tfoot>
 <tr style="background-color: #f3f4f6;">
@@ -548,7 +807,7 @@ exports.getQuotationStats = async (req, res) => {
     const { fromDate, toDate, salesAgent } = req.query;
 
     // Build filter query with role-based restrictions
-  let query = {};
+    let query = {};
 
     // Role-based filtering
     if (req.user.role === "sales_agent") {
@@ -720,9 +979,8 @@ exports.approveQuotation = async (req, res) => {
         approvalTask.completedDate = new Date();
 
         // Add approval comment to task
-        const taskComment = `Quotation approved by ${req.user.firstName} ${
-          req.user.lastName
-        }${comments ? ": " + comments : ""}`;
+        const taskComment = `Quotation approved by ${req.user.firstName} ${req.user.lastName
+          }${comments ? ": " + comments : ""}`;
         approvalTask.comments = approvalTask.comments
           ? `${approvalTask.comments}\n\n${taskComment}`
           : taskComment;
@@ -780,9 +1038,8 @@ exports.rejectQuotation = async (req, res) => {
         approvalTask.status = "rejected";
 
         // Add rejection comment to task
-        const taskComment = `Quotation rejected by ${req.user.firstName} ${
-          req.user.lastName
-        }${reason ? ": " + reason : ""}`;
+        const taskComment = `Quotation rejected by ${req.user.firstName} ${req.user.lastName
+          }${reason ? ": " + reason : ""}`;
         approvalTask.comments = approvalTask.comments
           ? `${approvalTask.comments}\n\n${taskComment}`
           : taskComment;
@@ -977,11 +1234,9 @@ exports.createQuotation = async (req, res) => {
       // Create new task for quotation approval
       const task = new Task({
         title: `Approve Quotation #${newQuotation.DocNum}`,
-        description: `Review and approve quotation #${
-          newQuotation.DocNum
-        } for ${newQuotation.CardName} (${
-          newQuotation.CardCode
-        }) - Total: $${newQuotation.DocTotal.toFixed(2)}`,
+        description: `Review and approve quotation #${newQuotation.DocNum
+          } for ${newQuotation.CardName} (${newQuotation.CardCode
+          }) - Total: $${newQuotation.DocTotal.toFixed(2)}`,
         dueDate: new Date(new Date().setDate(new Date().getDate() + 1)), // Due tomorrow
         priority: "medium",
         type: "approval",
@@ -1027,31 +1282,31 @@ exports.getAllQuotations = async (req, res) => {
     console.log("User ID:", req.user._id);
 
     // Base query - show ALL quotations by default
-let query = {};
+    let query = {};
 
-// Add specific filters based on status
-if (req.query.status) {
-  if (req.query.status === "active") {
-    query.IsActive = true;
-  } else if (req.query.status === "converted") {
-    query.ConvertedToOrderDocEntry = { $exists: true };
-    query.IsActive = false;
-  } else if (req.query.status === "cancelled") {
-    query.IsActive = false;
-    query.ConvertedToOrderDocEntry = { $exists: false };
-  } else if (req.query.status === "pending") {
-    query.approvalStatus = "pending";
-    query.IsActive = true;
-  } else if (req.query.status === "approved") {
-    query.approvalStatus = "approved";
-    query.IsActive = true;
-  } else if (req.query.status === "rejected") {
-    query.approvalStatus = "rejected";
-    query.IsActive = true;
-  }
-} else {
-  // Default: show all quotations (no filtering)
-}
+    // Add specific filters based on status
+    if (req.query.status) {
+      if (req.query.status === "active") {
+        query.IsActive = true;
+      } else if (req.query.status === "converted") {
+        query.ConvertedToOrderDocEntry = { $exists: true };
+        query.IsActive = false;
+      } else if (req.query.status === "cancelled") {
+        query.IsActive = false;
+        query.ConvertedToOrderDocEntry = { $exists: false };
+      } else if (req.query.status === "pending") {
+        query.approvalStatus = "pending";
+        query.IsActive = true;
+      } else if (req.query.status === "approved") {
+        query.approvalStatus = "approved";
+        query.IsActive = true;
+      } else if (req.query.status === "rejected") {
+        query.approvalStatus = "rejected";
+        query.IsActive = true;
+      }
+    } else {
+      // Default: show all quotations (no filtering)
+    }
 
     // Role-based filtering
     if (req.user.role === "sales_agent") {
@@ -1537,11 +1792,9 @@ exports.updateQuotation = async (req, res) => {
 
         const task = new Task({
           title: `Approve Updated Quotation #${quotation.DocNum}`,
-          description: `Review and approve updated quotation #${
-            quotation.DocNum
-          } for ${quotation.CardName} (${
-            quotation.CardCode
-          }) - Total: €${quotation.DocTotal.toFixed(2)}`,
+          description: `Review and approve updated quotation #${quotation.DocNum
+            } for ${quotation.CardName} (${quotation.CardCode
+            }) - Total: €${quotation.DocTotal.toFixed(2)}`,
           dueDate: new Date(new Date().setDate(new Date().getDate() + 1)),
           priority: "medium",
           type: "approval",
@@ -1933,9 +2186,8 @@ async function sendEmailWithAttachment({ to, cc, subject, text, attachments }) {
       errorMessage =
         "Email authentication failed. Please check username and password.";
     } else if (error.responseCode) {
-      errorMessage = `SMTP Error: ${error.responseCode} - ${
-        error.response || error.message
-      }`;
+      errorMessage = `SMTP Error: ${error.responseCode} - ${error.response || error.message
+        }`;
     } else if (error.message) {
       errorMessage = error.message;
     }

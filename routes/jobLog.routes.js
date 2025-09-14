@@ -11,6 +11,10 @@ router.get("/", jobLogController.getAllJobs);
 // GET /api/jobs/stats?days=7
 router.get("/stats", jobLogController.getJobStats);
 
+// Get data completion statistics - NEW ROUTE
+// GET /api/jobs/data-completion
+router.get("/data-completion", jobLogController.getDataCompletionStats);
+
 // Get job types summary
 // GET /api/jobs/types-summary?days=30
 router.get("/types-summary", jobLogController.getJobTypesSummary);

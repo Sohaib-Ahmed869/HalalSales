@@ -1,5 +1,13 @@
 // controllers/jobLog.controller.js
 const JobLog = require("../models/jobLog.model");
+const Customer = require("../models/Customer");
+const Invoice = require("../models/Invoice");
+const Payment = require("../models/payment");
+const CreditNote = require("../models/CreditNotes");
+const Return = require("../models/Return");
+const PurchaseOrder = require("../models/Purchase");
+const Cart = require("../models/Cart");
+const CallData = require("../models/CallData");
 
 const jobLogController = {
   // Get all job logs with pagination and filtering
@@ -231,6 +239,192 @@ const jobLogController = {
       res.status(500).json({
         success: false,
         message: "Error fetching recent errors",
+        error: error.message,
+      });
+    }
+  },
+
+  // Get data completion stats - NEW ENDPOINT
+  getDataCompletionStats: async (req, res) => {
+    try {
+      // Get current date ranges
+      const now = new Date();
+      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      const last24Hours = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+      // Model configurations with their respective models and display names
+      const modelConfigs = [
+        { model: Customer, name: "Customers", collection: "customers" },
+        { model: Invoice, name: "Invoices", collection: "invoices" },
+        { model: Payment, name: "Payments", collection: "payments" },
+        { model: CreditNote, name: "Credit Notes", collection: "creditnotes" },
+        { model: Return, name: "Returns", collection: "returns" },
+        { model: PurchaseOrder, name: "Purchase Orders", collection: "purchaseorders" },
+        { model: Cart, name: "Abandoned Carts (AC)", collection: "carts" },
+        { model: CallData, name: "Call Records", collection: "calldata" }
+      ];
+
+      const completionStats = await Promise.all(
+        modelConfigs.map(async (config) => {
+          try {
+            // Get total count
+            const totalInDatabase = await config.model.countDocuments();
+
+            // Get current month count
+            let currentMonthQuery = {};
+            if (config.collection === 'carts') {
+              currentMonthQuery = { createDate: { $gte: startOfMonth } };
+            } else if (config.collection === 'calldata') {
+              currentMonthQuery = { startTime: { $gte: startOfMonth } };
+            } else {
+              // Assuming most models have createdAt or similar timestamp field
+              currentMonthQuery = {
+                $or: [
+                  { createdAt: { $gte: startOfMonth } },
+                  { createDate: { $gte: startOfMonth } },
+                  { startTime: { $gte: startOfMonth } }
+                ]
+              };
+            }
+
+            const currentMonth = await config.model.countDocuments(currentMonthQuery);
+
+            // Get last 24 hours count
+            let last24HoursQuery = {};
+            if (config.collection === 'carts') {
+              last24HoursQuery = { createDate: { $gte: last24Hours } };
+            } else if (config.collection === 'calldata') {
+              last24HoursQuery = { startTime: { $gte: last24Hours } };
+            } else {
+              last24HoursQuery = {
+                $or: [
+                  { createdAt: { $gte: last24Hours } },
+                  { createDate: { $gte: last24Hours } },
+                  { startTime: { $gte: last24Hours } }
+                ]
+              };
+            }
+
+            const last24HoursCount = await config.model.countDocuments(last24HoursQuery);
+
+            // Get latest sync job for this model type
+            const syncJobTypes = {
+              'customers': ['SCHEDULED_SYNC', 'MANUAL_SYNC', 'CUSTOMER_SYNC'],
+              'invoices': ['INVOICE_SYNC', 'SCHEDULED_SYNC'],
+              'payments': ['PAYMENT_SYNC', 'SCHEDULED_SYNC'],
+              'creditnotes': ['CREDITNOTE_SYNC', 'SCHEDULED_SYNC'],
+              'returns': ['RETURN_SYNC', 'SCHEDULED_SYNC'],
+              'purchaseorders': ['PURCHASE_SYNC', 'SCHEDULED_SYNC'],
+              'carts': ['CART_SYNC', 'SCHEDULED_SYNC', 'AC_SYNC'],
+              'calldata': ['CALL_SYNC', 'SCHEDULED_SYNC', 'CALL_RECORDS_SYNC']
+            };
+
+            const jobTypes = syncJobTypes[config.collection] || ['SCHEDULED_SYNC'];
+
+            const lastSyncJob = await JobLog.findOne({
+              jobType: { $in: jobTypes }
+            }).sort({ startTime: -1 }).lean();
+
+            // Calculate growth percentage (comparing current month to previous month)
+            const startOfPrevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+            const endOfPrevMonth = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
+
+            let prevMonthQuery = {};
+            if (config.collection === 'carts') {
+              prevMonthQuery = {
+                createDate: {
+                  $gte: startOfPrevMonth,
+                  $lte: endOfPrevMonth
+                }
+              };
+            } else if (config.collection === 'calldata') {
+              prevMonthQuery = {
+                startTime: {
+                  $gte: startOfPrevMonth,
+                  $lte: endOfPrevMonth
+                }
+              };
+            } else {
+              prevMonthQuery = {
+                $or: [
+                  {
+                    createdAt: {
+                      $gte: startOfPrevMonth,
+                      $lte: endOfPrevMonth
+                    }
+                  },
+                  {
+                    createDate: {
+                      $gte: startOfPrevMonth,
+                      $lte: endOfPrevMonth
+                    }
+                  },
+                  {
+                    startTime: {
+                      $gte: startOfPrevMonth,
+                      $lte: endOfPrevMonth
+                    }
+                  }
+                ]
+              };
+            }
+
+            const prevMonth = await config.model.countDocuments(prevMonthQuery);
+
+            let growth = "+0.0%";
+            if (prevMonth > 0) {
+              const growthPercent = ((currentMonth - prevMonth) / prevMonth) * 100;
+              growth = growthPercent >= 0 ? `+${growthPercent.toFixed(1)}%` : `${growthPercent.toFixed(1)}%`;
+            } else if (currentMonth > 0) {
+              growth = "+100.0%";
+            }
+
+            // Count recent errors for this model type
+            const errorCount = lastSyncJob ?
+              Math.max(
+                (lastSyncJob.errors && lastSyncJob.errors.length) || 0,
+                (lastSyncJob.logs && lastSyncJob.logs.filter(log => log.level === 'ERROR').length) || 0,
+                (lastSyncJob.stats && lastSyncJob.stats.errors) || 0
+              ) : 0;
+
+            return {
+              modelName: config.name,
+              collection: config.collection,
+              totalInDatabase,
+              currentMonth,
+              last24Hours: last24HoursCount,
+              lastSyncTime: lastSyncJob ? lastSyncJob.startTime : new Date(),
+              syncStatus: lastSyncJob ? lastSyncJob.status : 'UNKNOWN',
+              errorCount,
+              growth
+            };
+
+          } catch (modelError) {
+            console.error(`Error fetching stats for ${config.name}:`, modelError);
+            return {
+              modelName: config.name,
+              collection: config.collection,
+              totalInDatabase: 0,
+              currentMonth: 0,
+              last24Hours: 0,
+              lastSyncTime: new Date(),
+              syncStatus: 'ERROR',
+              errorCount: 1,
+              growth: "0.0%"
+            };
+          }
+        })
+      );
+
+      res.json({
+        success: true,
+        data: completionStats,
+      });
+    } catch (error) {
+      console.error('Error fetching data completion stats:', error);
+      res.status(500).json({
+        success: false,
+        message: "Error fetching data completion statistics",
         error: error.message,
       });
     }

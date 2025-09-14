@@ -32,6 +32,12 @@ router.post(
   auth,
   quotationController.prepareQuotationForDuplicate
 );
+
+router.patch(
+  "/:docEntry/edit",
+  auth,
+  quotationController.editQuotationForMsFoods
+);
 // @route   GET /api/quotations/stats
 // @desc    Get quotation statistics
 // @access  Private (Admin only)
