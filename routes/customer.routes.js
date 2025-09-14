@@ -53,6 +53,17 @@ const upload = multer({
   },
 });
 
+router.get(
+  "/export/excel",
+  customerController.exportCustomersToExcel
+);
+
+// Export customers to CSV file
+router.get(
+  "/export/csv",
+  customerController.exportCustomersToCSV
+);
+
 // Document upload routes
 router.post(
   "/:customerId/documents/upload",

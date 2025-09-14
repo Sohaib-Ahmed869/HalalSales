@@ -219,6 +219,246 @@ exports.getPersonalizedRecommendationsHTTP = async (req, res) => {
   }
 };
 
+
+exports.exportCustomersToExcel = async (req, res) => {
+  try {
+    console.log("=== EXPORT FUNCTION CALLED ===");
+    console.log("Current working directory:", process.cwd());
+
+    const startTime = Date.now();
+
+    // Simple query - get all customers for testing
+    const customers = await Customer.find({})
+      .select('CardName Email phoneNumber additionalPhoneNumbers address deliveryAddress outstandingBalance CardCode')
+      .limit(10) // Limit to 10 for testing
+      .lean();
+
+    console.log(`Found ${customers.length} customers to export`);
+
+    if (customers.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No customers found to export"
+      });
+    }
+
+    // Format data for Excel export
+    const exportData = customers.map((customer) => {
+      // Format address into a single column
+      const formatAddress = (addressObj) => {
+        if (!addressObj) return "";
+
+        const parts = [
+          addressObj.street,
+          addressObj.zipCode,
+          addressObj.city,
+          addressObj.country
+        ].filter(part => part && part.trim() !== "");
+
+        return parts.join(", ");
+      };
+
+      const primaryPhone = customer.phoneNumber || "";
+      const secondPhone = customer.additionalPhoneNumbers && customer.additionalPhoneNumbers.length > 0
+        ? customer.additionalPhoneNumbers[0]
+        : "";
+      const address = formatAddress(customer.address) || formatAddress(customer.deliveryAddress);
+
+      return {
+        "Customer Name": customer.CardName || "",
+        "Email": customer.Email || "",
+        "Phone Number 1": primaryPhone,
+        "Phone Number 2": secondPhone,
+        "Address": address,
+        "Outstanding Balance": customer.outstandingBalance || 0,
+        "Customer Code": customer.CardCode || ""
+      };
+    });
+
+    console.log("Export data prepared:", exportData.length, "rows");
+
+    // Create workbook and worksheet
+    const workbook = XLSX.utils.book_new();
+    const worksheet = XLSX.utils.json_to_sheet(exportData);
+
+    // Set column widths
+    const columnWidths = [
+      { wch: 25 }, { wch: 30 }, { wch: 15 }, { wch: 15 }, { wch: 40 }, { wch: 15 }, { wch: 12 }
+    ];
+    worksheet['!cols'] = columnWidths;
+
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Customers");
+
+    // Generate filename with timestamp
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
+    const filename = `customers_export_${timestamp}.xlsx`;
+
+    // Create exports directory
+    const exportsDir = path.join(process.cwd(), "exports");
+    console.log("Exports directory path:", exportsDir);
+
+    if (!fs.existsSync(exportsDir)) {
+      console.log("Creating exports directory...");
+      fs.mkdirSync(exportsDir, { recursive: true });
+      console.log("Exports directory created");
+    } else {
+      console.log("Exports directory already exists");
+    }
+
+    const filePath = path.join(exportsDir, filename);
+    console.log("File path:", filePath);
+
+    // Write file to disk
+    console.log("Writing file to disk...");
+    XLSX.writeFile(workbook, filePath);
+
+    // Check if file was created
+    if (fs.existsSync(filePath)) {
+      const stats = fs.statSync(filePath);
+      console.log(`File created successfully! Size: ${stats.size} bytes`);
+    } else {
+      console.log("ERROR: File was not created!");
+      return res.status(500).json({
+        success: false,
+        message: "Failed to create file"
+      });
+    }
+
+    const totalTime = Date.now() - startTime;
+    console.log(`Export completed in ${totalTime}ms. File saved: ${filePath}`);
+
+    // Return success response instead of trying to download for now
+    res.json({
+      success: true,
+      message: `File created successfully: ${filename}`,
+      filePath: filePath,
+      customersExported: customers.length,
+      processingTime: totalTime
+    });
+
+  } catch (error) {
+    console.error("Export error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error exporting customers",
+      error: error.message,
+      stack: error.stack
+    });
+  }
+};
+
+// Alternative function that returns CSV format instead of Excel
+exports.exportCustomersToCSV = async (req, res) => {
+  try {
+    console.log("Starting customer export to CSV...");
+    const startTime = Date.now();
+
+    // Same filtering logic as Excel export
+    const { status, assignedTo, customerType, search } = req.query;
+    const query = {};
+
+    if (status) query.status = status;
+    if (assignedTo && assignedTo !== 'all') {
+      if (assignedTo === 'unassigned') {
+        query.assignedTo = { $exists: false };
+      } else {
+        query.assignedTo = assignedTo;
+      }
+    }
+    if (customerType) query.customerType = customerType;
+
+    if (search) {
+      query.$or = [
+        { CardName: { $regex: search, $options: "i" } },
+        { CardCode: { $regex: search, $options: "i" } },
+        { Email: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    if (req.user && req.user.role === "sales_agent") {
+      query.assignedTo = req.user._id;
+    }
+
+    const customers = await Customer.find(query)
+      .select('CardName Email phoneNumber additionalPhoneNumbers address deliveryAddress outstandingBalance CardCode')
+      .lean();
+
+    console.log(`Found ${customers.length} customers to export`);
+
+    if (customers.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No customers found to export"
+      });
+    }
+
+    // Create CSV content
+    let csvContent = "Customer Name,Email,Phone Number 1,Phone Number 2,Address,Outstanding Balance,Customer Code\n";
+
+    customers.forEach((customer) => {
+      const formatAddress = (addressObj) => {
+        if (!addressObj) return "";
+        const parts = [
+          addressObj.street,
+          addressObj.zipCode,
+          addressObj.city,
+          addressObj.country
+        ].filter(part => part && part.trim() !== "");
+        return parts.join(", ");
+      };
+
+      const primaryPhone = customer.phoneNumber || "";
+      const secondPhone = customer.additionalPhoneNumbers && customer.additionalPhoneNumbers.length > 0
+        ? customer.additionalPhoneNumbers[0]
+        : "";
+      const address = formatAddress(customer.address) || formatAddress(customer.deliveryAddress);
+
+      // Escape CSV values (handle commas and quotes)
+      const escapeCSV = (value) => {
+        if (typeof value !== 'string') value = String(value || '');
+        if (value.includes(',') || value.includes('"') || value.includes('\n')) {
+          return `"${value.replace(/"/g, '""')}"`;
+        }
+        return value;
+      };
+
+      const row = [
+        escapeCSV(customer.CardName || ""),
+        escapeCSV(customer.Email || ""),
+        escapeCSV(primaryPhone),
+        escapeCSV(secondPhone),
+        escapeCSV(address),
+        customer.outstandingBalance || 0,
+        escapeCSV(customer.CardCode || "")
+      ].join(',');
+
+      csvContent += row + '\n';
+    });
+
+    // Generate filename with timestamp
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
+    const filename = `customers_export_${timestamp}.csv`;
+
+    // Set response headers for CSV download
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    const totalTime = Date.now() - startTime;
+    console.log(`CSV export completed in ${totalTime}ms`);
+
+    // Send CSV content
+    res.send(csvContent);
+
+  } catch (error) {
+    console.error("CSV export error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error exporting customers to CSV",
+      error: error.message
+    });
+  }
+};
+
 // Get customer order history (unchanged - no AWS SDK needed)
 exports.getCustomerOrderHistory = async (req, res) => {
   try {
@@ -1642,7 +1882,7 @@ exports.getSAPCustomers = async (req, res) => {
         .lean(),
       Customer.countDocuments(query)
     ]);
-    
+
     res.json({
       success: true,
       data: sapCustomers,
@@ -2292,7 +2532,7 @@ exports.getCustomersPaginatedFast = async (req, res) => {
 
     // Apply filters
     if (status) query.status = status;
-    
+
     // Handle assigned filter
     if (req.user && req.user.role === "sales_agent") {
       query.assignedTo = req.user._id;
@@ -2356,199 +2596,258 @@ exports.getCustomersPaginatedFast = async (req, res) => {
 // OPTIMIZED VERSION WITH METRICS (fast pagination first, then metrics for visible customers only)
 exports.getCustomersPaginated = async (req, res) => {
   try {
-    // Extract pagination parameters
+    console.log("=== STARTING CUSTOMER PAGINATION DEBUG ===");
+    console.log("Raw req.query:", req.query);
+    console.log("User role:", req.user?.role);
+
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 50;
     const skip = (page - 1) * limit;
 
-    //check user role
+    console.log("Pagination params:", { page, limit, skip });
+
+    // Role-based filtering
     if (req.user && req.user.role === "sales_agent") {
-      // Sales agents can only see customers assigned to them
       req.query.assignedTo = req.user._id;
+      console.log("Sales agent filter applied:", req.user._id);
     }
 
-    // Extract filtering parameters
-    const { status, search, assignedTo, type, sortBy, sortOrder } = req.query;
+    const { status, search, assignedTo, sortBy, sortOrder } = req.query;
     const query = {};
 
-    // Apply filters if provided
-    if (status) query.status = status;
+    // Build query with detailed logging
+    console.log("Building query with filters:", { status, search, assignedTo, sortBy, sortOrder });
+
+    if (status && status !== 'all') {
+      query.status = status;
+      console.log("Added status filter:", status);
+    }
 
     if (assignedTo === "unassigned") {
       query.assignedTo = { $exists: false };
-    } else if (assignedTo !== "all" && assignedTo) {
+      console.log("Added unassigned filter");
+    } else if (assignedTo && assignedTo !== "all") {
       query.assignedTo = assignedTo;
+      console.log("Added assignedTo filter:", assignedTo);
     }
 
-    // Search by name, code or email
     if (search) {
       query.$or = [
         { CardName: { $regex: search, $options: "i" } },
         { CardCode: { $regex: search, $options: "i" } },
         { Email: { $regex: search, $options: "i" } },
       ];
+      console.log("Added search filter:", search);
     }
 
-    // OPTIMIZATION: Get paginated customers first, then calculate metrics only for visible customers
-    const sort = {};
-    if (sortBy && ['CardName', 'CardCode', 'Email', 'createdAt', 'status'].includes(sortBy)) {
-      sort[sortBy] = sortOrder === 'desc' ? -1 : 1;
+    console.log("Final MongoDB query:", JSON.stringify(query, null, 2));
+
+    // Check if we need metric sorting
+    const metricFields = [
+      'sapTurnover', 'salesOrderTotal', 'invoiceCount', 'orderCount',
+      'quotationCount', 'abandonedCartCount', 'latestInvoiceDate',
+      'historicalTurnover', 'sapTurnoverOnly'
+    ];
+
+    const needsMetricSorting = sortBy && metricFields.includes(sortBy);
+    console.log("Needs metric sorting:", needsMetricSorting, "for field:", sortBy);
+
+    // Get total count first (always needed for pagination)
+    const totalCount = await Customer.countDocuments(query);
+    console.log("Total matching customers:", totalCount);
+
+    if (totalCount === 0) {
+      return res.status(200).json({
+        success: true,
+        customers: [],
+        pagination: {
+          total: 0,
+          page,
+          pages: 0,
+          limit,
+        },
+      });
+    }
+
+    let customers = [];
+    let enhancedCustomers = [];
+
+    if (needsMetricSorting) {
+      console.log("=== METRIC SORTING PATH ===");
+
+      // For metric sorting, we need to get ALL matching customers first
+      console.log("Fetching ALL customers for metric sorting...");
+
+      customers = await Customer.find(query)
+        .select("CardCode CardName Email phoneNumber status assignedTo createdAt updatedAt")
+        .populate("assignedTo", "firstName lastName email")
+        .lean();
+
+      console.log(`Fetched ${customers.length} customers for metric calculation`);
+
+      try {
+        const customerCodes = customers.map(c => c.CardCode);
+        console.log("Calculating metrics for", customerCodes.length, "customers");
+
+        // Get metrics in parallel
+        const [invoices, orders] = await Promise.all([
+          Invoice.aggregate([
+            { $match: { CardCode: { $in: customerCodes } } },
+            { $group: { _id: "$CardCode", count: { $sum: 1 }, total: { $sum: "$DocTotal" } } },
+          ]).catch(() => []),
+
+          SalesOrder.aggregate([
+            { $match: { CardCode: { $in: customerCodes } } },
+            { $group: { _id: "$CardCode", count: { $sum: 1 }, total: { $sum: "$DocTotal" } } },
+          ]).catch(() => [])
+        ]);
+
+        console.log("Metrics calculated - Invoices:", invoices.length, "Orders:", orders.length);
+
+        // Create lookup maps
+        const invoiceMap = new Map(invoices.map(i => [i._id, { count: i.count || 0, total: i.total || 0 }]));
+        const orderMap = new Map(orders.map(o => [o._id, { count: o.count || 0, total: o.total || 0 }]));
+
+        // Enhance ALL customers with metrics
+        enhancedCustomers = customers.map(customer => {
+          const invoice = invoiceMap.get(customer.CardCode) || { count: 0, total: 0 };
+          const order = orderMap.get(customer.CardCode) || { count: 0, total: 0 };
+
+          return {
+            ...customer,
+            metrics: {
+              invoiceCount: invoice.count,
+              orderCount: order.count,
+              quotationCount: 0,
+              abandonedCartCount: 0,
+              sapTurnover: invoice.total,
+              salesOrderTotal: order.total,
+              latestInvoiceDate: null,
+              historicalTurnover: customer.CardCode?.startsWith('C') ? 0 : invoice.total,
+              sapTurnoverOnly: customer.CardCode?.startsWith('C') ? invoice.total : 0,
+            }
+          };
+        });
+
+        console.log("Enhanced all customers with metrics");
+
+        // Sort ALL customers by the requested metric
+        console.log("Sorting all customers by:", sortBy);
+        enhancedCustomers.sort((a, b) => {
+          let aVal = 0, bVal = 0;
+
+          switch (sortBy) {
+            case 'sapTurnover':
+              aVal = a.metrics?.sapTurnover || 0;
+              bVal = b.metrics?.sapTurnover || 0;
+              break;
+            case 'salesOrderTotal':
+              aVal = a.metrics?.salesOrderTotal || 0;
+              bVal = b.metrics?.salesOrderTotal || 0;
+              break;
+            case 'invoiceCount':
+              aVal = a.metrics?.invoiceCount || 0;
+              bVal = b.metrics?.invoiceCount || 0;
+              break;
+            case 'orderCount':
+              aVal = a.metrics?.orderCount || 0;
+              bVal = b.metrics?.orderCount || 0;
+              break;
+            case 'historicalTurnover':
+              aVal = a.metrics?.historicalTurnover || 0;
+              bVal = b.metrics?.historicalTurnover || 0;
+              break;
+            case 'sapTurnoverOnly':
+              aVal = a.metrics?.sapTurnoverOnly || 0;
+              bVal = b.metrics?.sapTurnoverOnly || 0;
+              break;
+            default:
+              return 0;
+          }
+
+          return sortOrder === 'desc' ? bVal - aVal : aVal - bVal;
+        });
+
+        console.log("Sorting completed");
+
+        // NOW apply pagination to the sorted results
+        enhancedCustomers = enhancedCustomers.slice(skip, skip + limit);
+        console.log(`Applied pagination: showing ${enhancedCustomers.length} customers (${skip} to ${skip + limit})`);
+
+      } catch (metricError) {
+        console.error("Error calculating metrics:", metricError);
+        // Fallback: just paginate without metrics
+        enhancedCustomers = customers.slice(skip, skip + limit).map(customer => ({
+          ...customer,
+          metrics: {
+            invoiceCount: 0,
+            orderCount: 0,
+            quotationCount: 0,
+            abandonedCartCount: 0,
+            sapTurnover: 0,
+            salesOrderTotal: 0,
+            latestInvoiceDate: null,
+          }
+        }));
+      }
+
     } else {
-      sort.CardName = 1; // Default sort
-    }
+      console.log("=== REGULAR DATABASE SORTING PATH ===");
 
-    // Get only the customers for current page + total count in parallel
-    const [customers, totalCount] = await Promise.all([
-      Customer.find(query)
-        .select("CardCode CardName Email phoneNumber status assignedTo TotalSales LastPurchaseDate notes createdAt updatedAt")
+      // For regular database fields, we can sort and paginate in the database
+      let sort = { CardName: 1 }; // Default sort
+
+      if (sortBy && !metricFields.includes(sortBy)) {
+        switch (sortBy) {
+          case 'CardName':
+          case 'CardCode':
+          case 'Email':
+          case 'status':
+            sort = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
+            break;
+          case 'createdAt':
+          case 'updatedAt':
+            sort = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
+            break;
+          default:
+            console.log("Unknown sort field, using default");
+            sort = { CardName: 1 };
+        }
+      }
+
+      console.log("Using database sort:", sort);
+      console.log("Fetching paginated customers directly from database");
+
+      customers = await Customer.find(query)
+        .select("CardCode CardName Email phoneNumber status assignedTo createdAt updatedAt")
         .populate("assignedTo", "firstName lastName email")
         .sort(sort)
         .skip(skip)
         .limit(limit)
-        .lean(),
-      Customer.countDocuments(query)
-    ]);
+        .lean();
 
-    // OPTIMIZED: Only calculate metrics for the current page's customers (not all customers)
-    const customerCodes = customers.map((c) => c.CardCode);
-    const customerEmails = customers.filter((c) => c.Email).map((c) => c.Email);
+      console.log(`Fetched ${customers.length} customers with database pagination`);
 
-    // Batch query for metrics in parallel - ONLY for visible customers
-    const [
-      invoiceCounts,
-      orderCounts, 
-      abandonedCarts,
-      totalTurnover,
-      salesOrderTotal,
-      latestInvoiceDates,
-      quotationCounts,
-    ] = await Promise.all([
-      // Get invoice counts for current page customers only
-      Invoice.aggregate([
-        { $match: { CardCode: { $in: customerCodes } } },
-        { $group: { _id: "$CardCode", count: { $sum: 1 } } },
-      ]),
-
-      // Get order counts for current page customers only
-      SalesOrder.aggregate([
-        { $match: { CardCode: { $in: customerCodes } } },
-        { $group: { _id: "$CardCode", count: { $sum: 1 } } },
-      ]),
-
-      // Get abandoned cart counts for current page customers only
-      Cart.aggregate([
-        {
-          $match: {
-            $or: [
-              { customerEmail: { $in: customerEmails } },
-              { "contactInfo.email": { $in: customerEmails } },
-            ],
-            status: "abandoned",
-            isAbandoned: true,
-          },
-        },
-        {
-          $group: {
-            _id: {
-              $cond: [
-                { $ifNull: ["$customerEmail", false] },
-                "$customerEmail",
-                "$contactInfo.email",
-              ],
-            },
-            count: { $sum: 1 },
-          },
-        },
-      ]),
-
-      // Get total turnover for current page customers only
-      Invoice.aggregate([
-        { $match: { CardCode: { $in: customerCodes } } },
-        { $group: { _id: "$CardCode", totalAmount: { $sum: "$DocTotal" } } },
-      ]),
-
-      // Get total sales order amount for current page customers only
-      SalesOrder.aggregate([
-        { $match: { CardCode: { $in: customerCodes } } },
-        { $group: { _id: "$CardCode", totalAmount: { $sum: "$DocTotal" } } },
-      ]),
-
-      // Get latest invoice date for current page customers only
-      Invoice.aggregate([
-        { $match: { CardCode: { $in: customerCodes } } },
-        { $sort: { DocDate: -1 } },
-        {
-          $group: {
-            _id: "$CardCode",
-            latestInvoiceDate: { $first: "$DocDate" },
-          },
-        },
-      ]),
-
-      // Get quotation counts for current page customers only
-      Quotation.aggregate([
-        { $match: { CardCode: { $in: customerCodes } } },
-        { $group: { _id: "$CardCode", count: { $sum: 1 } } },
-      ]),
-    ]);
-
-    // Create lookup maps for O(1) access
-    const invoiceMap = {};
-    invoiceCounts.forEach((item) => {
-      invoiceMap[item._id] = item.count;
-    });
-
-    const orderMap = {};
-    orderCounts.forEach((item) => {
-      orderMap[item._id] = item.count;
-    });
-
-    const cartMap = {};
-    abandonedCarts.forEach((item) => {
-      cartMap[item._id] = item.count;
-    });
-
-    // Create turnover map
-    const turnoverMap = {};
-    totalTurnover.forEach((item) => {
-      turnoverMap[item._id] = item.totalAmount;
-    });
-
-    // Create sales order total map
-    const salesOrderMap = {};
-    salesOrderTotal.forEach((item) => {
-      salesOrderMap[item._id] = item.totalAmount;
-    });
-
-    // Create latest invoice date map
-    const latestInvoiceDateMap = {};
-    latestInvoiceDates.forEach((item) => {
-      latestInvoiceDateMap[item._id] = item.latestInvoiceDate;
-    });
-
-    const quotationMap = {};
-    quotationCounts.forEach((item) => {
-      quotationMap[item._id] = item.count;
-    });
-
-    // Enhance customers with metrics
-    const enhancedCustomers = customers.map((customer) => {
-      return {
+      // Add empty metrics for consistency
+      enhancedCustomers = customers.map(customer => ({
         ...customer,
         metrics: {
-          invoiceCount: invoiceMap[customer.CardCode] || 0,
-          orderCount: orderMap[customer.CardCode] || 0,
-          abandonedCartCount: customer.Email ? cartMap[customer.Email] || 0 : 0,
-          sapTurnover: turnoverMap[customer.CardCode] || 0,
-          salesOrderTotal: salesOrderMap[customer.CardCode] || 0,
-          latestInvoiceDate: latestInvoiceDateMap[customer.CardCode] || null,
-          quotationCount: quotationMap[customer.CardCode] || 0,
-        },
-      };
-    });
+          invoiceCount: 0,
+          orderCount: 0,
+          quotationCount: 0,
+          abandonedCartCount: 0,
+          sapTurnover: 0,
+          salesOrderTotal: 0,
+          latestInvoiceDate: null,
+        }
+      }));
+    }
 
-    // No need for in-memory sorting since we already sorted in database
-    // Just return the enhanced customers (already paginated from database)
+    console.log("Final result:", {
+      customersReturned: enhancedCustomers.length,
+      totalCount,
+      pages: Math.ceil(totalCount / limit)
+    });
 
     return res.status(200).json({
       success: true,
@@ -2559,9 +2858,19 @@ exports.getCustomersPaginated = async (req, res) => {
         pages: Math.ceil(totalCount / limit),
         limit,
       },
+      debug: {
+        sortingMethod: needsMetricSorting ? 'metric-sorting' : 'database-sorting',
+        queryUsed: query,
+        totalMatching: totalCount,
+        customersReturned: enhancedCustomers.length
+      }
     });
+
   } catch (error) {
-    console.error("Customer fetch error:", error);
+    console.error("=== PAGINATION ERROR ===");
+    console.error("Error:", error.message);
+    console.error("Stack:", error.stack);
+
     return res.status(500).json({
       success: false,
       message: "Server error",
@@ -2569,7 +2878,6 @@ exports.getCustomersPaginated = async (req, res) => {
     });
   }
 };
-
 exports.getCustomersPaginated2 = async (req, res) => {
   try {
     // Extract pagination parameters
@@ -6263,7 +6571,7 @@ exports.getCustomerDocuments = async (req, res) => {
 
     const documents = {
       companyDoc: null,
-      managerId: null,  
+      managerId: null,
       otherDocuments: [],
     };
 
@@ -6504,16 +6812,16 @@ exports.getCustomerAnalytics = async (req, res) => {
     ] = await Promise.all([
       // Total customers count
       Customer.countDocuments(),
-      
+
       // Active customers count
       Customer.countDocuments({ status: 'active' }),
-      
+
       // Inactive customers count
       Customer.countDocuments({ status: 'inactive' }),
-      
+
       // Unassigned customers count
       Customer.countDocuments({ assignedTo: { $exists: false } }),
-      
+
       // Recently added (last 30 days)
       Customer.countDocuments({
         createdAt: {
@@ -6547,22 +6855,22 @@ exports.getCustomerAnalytics = async (req, res) => {
 exports.getCustomerMetrics = async (req, res) => {
   try {
     const { customerCodes } = req.body; // Array of CardCodes
-    
+
     if (!customerCodes || !Array.isArray(customerCodes) || customerCodes.length === 0) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "customerCodes array is required" 
+      return res.status(400).json({
+        success: false,
+        message: "customerCodes array is required"
       });
     }
 
     // Limit to prevent performance issues
     const limitedCodes = customerCodes.slice(0, 100);
-    
+
     // Get customer emails for cart queries
     const customers = await Customer.find({ CardCode: { $in: limitedCodes } })
       .select('CardCode Email')
       .lean();
-    
+
     const customerEmails = customers.filter(c => c.Email).map(c => c.Email);
 
     // Batch query for metrics in parallel
@@ -6607,7 +6915,7 @@ exports.getCustomerMetrics = async (req, res) => {
 
     // Create lookup maps
     const metricsMap = {};
-    
+
     // Initialize all customers with zero metrics
     limitedCodes.forEach(code => {
       metricsMap[code] = {
@@ -6661,10 +6969,10 @@ exports.getCustomerMetrics = async (req, res) => {
 
   } catch (error) {
     console.error("Customer metrics error:", error);
-    res.status(500).json({ 
-      success: false, 
-      message: "Server error", 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message
     });
   }
 };
