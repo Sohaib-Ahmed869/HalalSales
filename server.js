@@ -42,6 +42,9 @@ const postalCodeScrapingRoutes = require("./routes/postalCodeScraping.routes");
 const chatbotRoutes = require('./routes/chatbot.routes');
 const productAnalyticsRoutes = require('./routes/productAnalytics.routes')
 const restaurantScraperRoutes = require("./routes/restaurantScraper.routes");
+const analyticsPerformanceRoutes = require('./routes/analyticsPerformance.routes');
+const superChatWebhookRoutes = require('./routes/superChatWebhook.routes');
+const superChatApiRoutes = require('./routes/superChat.routes');
 
 const config = require("./services/config");
 const desktimeJob = require("./jobs/desktimeJob");
@@ -162,6 +165,9 @@ app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/customer-journey", customerJourneyRoutes);
 app.use("/api/recommendations", recommendationRoutes);
 app.use("/api/restaurant-scraper", restaurantScraperRoutes);
+app.use('/api/analytics', analyticsPerformanceRoutes);
+app.use('/api/webhooks', superChatWebhookRoutes); // only webhook lives here
+app.use('/api/superchat', superChatApiRoutes); // move non-webhook endpoints here
 
 // SuperChat Conversation Management routes
 const superChatConversationRoutes = require("./routes/superChatConversation.routes");

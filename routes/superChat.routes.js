@@ -1,5 +1,20 @@
-const express = require("express");
+// routes/superChat.routes.js
+
+const express = require('express');
 const router = express.Router();
+
+const { syncDirectory, backfillConversations, listUsers, getConversationsByInbox } = require('../controllers/superChatWebhook.controller');
+
+// Non-webhook SuperChat APIs should live under /api/superchat
+router.get('/users', listUsers);
+router.post('/sync-directory', syncDirectory);
+router.post('/backfill-conversations', backfillConversations);
+
+// Conversations grouped by inbox (single page, no cursor, no date filter)
+router.get('/conversations/by-inbox', getConversationsByInbox);
+
+module.exports = router;
+
 const { auth, checkRole, updateLastLogin } = require("../middleware/auth");
 const superChatController = require("../controllers/superChat.controller");
 
