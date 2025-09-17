@@ -28,7 +28,7 @@ const TaskSchema = new Schema({
   },
   type: {
     type: String,
-    enum: ["follow-up", "call", "email", "meeting", "other", "approval"],
+    enum: ["follow-up", "call", "email", "meeting", "other", "approval", "customer_approval"], // Add customer_approval
     default: "follow-up",
   },
   dueDate: {

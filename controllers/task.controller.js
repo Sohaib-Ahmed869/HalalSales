@@ -3,6 +3,7 @@ const Task = require("../models/Task");
 const Lead = require("../models/Lead");
 const User = require("../models/User");
 const Quotation = require("../models/Quotation");
+const Customer = require("../models/Customer");
 const NotificationService = require("../utils/notificationService");
 const {
   uploadToS3,
@@ -13,6 +14,55 @@ const {
 const upload = uploadToS3.single("attachment");
 const util = require("util");
 const uploadAsync = util.promisify(upload);
+const {
+  getLastCustomerFromSAP,
+  generateNextCardCode,
+  formatCustomerForSAP,
+  createCustomerInSAP,
+  checkCustomerExistsInSAP,
+} = require("../utils/sapB1CustomerIntegration");
+
+// Helper function to push customer to SAP
+async function pushCustomerToSAPInternal(customer) {
+  try {
+    // Format the customer for SAP B1
+    const sapCustomer = await formatCustomerForSAP(customer);
+
+    // Push to SAP B1
+    const sapResponse = await createCustomerInSAP(sapCustomer);
+
+    // Update local customer with SAP CardCode if successful
+    if (sapResponse && sapResponse.CardCode) {
+      customer.CardCode = sapResponse.CardCode;
+      customer.customerType = "sap";
+      customer.SyncedWithSAP = true;
+      customer.LocalStatus = "Synced";
+      customer.updatedAt = new Date();
+
+      await customer.save();
+
+      return {
+        success: true,
+        CardCode: sapResponse.CardCode,
+        sapData: sapResponse,
+      };
+    } else {
+      throw new Error("Invalid response from SAP B1");
+    }
+  } catch (error) {
+    // Update local customer to mark sync failure
+    customer.SyncErrors = error.message;
+    customer.LastSyncAttempt = new Date();
+    customer.LocalStatus = "SyncFailed";
+    await customer.save();
+
+    console.error("Error pushing customer to SAP:", error);
+    return {
+      success: false,
+      error: error.message || "Unknown error",
+    };
+  }
+}
 
 /**
  * Get all tasks with filtering options
@@ -168,6 +218,7 @@ exports.getTasks = async (req, res) => {
       .populate("assignedTo", "firstName lastName email role")
       .populate("createdBy", "firstName lastName email role")
       .populate("leadId", "fullName email company")
+      .populate("relatedCustomer")
       .sort({ createdAt: 1, priority: -1 })
       .lean();
 
@@ -185,6 +236,101 @@ exports.getTasks = async (req, res) => {
   }
 };
 
+// Add this new function
+exports.approveCustomerFromTask = async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const { action, comments } = req.body; // action: 'approve' or 'reject'
+
+    // Find the task and populate the related customer
+    const task = await Task.findById(taskId).populate('relatedCustomer');
+    if (!task) {
+      return res.status(404).json({
+        success: false,
+        message: "Task not found"
+      });
+    }
+
+    if (!task.relatedCustomer) {
+      return res.status(400).json({
+        success: false,
+        message: "No customer associated with this task"
+      });
+    }
+
+    const customer = task.relatedCustomer;
+
+    if (action === 'approve') {
+      // Get the next CardCode from SAP
+      const nextCardCode = await generateNextCardCode();
+
+      // Update customer with approval details
+      customer.approvalStatus = "approved";
+      customer.approvedBy = req.user._id;
+      customer.approvedAt = new Date();
+      customer.CardCode = nextCardCode;
+      customer.status = "active";
+      customer.updatedAt = new Date();
+
+      await customer.save();
+
+      // Push to SAP automatically after approval
+      const sapResult = await pushCustomerToSAPInternal(customer);
+
+      // Update task status
+      task.status = "completed";
+      task.completedDate = new Date();
+      task.comments = comments ? `${task.comments || ''}\n\nApproval: ${comments}` : task.comments;
+      await task.save();
+
+      res.json({
+        success: true,
+        message: sapResult.success
+          ? "Customer approved and synced with SAP successfully"
+          : "Customer approved but SAP sync failed",
+        data: customer,
+        sapSync: sapResult
+      });
+
+    } else if (action === 'reject') {
+      // Update customer with rejection details
+      customer.approvalStatus = "rejected";
+      customer.approvedBy = req.user._id;
+      customer.approvedAt = new Date();
+      customer.rejectedReason = comments || "No reason provided";
+      customer.status = "inactive";
+      customer.updatedAt = new Date();
+
+      await customer.save();
+
+      // Update task status
+      task.status = "rejected";
+      task.completedDate = new Date();
+      task.comments = comments ? `${task.comments || ''}\n\nRejection: ${comments}` : task.comments;
+      await task.save();
+
+      res.json({
+        success: true,
+        message: "Customer rejected successfully",
+        data: customer
+      });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid action. Must be 'approve' or 'reject'"
+      });
+    }
+
+  } catch (error) {
+    console.error("Error approving customer from task:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error processing customer approval",
+      error: error.message,
+    });
+  }
+};
+
 /**
  * Get task by ID
  */
@@ -194,6 +340,7 @@ exports.getTaskById = async (req, res) => {
       .populate("assignedTo", "firstName lastName email role")
       .populate("createdBy", "firstName lastName email role")
       .populate("leadId", "fullName email company")
+      .populate("relatedCustomer")
       .lean();
 
     if (!task) {
@@ -324,7 +471,8 @@ exports.createTask = async (req, res) => {
     const createdTask = await Task.findById(task._id)
       .populate("assignedTo", "firstName lastName email role")
       .populate("createdBy", "firstName lastName email role")
-      .populate("leadId", "fullName email company");
+      .populate("leadId", "fullName email company")
+      .populate("relatedCustomer");
 
     return res.status(201).json({
       success: true,
@@ -404,16 +552,14 @@ exports.updateTask = async (req, res) => {
         updateFields.dueDate &&
         updateFields.dueDate !== task.dueDate.toISOString().split("T")[0]
       ) {
-        const dateNote = `${req.user.firstName} ${
-          req.user.lastName
-        } changed the due date from ${
-          task.dueDate.toISOString().split("T")[0]
-        } to ${updateFields.dueDate}.`;
+        const dateNote = `${req.user.firstName} ${req.user.lastName
+          } changed the due date from ${task.dueDate.toISOString().split("T")[0]
+          } to ${updateFields.dueDate}.`;
         updateFields.comments = updateFields.comments
           ? `${updateFields.comments}\n\n${dateNote}`
           : task.comments
-          ? `${task.comments}\n\n${dateNote}`
-          : dateNote;
+            ? `${task.comments}\n\n${dateNote}`
+            : dateNote;
       }
     }
     // Creator can update most fields
@@ -500,7 +646,8 @@ exports.updateTask = async (req, res) => {
     )
       .populate("assignedTo", "firstName lastName email role")
       .populate("createdBy", "firstName lastName email role")
-      .populate("leadId", "fullName email company");
+      .populate("leadId", "fullName email company")
+      .populate("relatedCustomer")
 
     if (
       updateFields.assignedTo &&
@@ -583,9 +730,8 @@ exports.approveOrRejectTask = async (req, res) => {
     // Update task status based on action
     const newStatus = action === "approve" ? "completed" : "rejected";
     const newComments = comments
-      ? `${task.comments ? task.comments + "\n\n" : ""}${req.user.firstName} ${
-          req.user.lastName
-        } (${action}): ${comments}`
+      ? `${task.comments ? task.comments + "\n\n" : ""}${req.user.firstName} ${req.user.lastName
+      } (${action}): ${comments}`
       : task.comments;
 
     // Set completion date if approved
@@ -606,7 +752,8 @@ exports.approveOrRejectTask = async (req, res) => {
     )
       .populate("assignedTo", "firstName lastName email role")
       .populate("createdBy", "firstName lastName email role")
-      .populate("leadId", "fullName email company");
+      .populate("leadId", "fullName email company")
+      .populate("relatedCustomer");
 
     await NotificationService.createTaskStatusNotification(
       updatedTask,
@@ -616,9 +763,8 @@ exports.approveOrRejectTask = async (req, res) => {
 
     res.json({
       success: true,
-      message: `Task ${
-        action === "approve" ? "approved" : "rejected"
-      } successfully`,
+      message: `Task ${action === "approve" ? "approved" : "rejected"
+        } successfully`,
       data: updatedTask,
     });
   } catch (error) {
@@ -695,6 +841,7 @@ exports.getAgentTasks = async (req, res) => {
     const tasks = await Task.find(query)
       .populate("leadId", "fullName email company")
       .populate("createdBy", "firstName lastName email role")
+      .populate("relatedCustomer")
       .sort({ createdAt: 1, priority: -1 })
       .lean();
 
@@ -759,6 +906,7 @@ exports.getMyTasks = async (req, res) => {
     const tasks = await Task.find(query)
       .populate("leadId", "fullName email company")
       .populate("createdBy", "firstName lastName email role")
+      .populate("relatedCustomer")
       .sort({ createdAt: 1, priority: -1 })
       .lean();
 
@@ -844,6 +992,7 @@ exports.getCreatedTasks = async (req, res) => {
     const tasks = await Task.find(query)
       .populate("assignedTo", "firstName lastName email role")
       .populate("leadId", "fullName email company")
+      .populate("relatedCustomer")
       .sort({ createdAt: 1, priority: -1 })
       .lean();
 
@@ -919,9 +1068,8 @@ exports.requestApproval = async (req, res) => {
 
     // Update task status and add comments
     const newComments = comments
-      ? `${task.comments ? task.comments + "\n\n" : ""}${req.user.firstName} ${
-          req.user.lastName
-        } (requested approval): ${comments}`
+      ? `${task.comments ? task.comments + "\n\n" : ""}${req.user.firstName} ${req.user.lastName
+      } (requested approval): ${comments}`
       : task.comments;
 
     // Update task
@@ -937,7 +1085,8 @@ exports.requestApproval = async (req, res) => {
     )
       .populate("assignedTo", "firstName lastName email role")
       .populate("createdBy", "firstName lastName email role")
-      .populate("leadId", "fullName email company");
+      .populate("leadId", "fullName email company")
+      .populate("relatedCustomer");
 
     res.json({
       success: true,
@@ -1009,7 +1158,8 @@ exports.uploadAttachment = async (req, res) => {
     )
       .populate("assignedTo", "firstName lastName email role")
       .populate("createdBy", "firstName lastName email role")
-      .populate("leadId", "fullName email company");
+      .populate("leadId", "fullName email company")
+      .populate("relatedCustomer");
 
     return res.status(200).json({
       success: true,
@@ -1114,7 +1264,8 @@ exports.deleteAttachment = async (req, res) => {
     )
       .populate("assignedTo", "firstName lastName email role")
       .populate("createdBy", "firstName lastName email role")
-      .populate("leadId", "fullName email company");
+      .populate("leadId", "fullName email company")
+      .populate("relatedCustomer");
 
     return res.status(200).json({
       success: true,
@@ -1187,9 +1338,8 @@ exports.approveQuotation = async (req, res) => {
     // Update task status and add comments
     const newStatus = action === "approve" ? "completed" : "rejected";
     const newComments = comments
-      ? `${task.comments ? task.comments + "\n\n" : ""}${req.user.firstName} ${
-          req.user.lastName
-        } (${action}): ${comments}`
+      ? `${task.comments ? task.comments + "\n\n" : ""}${req.user.firstName} ${req.user.lastName
+      } (${action}): ${comments}`
       : task.comments;
 
     // Set completion date if approved
@@ -1217,9 +1367,8 @@ exports.approveQuotation = async (req, res) => {
 
     res.json({
       success: true,
-      message: `Quotation ${
-        action === "approve" ? "approved" : "rejected"
-      } successfully`,
+      message: `Quotation ${action === "approve" ? "approved" : "rejected"
+        } successfully`,
       data: updatedTask,
       quotation: {
         DocEntry: quotation.DocEntry,
@@ -1292,8 +1441,7 @@ exports.createTaskFromCart = async (req, res) => {
       title,
       description:
         description ||
-        `Follow up on abandoned cart for ${cart.customerName} (${
-          cart.customerEmail
+        `Follow up on abandoned cart for ${cart.customerName} (${cart.customerEmail
         }) - Cart Value: €${cart.totalIncludingTaxes?.toFixed(2)}`,
       dueDate,
       priority: priority || "medium",

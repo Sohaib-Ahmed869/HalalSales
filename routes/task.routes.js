@@ -21,7 +21,12 @@ router.get("/assigned", auth, taskController.getMyTasks);
 
 // Get tasks created by current user
 router.get("/created", auth, taskController.getCreatedTasks);
-
+router.post(
+    "/:taskId/approve-customer",
+    auth,
+    checkRole(["admin"]),
+    taskController.approveCustomerFromTask
+);
 // Get task by ID
 router.get("/:id", auth, taskController.getTaskById);
 

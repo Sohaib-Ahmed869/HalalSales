@@ -590,11 +590,11 @@ exports.createCustomer = async (req, res) => {
       const approvalTask = new Task({
         title: `Approve Customer: ${newCustomer.CardName}`,
         description: `New customer "${newCustomer.CardName}" created by ${req.user.firstName} ${req.user.lastName} requires approval before SAP integration.`,
-        relatedCustomer: newCustomer._id,
-        assignedTo: admins[0]._id, // Assign to first admin
+        relatedCustomer: newCustomer._id, // Add this line
+        assignedTo: admins[0]._id,
         createdBy: req.user._id,
-        type: "approval",
-        status: "pending_approval",
+        type: "customer_approval", // Change from "approval" to "customer_approval"
+        status: "pending",
         priority: "medium",
         dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days from now
       });
