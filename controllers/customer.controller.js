@@ -528,6 +528,7 @@ exports.getCustomerOrderHistory = async (req, res) => {
 };
 
 // Create a new customer (save to local DB and push to SAP)
+// Replace the existing createCustomer function in customer.controller.js
 exports.createCustomer = async (req, res) => {
   try {
     // Validate required fields
@@ -547,66 +548,252 @@ exports.createCustomer = async (req, res) => {
 
     console.log(req.user.role, "is creating a new customer", req.user._id);
 
-    // Get the next CardCode from SAP
-    console.log("Getting next CardCode from SAP...");
-    const nextCardCode = await generateNextCardCode();
+    // Generate temporary CardCode for pending customers
+    const tempCardCode = `TEMP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
-    // Create the new customer
+    // Create the new customer with pending status
     const newCustomer = new Customer({
       ...req.body,
-      CardCode: nextCardCode,
-      customerType: "non-sap", // Will be updated to "sap" after successful sync
+      tempCardCode: tempCardCode,
+      CardCode: tempCardCode, // Will be updated when approved
+      customerType: "non-sap",
+      approvalStatus: "pending",
+      createdBy: req.user._id,
       assignedTo:
         req.user && req.user.role === "sales_agent"
           ? req.user._id
           : req.body.assignedTo || null,
       SyncedWithSAP: false,
       LocalStatus: "Created",
+      status: "pending", // Set status to pending instead of active
       createdAt: new Date(),
       updatedAt: new Date(),
     });
 
-    console.log("Creating new customer:", {
+    console.log("Creating new customer for approval:", {
       CardName: newCustomer.CardName,
-      CardCode: newCustomer.CardCode,
+      tempCardCode: newCustomer.tempCardCode,
       Email: newCustomer.Email,
     });
 
     // Save to local database
     await newCustomer.save();
 
-    // Push to SAP automatically
-    console.log("Automatically pushing new customer to SAP...");
-    const sapResult = await pushCustomerToSAPInternal(newCustomer);
+    // Create approval task for admin
+    const Task = require("../models/Task");
+    const User = require("../models/User");
 
-    // Return response with both local creation and SAP push results
-    if (sapResult.success) {
-      res.status(201).json({
-        success: true,
-        data: newCustomer,
-        message: "Customer created successfully and synced with SAP",
-        sapSync: {
-          success: true,
-          CardCode: sapResult.CardCode,
-        },
+    // Find all admins to assign the task
+    const admins = await User.find({ role: "admin" }).select("_id");
+
+    if (admins.length > 0) {
+      const approvalTask = new Task({
+        title: `Approve Customer: ${newCustomer.CardName}`,
+        description: `New customer "${newCustomer.CardName}" created by ${req.user.firstName} ${req.user.lastName} requires approval before SAP integration.`,
+        relatedCustomer: newCustomer._id,
+        assignedTo: admins[0]._id, // Assign to first admin
+        createdBy: req.user._id,
+        type: "approval",
+        status: "pending_approval",
+        priority: "medium",
+        dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days from now
       });
-    } else {
-      res.status(201).json({
-        success: true,
-        data: newCustomer,
-        message:
-          "Customer created successfully in local database but failed to sync with SAP",
-        sapSync: {
-          success: false,
-          error: sapResult.error,
-        },
-      });
+
+      await approvalTask.save();
     }
+
+    res.status(201).json({
+      success: true,
+      data: newCustomer,
+      message: "Customer created successfully and pending approval",
+      requiresApproval: true,
+    });
+
   } catch (error) {
     console.error("Error creating customer:", error);
     res.status(500).json({
       success: false,
       message: "Error creating customer",
+      error: error.message,
+    });
+  }
+};
+
+// Get pending customers for approval
+exports.getPendingCustomers = async (req, res) => {
+  try {
+    const pendingCustomers = await Customer.find({
+      approvalStatus: "pending"
+    })
+      .populate('assignedTo', 'firstName lastName email')
+
+      .populate('approvedBy', 'firstName lastName email')
+      .sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      data: pendingCustomers
+    });
+  } catch (error) {
+    console.error("Error fetching pending customers:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching pending customers",
+      error: error.message,
+    });
+  }
+};
+
+// Approve customer
+exports.approveCustomer = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found"
+      });
+    }
+
+    if (customer.approvalStatus !== "pending") {
+      return res.status(400).json({
+        success: false,
+        message: "Customer is not pending approval"
+      });
+    }
+
+    // Get the next CardCode from SAP
+    console.log("Getting next CardCode from SAP...");
+    const nextCardCode = await generateNextCardCode();
+
+    // Update customer with approval details
+    customer.approvalStatus = "approved";
+    customer.approvedBy = req.user._id;
+    customer.approvedAt = new Date();
+    customer.CardCode = nextCardCode;
+    customer.status = "active";
+    customer.updatedAt = new Date();
+
+    await customer.save();
+
+    // Push to SAP automatically after approval
+    console.log("Pushing approved customer to SAP...");
+    const sapResult = await pushCustomerToSAPInternal(customer);
+
+    // Mark related task as completed
+    const Task = require("../models/Task");
+    await Task.updateOne(
+      { relatedCustomer: customerId, status: "pending_approval" },
+      {
+        status: "completed",
+        completedDate: new Date(),
+        comments: `Customer approved and ${sapResult.success ? 'synced with SAP' : 'SAP sync failed'}`
+      }
+    );
+
+    res.json({
+      success: true,
+      data: customer,
+      message: sapResult.success
+        ? "Customer approved and synced with SAP successfully"
+        : "Customer approved but SAP sync failed",
+      sapSync: sapResult
+    });
+
+  } catch (error) {
+    console.error("Error approving customer:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error approving customer",
+      error: error.message,
+    });
+  }
+};
+
+// Reject customer
+exports.rejectCustomer = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { reason } = req.body;
+
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found"
+      });
+    }
+
+    if (customer.approvalStatus !== "pending") {
+      return res.status(400).json({
+        success: false,
+        message: "Customer is not pending approval"
+      });
+    }
+
+    // Update customer with rejection details
+    customer.approvalStatus = "rejected";
+    customer.approvedBy = req.user._id;
+    customer.approvedAt = new Date();
+    customer.rejectedReason = reason || "No reason provided";
+    customer.status = "inactive";
+    customer.updatedAt = new Date();
+
+    await customer.save();
+
+    // Mark related task as completed
+    const Task = require("../models/Task");
+    await Task.updateOne(
+      { relatedCustomer: customerId, status: "pending_approval" },
+      {
+        status: "rejected",
+        completedDate: new Date(),
+        comments: `Customer rejected: ${reason || "No reason provided"}`
+      }
+    );
+
+    res.json({
+      success: true,
+      data: customer,
+      message: "Customer rejected successfully"
+    });
+
+  } catch (error) {
+    console.error("Error rejecting customer:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error rejecting customer",
+      error: error.message,
+    });
+  }
+};
+
+// Get approval tasks
+exports.getApprovalTasks = async (req, res) => {
+  try {
+    const Task = require("../models/Task");
+
+    const tasks = await Task.find({
+      type: "approval",
+      status: "pending_approval"
+    })
+      .populate('relatedCustomer')
+      .populate('createdBy', 'firstName lastName email')
+      .populate('assignedTo', 'firstName lastName email')
+      .sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      data: tasks
+    });
+
+  } catch (error) {
+    console.error("Error fetching approval tasks:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching approval tasks",
       error: error.message,
     });
   }
@@ -6441,19 +6628,29 @@ exports.getAllRestaurantAnalyses = async (req, res) => {
   }
 };
 
+// Update the existing uploadCustomerDocument function
 exports.uploadCustomerDocument = async (req, res) => {
   try {
     const { customerId } = req.params;
     const { documentType } = req.body;
 
-    console.log(
-      `Uploading document for customer ${customerId} with type ${documentType}`
-    );
+    console.log(`Uploading document for customer ${customerId} with type ${documentType}`);
 
-    // Validate customer exists
-    const customer = await Customer.findOne({
-      CardCode: customerId,
-    });
+    // Find customer by ID or CardCode
+    let customer;
+    if (customerId.length === 24) {
+      // MongoDB ObjectId
+      customer = await Customer.findById(customerId);
+    } else {
+      // Assume it's a CardCode (including temp codes)
+      customer = await Customer.findOne({
+        $or: [
+          { CardCode: customerId },
+          { tempCardCode: customerId }
+        ]
+      });
+    }
+
     if (!customer) {
       return res.status(404).json({
         success: false,
@@ -6466,8 +6663,7 @@ exports.uploadCustomerDocument = async (req, res) => {
     if (!validDocumentTypes.includes(documentType)) {
       return res.status(400).json({
         success: false,
-        message:
-          "Invalid document type. Must be: companyDoc, managerId, or otherDocuments",
+        message: "Invalid document type. Must be: companyDoc, managerId, or otherDocuments",
       });
     }
 

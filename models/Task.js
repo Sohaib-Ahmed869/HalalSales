@@ -73,9 +73,13 @@ const TaskSchema = new Schema({
     ref: "Quotation",
   },
   relatedAbandonedCart: {
-  type: Schema.Types.ObjectId,
-  ref: "Cart",
-},
+    type: Schema.Types.ObjectId,
+    ref: "Cart",
+  },
+  relatedCustomer: {
+    type: Schema.Types.ObjectId,
+    ref: "Customer",
+  },
 });
 
 // Update the updatedAt timestamp on save

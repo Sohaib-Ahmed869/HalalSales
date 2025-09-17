@@ -186,6 +186,34 @@ router.get("/", auth, updateLastLogin, customerController.getCustomers);
 // Get all customers (with filtering and permissions)
 router.get("/sap", auth, updateLastLogin, customerController.getSAPCustomers);
 
+// Add these routes to customer.routes.js (for admin only)
+router.get(
+  "/pending-approval",
+  auth,
+  checkRole(["admin"]),
+  customerController.getPendingCustomers
+);
+
+router.post(
+  "/:customerId/approve",
+  auth,
+  checkRole(["admin"]),
+  customerController.approveCustomer
+);
+
+router.post(
+  "/:customerId/reject",
+  auth,
+  checkRole(["admin"]),
+  customerController.rejectCustomer
+);
+
+router.get(
+  "/approval-tasks",
+  auth,
+  checkRole(["admin"]),
+  customerController.getApprovalTasks
+);
 // Route for bulk unassignment
 router.post(
   "/bulk-unassign",

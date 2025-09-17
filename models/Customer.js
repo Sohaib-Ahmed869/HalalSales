@@ -149,7 +149,7 @@ const CustomerSchema = new Schema({
   },
   status: {
     type: String,
-    enum: ["active", "inactive", "lead", "prospect"],
+    enum: ["active", "inactive", "lead", "prospect", "pending"],
     default: "active",
   },
   marketingStatus: {
@@ -252,6 +252,27 @@ const CustomerSchema = new Schema({
     companyDoc: DocumentSchema,
     managerId: DocumentSchema,
     otherDocuments: [DocumentSchema],
+  },
+
+  approvalStatus: {
+    type: String,
+    enum: ["pending", "approved", "rejected"],
+    default: "pending",
+  },
+  approvedBy: {
+    type: Schema.Types.ObjectId,
+    ref: "User",
+  },
+  approvedAt: {
+    type: Date,
+  },
+  rejectedReason: {
+    type: String,
+  },
+  tempCardCode: {
+    type: String,
+    index: true,
+    sparse: true, // Allows null values but indexes non-null ones
   },
 });
 
