@@ -209,7 +209,7 @@ exports.formatCustomerForSAP = async (customer) => {
     // Additional phone numbers
     Phone2:
       customer.additionalPhoneNumbers &&
-      customer.additionalPhoneNumbers.length > 0
+        customer.additionalPhoneNumbers.length > 0
         ? customer.additionalPhoneNumbers[0]
         : "",
     // Status
