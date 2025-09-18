@@ -212,10 +212,6 @@ exports.formatCustomerForSAP = async (customer) => {
       customer.additionalPhoneNumbers.length > 0
         ? customer.additionalPhoneNumbers[0]
         : "",
-
-    // Notes
-    Notes: customer.notes || "",
-
     // Status
     Valid: customer.status === "active" ? "tYES" : "tNO",
     Frozen: customer.status === "inactive" ? "tYES" : "tNO",

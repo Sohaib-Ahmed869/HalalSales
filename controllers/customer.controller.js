@@ -347,6 +347,176 @@ exports.exportCustomersToExcel = async (req, res) => {
   }
 };
 
+exports.syncCustomerWithSAP = async (req, res) => {
+  try {
+    const { customerId, cardCode } = req.params;
+
+    // Find customer by ID or CardCode
+    let customer;
+    if (customerId) {
+      if (customerId.length === 24) {
+        // MongoDB ObjectId
+        customer = await Customer.findById(customerId);
+      } else {
+        // Assume it's a CardCode
+        customer = await Customer.findOne({ CardCode: customerId });
+      }
+    } else if (cardCode) {
+      customer = await Customer.findOne({ CardCode: cardCode });
+    }
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found"
+      });
+    }
+
+    // Check if customer is already synced with SAP
+    if (customer.SyncedWithSAP && customer.CardCode.startsWith('C')) {
+      return res.status(400).json({
+        success: false,
+        message: "Customer is already synced with SAP",
+        data: {
+          CardCode: customer.CardCode,
+          CardName: customer.CardName,
+          syncStatus: customer.LocalStatus,
+          lastSyncAttempt: customer.LastSyncAttempt
+        }
+      });
+    }
+
+    // Validate required fields before attempting sync
+    if (!customer.CardName) {
+      return res.status(400).json({
+        success: false,
+        message: "Customer missing required field: CardName"
+      });
+    }
+
+    if (!customer.Email) {
+      return res.status(400).json({
+        success: false,
+        message: "Customer missing required field: Email"
+      });
+    }
+
+    console.log(`Manual SAP sync requested for customer: ${customer.CardCode} (${customer.CardName})`);
+
+    customer.LastSyncAttempt = new Date();
+    await customer.save();
+
+    // Use the existing internal function to push to SAP
+    const syncResult = await pushCustomerToSAPInternal(customer);
+
+    if (syncResult.success) {
+      // Refresh customer data from database to get updated fields
+      const updatedCustomer = await Customer.findById(customer._id)
+        .select('CardCode CardName Email SyncedWithSAP LocalStatus customerType updatedAt LastSyncAttempt')
+        .lean();
+
+      return res.status(200).json({
+        success: true,
+        message: "Customer successfully synced with SAP",
+        data: {
+          customer: updatedCustomer,
+          sapResponse: {
+            CardCode: syncResult.CardCode,
+            syncedAt: new Date()
+          }
+        }
+      });
+    } else {
+      // Sync failed
+      return res.status(500).json({
+        success: false,
+        message: "Failed to sync customer with SAP",
+        error: syncResult.error,
+        data: {
+          CardCode: customer.CardCode,
+          CardName: customer.CardName,
+          syncStatus: customer.LocalStatus,
+          lastSyncAttempt: customer.LastSyncAttempt
+        }
+      });
+    }
+
+  } catch (error) {
+    console.error("Error syncing customer with SAP:", error);
+
+    // Try to update customer status to failed if we have the customer object
+    try {
+      if (customer && customer._id) {
+        await Customer.findByIdAndUpdate(customer._id, {
+          LocalStatus: "SyncFailed",
+          SyncErrors: error.message,
+          LastSyncAttempt: new Date()
+        });
+      }
+    } catch (updateError) {
+      console.error("Error updating customer sync status:", updateError);
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: "Error syncing customer with SAP",
+      error: error.message
+    });
+  }
+};
+
+// Optional: Get SAP sync status for a customer
+exports.getSAPSyncStatus = async (req, res) => {
+  try {
+    const { customerId, cardCode } = req.params;
+
+    // Find customer by ID or CardCode
+    let customer;
+    if (customerId) {
+      if (customerId.length === 24) {
+        customer = await Customer.findById(customerId);
+      } else {
+        customer = await Customer.findOne({ CardCode: customerId });
+      }
+    } else if (cardCode) {
+      customer = await Customer.findOne({ CardCode: cardCode });
+    }
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer not found"
+      });
+    }
+
+    const syncStatus = {
+      CardCode: customer.CardCode,
+      CardName: customer.CardName,
+      Email: customer.Email,
+      customerType: customer.customerType,
+      SyncedWithSAP: customer.SyncedWithSAP || false,
+      LocalStatus: customer.LocalStatus || "NotSynced",
+      LastSyncAttempt: customer.LastSyncAttempt,
+      SyncErrors: customer.SyncErrors,
+      isSAPCustomer: customer.CardCode.startsWith('C'),
+      canBeSynced: !customer.CardCode.startsWith('C') && customer.CardName && customer.Email
+    };
+
+    return res.status(200).json({
+      success: true,
+      data: syncStatus
+    });
+
+  } catch (error) {
+    console.error("Error getting SAP sync status:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error getting sync status",
+      error: error.message
+    });
+  }
+};
+
 // Alternative function that returns CSV format instead of Excel
 exports.exportCustomersToCSV = async (req, res) => {
   try {

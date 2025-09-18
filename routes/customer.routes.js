@@ -64,6 +64,21 @@ router.get(
   customerController.exportCustomersToCSV
 );
 
+router.post(
+  "/:customerId/sync-sap",
+  auth,
+  checkRole(["admin", "sales_manager"]),
+  customerController.syncCustomerWithSAP
+);
+
+// Alternative route using CardCode
+router.post(
+  "/by-code/:cardCode/sync-sap",
+  auth,
+  checkRole(["admin", "sales_manager"]),
+  customerController.syncCustomerWithSAP
+);
+
 // Document upload routes
 router.post(
   "/:customerId/documents/upload",
