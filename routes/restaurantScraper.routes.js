@@ -6,7 +6,28 @@ const { auth } = require('../middleware/auth');
 
 // Apply authentication to all routes
 router.use(auth);
+// Add these routes:
 
+/**
+ * @route   POST /api/restaurant-scraper/assign
+ * @desc    Assign restaurants to agents
+ * @access  Private (Admin only)
+ */
+router.post('/assign', restaurantScraperController.assignRestaurants);
+
+/**
+ * @route   GET /api/restaurant-scraper/my-restaurants
+ * @desc    Get agent's assigned restaurants
+ * @access  Private (Agent)
+ */
+router.get('/my-restaurants', restaurantScraperController.getAgentRestaurants);
+
+/**
+ * @route   PUT /api/restaurant-scraper/assignment/:assignmentId
+ * @desc    Update restaurant assignment
+ * @access  Private (Agent/Admin)
+ */
+router.put('/assignment/:assignmentId', restaurantScraperController.updateRestaurantAssignment);
 /**
  * @route   GET /api/restaurant-scraper/dashboard
  * @desc    Get scraping dashboard with statistics

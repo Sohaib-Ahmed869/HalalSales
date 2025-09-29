@@ -42,7 +42,8 @@ const postalCodeScrapingRoutes = require("./routes/postalCodeScraping.routes");
 const chatbotRoutes = require('./routes/chatbot.routes');
 const productAnalyticsRoutes = require('./routes/productAnalytics.routes')
 const restaurantScraperRoutes = require("./routes/restaurantScraper.routes");
-
+const conversationRoutes = require("./routes/conversation.routes");
+const contactImportRoutes = require("./routes/contactImport.routes");
 const config = require("./services/config");
 const desktimeJob = require("./jobs/desktimeJob");
 const { linkDocumentsToAgents } = require("./migrateAgentReferences");
@@ -162,21 +163,8 @@ app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/customer-journey", customerJourneyRoutes);
 app.use("/api/recommendations", recommendationRoutes);
 app.use("/api/restaurant-scraper", restaurantScraperRoutes);
+app.use("/api/conversations", conversationRoutes);
 
-// SuperChat Conversation Management routes
-const superChatConversationRoutes = require("./routes/superChatConversation.routes");
-app.use("/api/super-chat", superChatConversationRoutes);
-
-// SuperChat Batch Processing routes
-const superChatBatchRoutes = require("./routes/superChatBatch.routes");
-app.use("/api/super-chat-batch", superChatBatchRoutes);
-
-// SuperChat Analytics routes
-const superChatAnalyticsRoutes = require("./routes/superChatAnalytics.routes");
-app.use("/api/super-chat-analytics", require('./routes/superChatFullAnalytics.routes'));
-
-// SuperChat User Analytics routes
-app.use("/api/super-chat-user-analytics", require('./routes/superChatUserAnalytics.routes'));
 
 // Legacy analytics routes (keep for backward compatibility if needed)
 // app.use("/api/super-chat-analytics-old", superChatAnalyticsRoutes);
@@ -198,6 +186,7 @@ app.use("/api/jobs", jobLogRoutes); // Job logs routes
 app.use("/api/postal-code-scraping", postalCodeScrapingRoutes); // Postal code scraping routes
 app.use('/api/chatbot', chatbotRoutes);
 app.use('/api/product-analytics', productAnalyticsRoutes);  
+app.use("/api/contact-import", contactImportRoutes); // Contact import routes
 
 // Health check route
 app.get("/health", (req, res) => {

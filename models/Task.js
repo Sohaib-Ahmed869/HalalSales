@@ -28,8 +28,14 @@ const TaskSchema = new Schema({
   },
   type: {
     type: String,
-    enum: ["follow-up", "call", "email", "meeting", "other", "approval", "customer_approval"], // Add customer_approval
+    enum: ["follow-up", "call", "email", "meeting", "other", "approval", "customer_approval", "restaurant_follow_up"], // ADD restaurant_follow_up
     default: "follow-up",
+  },
+
+  // Add new field:
+  relatedRestaurant: {
+    type: Schema.Types.ObjectId,
+    ref: "RestaurantAssignment",
   },
   dueDate: {
     type: Date,

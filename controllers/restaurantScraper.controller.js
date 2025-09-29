@@ -1,10 +1,212 @@
 // controllers/restaurantScraper.controller.js
 const Restaurant = require('../models/Restaurant');
+const RestaurantAssignment = require('../models/RestaurantAssignment');
+const Task = require('../models/Task');
+const User = require('../models/User');
+const Notification = require('../models/Notification');
 const axios = require('axios');
 
 const SCRAPER_BASE_URL = process.env.SCRAPER_BASE_URL || 'http://localhost:3000';
 
 const restaurantScraperController = {
+  /**
+ * Assign restaurants to agents
+ */
+  assignRestaurants: async (req, res) => {
+    try {
+      const { restaurantIds, agentId, priority = 'medium' } = req.body;
+      const assignedBy = req.user.id;
+
+      // Validate agent exists and is a sales agent
+      const agent = await User.findById(agentId);
+      if (!agent || !['sales_agent', 'sales_manager'].includes(agent.role)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid agent selected'
+        });
+      }
+
+      const assignments = [];
+      const errors = [];
+
+      for (const restaurantId of restaurantIds) {
+        try {
+          // Check if restaurant is already assigned
+          const existingAssignment = await RestaurantAssignment.findOne({ restaurant: restaurantId });
+          if (existingAssignment) {
+            errors.push({ restaurantId, error: 'Already assigned' });
+            continue;
+          }
+
+          const restaurant = await Restaurant.findById(restaurantId);
+          if (!restaurant) {
+            errors.push({ restaurantId, error: 'Restaurant not found' });
+            continue;
+          }
+
+          // Create assignment
+          const assignment = new RestaurantAssignment({
+            restaurant: restaurantId,
+            assignedAgent: agentId,
+            assignedBy,
+            priority
+          });
+          await assignment.save();
+
+          // Create task for agent
+          const task = new Task({
+            title: `Follow up with ${restaurant.name}`,
+            description: `Contact restaurant: ${restaurant.name}\nPostal Code: ${restaurant.postal_code}\nMenu Items: ${restaurant.menu_items_count}`,
+            type: 'restaurant_follow_up',
+            assignedTo: agentId,
+            createdBy: assignedBy,
+            priority,
+            dueDate: new Date(Date.now() + 24 * 60 * 60 * 1000), // Tomorrow
+            relatedRestaurant: assignment._id
+          });
+          await task.save();
+
+          // Create notification
+          const notification = new Notification({
+            recipient: agentId,
+            sender: assignedBy,
+            type: 'restaurant_assigned',
+            title: 'New Restaurant Assigned',
+            message: `You have been assigned to follow up with ${restaurant.name}`,
+            relatedTask: task._id,
+            relatedRestaurant: assignment._id
+          });
+          await notification.save();
+
+          assignments.push(assignment);
+        } catch (error) {
+          errors.push({ restaurantId, error: error.message });
+        }
+      }
+
+      res.json({
+        success: true,
+        data: {
+          assigned: assignments.length,
+          errors: errors.length,
+          assignments,
+          errors
+        }
+      });
+
+    } catch (error) {
+      console.error('Error assigning restaurants:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Error assigning restaurants',
+        error: error.message
+      });
+    }
+  },
+
+  /**
+   * Get agent's assigned restaurants
+   */
+  getAgentRestaurants: async (req, res) => {
+    try {
+      const agentId = req.user.id;
+      const { page = 1, limit = 20, status = 'all', priority = 'all' } = req.query;
+
+      let query = { assignedAgent: agentId };
+      if (status !== 'all') query.status = status;
+      if (priority !== 'all') query.priority = priority;
+
+      const skip = (parseInt(page) - 1) * parseInt(limit);
+
+      const [assignments, total] = await Promise.all([
+        RestaurantAssignment.find(query)
+          .populate('restaurant')
+          .populate('assignedBy', 'firstName lastName')
+          .sort({ assignedAt: -1 })
+          .skip(skip)
+          .limit(parseInt(limit)),
+        RestaurantAssignment.countDocuments(query)
+      ]);
+
+      res.json({
+        success: true,
+        data: {
+          assignments,
+          pagination: {
+            currentPage: parseInt(page),
+            totalPages: Math.ceil(total / parseInt(limit)),
+            totalItems: total,
+            itemsPerPage: parseInt(limit)
+          }
+        }
+      });
+
+    } catch (error) {
+      console.error('Error fetching agent restaurants:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Error fetching assigned restaurants',
+        error: error.message
+      });
+    }
+  },
+
+  /**
+   * Update restaurant assignment status and notes
+   */
+  updateRestaurantAssignment: async (req, res) => {
+    try {
+      const { assignmentId } = req.params;
+      const { status, notes, nextFollowUpDate } = req.body;
+      const userId = req.user.id;
+
+      const assignment = await RestaurantAssignment.findById(assignmentId);
+      if (!assignment) {
+        return res.status(404).json({
+          success: false,
+          message: 'Assignment not found'
+        });
+      }
+
+      // Check if user is assigned agent or admin
+      if (assignment.assignedAgent.toString() !== userId && req.user.role !== 'admin') {
+        return res.status(403).json({
+          success: false,
+          message: 'Not authorized to update this assignment'
+        });
+      }
+
+      // Update fields
+      if (status) assignment.status = status;
+      if (nextFollowUpDate) assignment.nextFollowUpDate = nextFollowUpDate;
+      if (notes) {
+        assignment.notes.push({
+          content: notes,
+          addedBy: userId,
+          type: 'general'
+        });
+      }
+
+      assignment.contactAttempts += 1;
+      assignment.lastContactDate = new Date();
+      assignment.updatedAt = new Date();
+
+      await assignment.save();
+
+      res.json({
+        success: true,
+        data: assignment
+      });
+
+    } catch (error) {
+      console.error('Error updating assignment:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Error updating assignment',
+        error: error.message
+      });
+    }
+  },
   /**
    * Get all restaurants for a postal code with pagination
    */

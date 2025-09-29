@@ -11,7 +11,6 @@ async function updateRunningAnalyses() {
       status: "running",
     });
 
-    console.log(`Found ${runningAnalyses.length} running analyses to check`);
 
     for (const analysis of runningAnalyses) {
       try {

@@ -21,8 +21,16 @@ const NotificationSchema = new Schema({
       "task_completed",
       "task_approved",
       "task_rejected",
+      "restaurant_assigned", // ADD
+      "restaurant_updated"   // ADD
     ],
     required: true,
+  },
+
+  // Add new field:
+  relatedRestaurant: {
+    type: Schema.Types.ObjectId,
+    ref: "RestaurantAssignment",
   },
   title: {
     type: String,
