@@ -138,7 +138,7 @@ exports.generateNextCardCode = async () => {
 
     // Modified query to filter for C6xxx customers only
     const response = await axios.get(
-      `${SAP_CONFIG.serviceLayerUrl}/BusinessPartners?$top=1&$orderby=CardCode desc&$filter=CardType eq 'cCustomer' and startswith(CardCode,'C6')`,
+      `${SAP_CONFIG.serviceLayerUrl}/BusinessPartners?$top=1&$orderby=CardCode desc&$filter=CardType eq 'cCustomer' and startswith(CardCode,'C7')`,
       {
         headers: {
           "Content-Type": "application/json",
@@ -172,7 +172,7 @@ exports.generateNextCardCode = async () => {
 
     // If no C6xxx customers found, start with C6001
     console.log("No C6xxx customers found, starting with C6001");
-    return "C6001";
+    return "C7000";
   } catch (error) {
     // If unauthorized, try to login again and retry once
     if (error.response && error.response.status === 401) {
