@@ -45,7 +45,7 @@ const restaurantScraperRoutes = require("./routes/restaurantScraper.routes");
 const conversationRoutes = require("./routes/conversation.routes");
 const contactImportRoutes = require("./routes/contactImport.routes");
 const menuMatchRoutes = require("./routes/menuMatch.routes");
-const vendorEmailRoutes = require('./routes/vendorEmailRoutes');
+// const vendorEmailRoutes = require('./routes/vendorEmailRoutes');
 const config = require("./services/config");
 const desktimeJob = require("./jobs/desktimeJob");
 const { linkDocumentsToAgents } = require("./migrateAgentReferences");
@@ -53,7 +53,7 @@ const { syncFromFeb21 } = require("./jobs/hubspotJob");
 const { fetchCallsFromMay2UntilToday } = require("./jobs/mayScript");
 const targetScheduler = require("./services/targetScheduler");
 require('./jobs/updateRestaurantAnalysis');
-const SuperChatCronService = require('./services/superChatCronService'); 
+const SuperChatCronService = require('./services/superChatCronService');
 const rfqRoutes = require('./routes/rfqRoutes'); // RFQ routes
 // Initialize express app
 const app = express();
@@ -148,7 +148,7 @@ mongoose
     process.exit(1);
   });
 
-  
+
 // Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/customers", customerRoutes);
@@ -187,11 +187,11 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/jobs", jobLogRoutes); // Job logs routes
 app.use("/api/postal-code-scraping", postalCodeScrapingRoutes); // Postal code scraping routes
 app.use('/api/chatbot', chatbotRoutes);
-app.use('/api/product-analytics', productAnalyticsRoutes);  
+app.use('/api/product-analytics', productAnalyticsRoutes);
 app.use("/api/contact-import", contactImportRoutes); // Contact import routes
 app.use('/api/rfq', rfqRoutes); // RFQ routes
 app.use('/api/menu-match', menuMatchRoutes); // Menu matching routes
-app.use('/api/vendor-email', vendorEmailRoutes);
+// app.use('/api/vendor-email', vendorEmailRoutes);
 // Health check route
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });
