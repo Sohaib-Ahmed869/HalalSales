@@ -54,7 +54,7 @@ const { fetchCallsFromMay2UntilToday } = require("./jobs/mayScript");
 const targetScheduler = require("./services/targetScheduler");
 require('./jobs/updateRestaurantAnalysis');
 const SuperChatCronService = require('./services/superChatCronService');
-const rfqRoutes = require('./routes/rfqRoutes'); // RFQ routes
+// const rfqRoutes = require('./routes/rfqRoutes'); // RFQ routes
 // Initialize express app
 const app = express();
 
@@ -189,7 +189,7 @@ app.use("/api/postal-code-scraping", postalCodeScrapingRoutes); // Postal code s
 app.use('/api/chatbot', chatbotRoutes);
 app.use('/api/product-analytics', productAnalyticsRoutes);
 app.use("/api/contact-import", contactImportRoutes); // Contact import routes
-app.use('/api/rfq', rfqRoutes); // RFQ routes
+// app.use('/api/rfq', rfqRoutes); // RFQ routes
 app.use('/api/menu-match', menuMatchRoutes); // Menu matching routes
 // app.use('/api/vendor-email', vendorEmailRoutes);
 // Health check route
