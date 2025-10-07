@@ -236,6 +236,50 @@ exports.getTasks = async (req, res) => {
   }
 };
 
+// Add this function after getTaskById
+exports.getTaskRestaurantDetails = async (req, res) => {
+  try {
+    const { taskId } = req.params;
+
+    const task = await Task.findById(taskId)
+      .populate('relatedRestaurant')
+      .lean();
+
+    if (!task || !task.relatedRestaurant) {
+      return res.status(404).json({
+        success: false,
+        message: 'Task or related restaurant not found'
+      });
+    }
+
+    // Get the full restaurant details
+    const Restaurant = require('../models/Restaurant');
+    const restaurant = await Restaurant.findById(task.relatedRestaurant.restaurant).lean();
+
+    if (!restaurant) {
+      return res.status(404).json({
+        success: false,
+        message: 'Restaurant details not found'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        assignment: task.relatedRestaurant,
+        restaurant: restaurant
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching task restaurant details:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Error fetching restaurant details',
+      error: error.message
+    });
+  }
+};
+
 // Add this new function
 exports.approveCustomerFromTask = async (req, res) => {
   try {

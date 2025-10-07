@@ -49,4 +49,5 @@ router.post("/:id/attachment", auth, taskController.uploadAttachment);
 router.get("/:id/attachment", auth, taskController.getAttachmentUrl);
 router.delete("/:id/attachment", auth, taskController.deleteAttachment);
 
+router.get('/:taskId/restaurant-details', taskController.getTaskRestaurantDetails);
 module.exports = router;

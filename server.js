@@ -44,6 +44,8 @@ const productAnalyticsRoutes = require('./routes/productAnalytics.routes')
 const restaurantScraperRoutes = require("./routes/restaurantScraper.routes");
 const conversationRoutes = require("./routes/conversation.routes");
 const contactImportRoutes = require("./routes/contactImport.routes");
+const menuMatchRoutes = require("./routes/menuMatch.routes");
+const vendorEmailRoutes = require('./routes/vendorEmailRoutes');
 const config = require("./services/config");
 const desktimeJob = require("./jobs/desktimeJob");
 const { linkDocumentsToAgents } = require("./migrateAgentReferences");
@@ -188,6 +190,8 @@ app.use('/api/chatbot', chatbotRoutes);
 app.use('/api/product-analytics', productAnalyticsRoutes);  
 app.use("/api/contact-import", contactImportRoutes); // Contact import routes
 app.use('/api/rfq', rfqRoutes); // RFQ routes
+app.use('/api/menu-match', menuMatchRoutes); // Menu matching routes
+app.use('/api/vendor-email', vendorEmailRoutes);
 // Health check route
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });

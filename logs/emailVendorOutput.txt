@@ -1,0 +1,204 @@
+{
+    "success": true,
+    "message": "Successfully synced 20 vendors from email history",
+    "data": {
+        "totalVendors": 20,
+        "vendors": [
+            {
+                "cardCode": "EMAIL-1759738246140-IL58E",
+                "name": "The big vendor",
+                "email": "sohaib.sipra@calcite.live",
+                "categories": [
+                    "halal chicken breasts"
+                ],
+                "certifications": [
+                    "halal"
+                ]
+            },
+            {
+                "cardCode": "S0112",
+                "name": "global foodservice",
+                "email": "sohaibahmedsipra@gmail.com",
+                "categories": [
+                    "Coca-Cola"
+                ],
+                "certifications": []
+            },
+            {
+                "cardCode": "EMAIL-1759738247155-673YF",
+                "name": "Supplier Big",
+                "email": "sohaibsipra869@gmail.com",
+                "categories": [
+                    "fries"
+                ],
+                "certifications": []
+            },
+            {
+                "cardCode": "EMAIL-1759738247642-R66RB",
+                "name": "Apple Foods Co",
+                "email": "i211114@nu.edu.pk",
+                "categories": [
+                    "Halal Chicken Legs",
+                    "Halal Chicken Wings"
+                ],
+                "certifications": [
+                    "Halal"
+                ]
+            },
+            {
+                "cardCode": "EMAIL-1759738248132-0PGY7",
+                "name": "Supply Solutions",
+                "email": "areesha.asim@calcite.live",
+                "categories": [
+                    "halal chicken breasts"
+                ],
+                "certifications": [
+                    "halal"
+                ]
+            },
+            {
+                "cardCode": "EMAIL-1759738248623-XW5WZ",
+                "name": "Best Chicken",
+                "email": "areesha.nasim31@gmail.com",
+                "categories": [
+                    "Halal Chicken Breast"
+                ],
+                "certifications": [
+                    "Halal"
+                ]
+            },
+            {
+                "cardCode": "EMAIL-1759738249110-CO77R",
+                "name": "Bulkorder co",
+                "email": "areeshaasim66@gmail.com",
+                "categories": [
+                    "Halal Chicken Breasts"
+                ],
+                "certifications": [
+                    "Halal"
+                ]
+            },
+            {
+                "cardCode": "EMAIL-1759738249601-4PJFJ",
+                "name": "Coca-Cola Distributions France",
+                "email": "fatima.batool@calcite.live",
+                "categories": [
+                    "Coca-Cola"
+                ],
+                "certifications": []
+            },
+            {
+                "cardCode": "EMAIL-1759738250090-FUC7W",
+                "name": "Farm Fresh",
+                "email": "fatimabatoolawan10@gmail.com",
+                "categories": [
+                    "Halal Chicken"
+                ],
+                "certifications": [
+                    "Halal Compliance Certificate"
+                ]
+            },
+            {
+                "cardCode": "EMAIL-1759738250584-TDVI0",
+                "name": "Halal Food Services",
+                "email": "iftikharazka1@gmail.com",
+                "categories": [
+                    "Halal Chicken"
+                ],
+                "certifications": [
+                    "Halal compliant"
+                ]
+            },
+            {
+                "cardCode": "EMAIL-1759738251076-4V3C1",
+                "name": "Chicken Farms",
+                "email": "azka.iftikhar@calcite.live",
+                "categories": [
+                    "Halal Chicken Breasts"
+                ],
+                "certifications": [
+                    "Halal"
+                ]
+            },
+            {
+                "cardCode": "EMAIL-1759738251562-VZ03O",
+                "name": "Golden Fries Co.",
+                "email": "asad.talat@calcite.live",
+                "categories": [
+                    "Fries"
+                ],
+                "certifications": []
+            },
+            {
+                "cardCode": "EMAIL-1759738252049-ADRPN",
+                "name": "Coca-Cola Supply Co.",
+                "email": "fammacreates.ai@gmail.com",
+                "categories": [
+                    "Coca-Cola"
+                ],
+                "certifications": []
+            },
+            {
+                "cardCode": "EMAIL-1759738252540-I89RQ",
+                "name": "Global Beverages Ltd.",
+                "email": "famma.work@gmail.com",
+                "categories": [
+                    "Coca-Cola"
+                ],
+                "certifications": []
+            },
+            {
+                "cardCode": "EMAIL-1759738253048-VQQ7S",
+                "name": "Beverage Enterprises",
+                "email": "fammacreates@gmail.com",
+                "categories": [
+                    "Coca-Cola"
+                ],
+                "certifications": []
+            },
+            {
+                "cardCode": "EMAIL-1759738253536-0RDYB",
+                "name": "Coca-Cola Distribution",
+                "email": "fammaawan@gmail.com",
+                "categories": [
+                    "Coca-Cola"
+                ],
+                "certifications": []
+            },
+            {
+                "cardCode": "EMAIL-1759738254042-KLEZ1",
+                "name": "French Fry Company",
+                "email": "aimansyed389@gmail.com",
+                "categories": [
+                    "fries"
+                ],
+                "certifications": []
+            },
+            {
+                "cardCode": "EMAIL-1759738254527-HL5P3",
+                "name": "Fresh Fries International",
+                "email": "aimen.azhar@calcite.live",
+                "categories": [
+                    "Fries"
+                ],
+                "certifications": []
+            },
+            {
+                "cardCode": "EMAIL-1759738255014-U2FC2",
+                "name": "Global Fries Inc.",
+                "email": "i210290@nu.edu.pk",
+                "categories": [
+                    "Fries"
+                ],
+                "certifications": []
+            },
+            {
+                "cardCode": "EMAIL-1759738255500-QFHE0",
+                "name": "Google LLC",
+                "email": "no-reply@accounts.google.com",
+                "categories": [],
+                "certifications": []
+            }
+        ]
+    }
+}

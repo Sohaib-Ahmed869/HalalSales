@@ -7,6 +7,8 @@ const {
     generateSearchKeywords,
     analyzeVendorRecommendations
 } = require('./aiService');
+const EmailVendorHistory = require('../models/EmailVendorHistory');
+const vendorEmailService = require('./vendorEmailService');
 
 /**
  * Process natural language RFQ request
@@ -90,6 +92,7 @@ async function processNaturalLanguageRFQ(naturalLanguageInput, userId) {
         console.log(`Found ${vendors.length} active vendors in Vendor collection`);
 
         // Merge vendor data with historical analysis
+        // Merge vendor data with historical analysis
         const enrichedVendors = vendorAnalysis.map(historical => {
             const vendorDetails = vendors.find(v => v.CardCode === historical._id);
             return {
@@ -97,9 +100,14 @@ async function processNaturalLanguageRFQ(naturalLanguageInput, userId) {
                 email: vendorDetails?.email,
                 phone: vendorDetails?.phone,
                 productCategories: vendorDetails?.productCategories,
+                certifications: vendorDetails?.certifications,
+                isEmailVendor: vendorDetails?.customFields?.isEmailVendor || false,
+                vendorSource: historical.vendorSource || 'SAP',
                 hasEmail: !!vendorDetails?.email,
             };
         }).filter(v => v.hasEmail); // Only include vendors with emails
+
+        console.log(`Final ${enrichedVendors.length} vendors (SAP: ${enrichedVendors.filter(v => v.vendorSource === 'SAP').length}, EMAIL: ${enrichedVendors.filter(v => v.vendorSource === 'EMAIL').length})`);
 
         console.log(`Final ${enrichedVendors.length} vendors with email addresses`);
 
@@ -188,7 +196,7 @@ async function processNaturalLanguageRFQ(naturalLanguageInput, userId) {
         itemsAnalysis: itemsWithVendors,
         vendorRecommendations: {
             total: allVendorCodes.size,
-            topVendors: topVendorsAcrossItems.slice(0, 10),
+            topVendors: topVendorsAcrossItems,
             aiInsights: aiRecommendations,
         },
         createdBy: userId,
@@ -196,22 +204,56 @@ async function processNaturalLanguageRFQ(naturalLanguageInput, userId) {
 }
 
 /**
- * Analyze historical purchases with multiple keywords
+ * Generate flexible keyword variations for better matching
+ */
+function generateKeywordVariations(keywords) {
+    const variations = new Set();
+
+    keywords.forEach(keyword => {
+        // Add original
+        variations.add(keyword);
+
+        // Add lowercase
+        variations.add(keyword.toLowerCase());
+
+        // Split into words and add individual words (if multi-word)
+        const words = keyword.toLowerCase().split(/\s+/);
+        if (words.length > 1) {
+            words.forEach(word => {
+                if (word.length > 3) { // Only add meaningful words
+                    variations.add(word);
+                }
+            });
+        }
+
+        // Remove plurals (simple approach)
+        if (keyword.endsWith('s') && keyword.length > 4) {
+            variations.add(keyword.slice(0, -1));
+        }
+    });
+
+    return Array.from(variations);
+}
+
+/**
+ * Analyze historical purchases with multiple keywords (ENHANCED for Email Vendors)
  * @param {Array<string>} keywords - Search keywords
  * @param {number} quantity - Required quantity
- * @returns {Array} Scored vendor list
+ * @returns {Array} Scored vendor list (both SAP and Email vendors)
  */
 async function analyzeHistoricalPurchasesMultiKeyword(keywords, quantity) {
     console.log(`\n>> Searching historical purchases with keywords: ${JSON.stringify(keywords)}`);
 
-    // Handle empty keywords
     if (!keywords || keywords.length === 0) {
         console.log('⚠️ No keywords provided, returning empty results');
         return [];
     }
 
-    // Build regex patterns for each keyword (OR condition)
-    const regexPatterns = keywords.map(keyword => ({
+    // Generate keyword variations for better matching
+    const expandedKeywords = generateKeywordVariations(keywords);
+    console.log(`>> Expanded keywords: ${JSON.stringify(expandedKeywords)}`);
+
+    const regexPatterns = expandedKeywords.map(keyword => ({
         'DocumentLines.ItemDescription': {
             $regex: keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
             $options: 'i'
@@ -219,35 +261,21 @@ async function analyzeHistoricalPurchasesMultiKeyword(keywords, quantity) {
     }));
 
     try {
-        const sampleDocs = await PurchaseInvoice.find({}).limit(3).lean();
-        console.log('=== DATABASE SAMPLE ===');
-        sampleDocs.forEach(doc => {
-            console.log(`Vendor: ${doc.CardName}`);
-            if (doc.DocumentLines && doc.DocumentLines.length > 0) {
-                doc.DocumentLines.forEach(line => {
-                    console.log(`  - Item: ${line.ItemDescription}`);
-                });
-            }
-        });
-        console.log('=== END SAMPLE ===\n');
-        let historicalPurchases = await PurchaseInvoice.aggregate([
-            // Stage 1: Match documents that have at least one matching line
+        // ====== PART 1: Get SAP Vendors (existing logic) ======
+        let sapVendors = await PurchaseInvoice.aggregate([
             {
                 $match: {
                     $or: regexPatterns
                 }
             },
-            // Stage 2: Unwind document lines
             {
                 $unwind: '$DocumentLines'
             },
-            // Stage 3: Match only the lines that match our keywords
             {
                 $match: {
                     $or: regexPatterns
                 }
             },
-            // Stage 4: Group by vendor (CardCode)
             {
                 $group: {
                     _id: '$CardCode',
@@ -273,7 +301,6 @@ async function analyzeHistoricalPurchasesMultiKeyword(keywords, quantity) {
                     }
                 }
             },
-            // Stage 5: Project only needed fields
             {
                 $project: {
                     _id: 1,
@@ -286,8 +313,7 @@ async function analyzeHistoricalPurchasesMultiKeyword(keywords, quantity) {
                     firstPurchaseDate: 1,
                     totalQuantity: 1,
                     totalValue: 1,
-                    items: { $slice: ['$items', -5] }, // Only keep last 5 items for reference
-                    // ADD THIS - Map items to purchaseHistory format
+                    items: { $slice: ['$items', -5] },
                     purchaseHistory: {
                         $map: {
                             input: { $slice: ['$items', -5] },
@@ -295,57 +321,170 @@ async function analyzeHistoricalPurchasesMultiKeyword(keywords, quantity) {
                             in: {
                                 productName: '$$item.description',
                                 quantity: '$$item.quantity',
-                                unit: 'kg', // You might need to extract this from somewhere
+                                unit: 'kg',
                                 price: '$$item.price',
                                 total: '$$item.lineTotal',
                                 date: '$$item.date',
-                                poNumber: null // Not available in current structure
+                                poNumber: null
                             }
                         }
                     }
                 }
-
             },
-            // Stage 6: Sort by total purchases (most reliable vendors first)
             {
                 $sort: { totalPurchases: -1 }
             }
         ]);
 
-        console.log(`>> Query returned ${historicalPurchases.length} vendors`);
-        historicalPurchases = historicalPurchases.map(vendor => ({
+        sapVendors = sapVendors.map(vendor => ({
             ...vendor,
+            vendorSource: 'SAP',
             purchaseHistory: vendor.items?.map(item => ({
                 productName: item.description,
                 quantity: item.quantity,
-                unit: 'kg', // Default unit, adjust as needed
+                unit: 'kg',
                 price: item.price,
                 total: item.lineTotal,
                 date: item.date,
-                poNumber: null // Not in current data structure
+                poNumber: null
             })) || []
         }));
-        if (historicalPurchases.length > 0) {
-            console.log('>> Sample vendor data:', {
-                vendor: historicalPurchases[0].vendorName,
-                totalPurchases: historicalPurchases[0].totalPurchases,
-                avgPrice: historicalPurchases[0].avgPrice,
-                lastPurchase: historicalPurchases[0].lastPurchaseDate
+
+        console.log(`>> Found ${sapVendors.length} SAP vendors`);
+
+        // ====== PART 2: Get Email Vendors (NEW) ======
+        let emailVendors = [];
+
+        try {
+            // Build regex for keyword matching
+            const keywordRegex = new RegExp(keywords.join('|'), 'i');
+
+            // Search vendors directly by product categories
+            const emailVendorDetails = await Vendor.find({
+                'customFields.isEmailVendor': true,
+                isActive: true,
+                $or: [
+                    // Search in product categories
+                    { productCategories: { $regex: keywordRegex } },
+                    // Also search in vendor name for broader matches
+                    { CardName: { $regex: keywordRegex } }
+                ]
             });
+
+            console.log(`>> Found ${emailVendorDetails.length} email vendors matching product categories`);
+
+            // Get their interaction histories for additional context
+            const emailVendorCodes = emailVendorDetails.map(v => v.CardCode);
+            const emailVendorHistories = await EmailVendorHistory.find({
+                vendorCardCode: { $in: emailVendorCodes }
+            });
+
+            // Build email vendor results
+            emailVendors = emailVendorDetails.map(vendor => {
+                const history = emailVendorHistories.find(
+                    h => h.vendorCardCode === vendor.CardCode
+                );
+
+                const quotations = history?.interactions.filter(
+                    i => i.type === 'quotation_response'
+                ) || [];
+
+                // NEW: Calculate average price from quotations
+                const quotationsWithPricing = quotations.filter(q => q.quotationData?.quotedItems?.length > 0);
+                let avgPrice = 0;
+                let minPrice = 0;
+                let maxPrice = 0;
+
+                if (quotationsWithPricing.length > 0) {
+                    const allPrices = quotationsWithPricing.flatMap(q =>
+                        q.quotationData.quotedItems.map(item => item.unitPrice)
+                    ).filter(p => p > 0);
+
+                    if (allPrices.length > 0) {
+                        avgPrice = allPrices.reduce((a, b) => a + b, 0) / allPrices.length;
+                        minPrice = Math.min(...allPrices);
+                        maxPrice = Math.max(...allPrices);
+
+                        console.log(`   📊 Calculated pricing for ${vendor.CardName}: avg=${avgPrice.toFixed(2)}, min=${minPrice}, max=${maxPrice}`);
+                    }
+                }
+
+                const allInteractions = history?.interactions || [];
+
+                return {
+                    _id: vendor.CardCode,
+                    vendorName: vendor.CardName,
+                    vendorSource: 'EMAIL',
+                    totalPurchases: vendor.customFields?.emailStats?.quotationsReceived || 0,
+                    avgPrice: avgPrice, // NOW HAS REAL DATA
+                    minPrice: minPrice, // NOW HAS REAL DATA
+                    maxPrice: maxPrice, // NOW HAS REAL DATA
+                
+                    lastPurchaseDate: vendor.lastContactDate || vendor.customFields?.emailStats?.firstContactDate || new Date(),
+                    firstPurchaseDate: vendor.customFields?.emailStats?.firstContactDate || new Date(),
+                    totalQuantity: 0,
+                    totalValue: 0,
+                    purchaseHistory: quotations.slice(-5).map(q => ({
+                        productName: q.snippet?.substring(0, 50) || 'Email quotation',
+                        quantity: 0,
+                        unit: 'kg',
+                        price: 0,
+                        total: 0,
+                        date: q.date,
+                        poNumber: null
+                    })),
+                    emailStats: vendor.customFields?.emailStats || {},
+                    // Add matched categories for debugging
+                    matchedCategories: vendor.productCategories.filter(cat =>
+                        keywordRegex.test(cat)
+                    ),
+                    totalEmailInteractions: allInteractions.length
+                };
+            });
+
+            console.log(`>> Found ${emailVendors.length} email vendors`);
+
+            // Debug: Show matched vendors
+            if (emailVendors.length > 0) {
+                console.log('>> Email vendors matched:');
+                emailVendors.forEach(v => {
+                    console.log(`   - ${v.vendorName}: ${v.matchedCategories.join(', ')}`);
+                });
+            }
+
+        } catch (emailError) {
+            console.error('⚠️ Error fetching email vendors:', emailError.message);
+            console.error(emailError.stack);
+            // Continue with just SAP vendors
         }
 
-        // Score vendors based on multiple factors
-        const scoredVendors = historicalPurchases.map(vendor => {
+        // ====== PART 3: Combine and Score All Vendors ======
+        const allVendors = [...sapVendors, ...emailVendors];
+
+        if (allVendors.length === 0) {
+            console.log('>> No vendors found from any source');
+            return [];
+        }
+
+        const scoredVendors = allVendors.map(vendor => {
             const recencyScore = calculateRecencyScore(vendor.lastPurchaseDate);
-            const priceScore = calculatePriceScore(vendor.avgPrice, historicalPurchases);
-            const reliabilityScore = calculateReliabilityScore(vendor.totalPurchases);
+            const priceScore = calculatePriceScore(vendor.avgPrice, allVendors);
+            const reliabilityScore = calculateReliabilityScore(
+                vendor.totalPurchases,
+                vendor.vendorSource
+            );
             const volumeScore = calculateVolumeScore(vendor.totalQuantity, quantity);
+
+            // Boost email vendors slightly if they have good response history
+            const emailBoost = vendor.vendorSource === 'EMAIL' &&
+                vendor.emailStats?.quotationsReceived > 0 ? 5 : 0;
 
             const totalScore = (
                 recencyScore * 0.25 +
                 priceScore * 0.35 +
                 reliabilityScore * 0.25 +
-                volumeScore * 0.15
+                volumeScore * 0.15 +
+                emailBoost
             );
 
             return {
@@ -355,12 +494,13 @@ async function analyzeHistoricalPurchasesMultiKeyword(keywords, quantity) {
                     price: Math.round(priceScore * 10) / 10,
                     reliability: Math.round(reliabilityScore * 10) / 10,
                     volume: Math.round(volumeScore * 10) / 10,
+                    emailBoost: emailBoost,
                     total: Math.round(totalScore * 10) / 10,
                 }
             };
         }).sort((a, b) => b.scores.total - a.scores.total);
 
-        console.log(`>> Scored and sorted ${scoredVendors.length} vendors`);
+        console.log(`>> Final: ${scoredVendors.length} vendors (${sapVendors.length} SAP + ${emailVendors.length} EMAIL)`);
 
         return scoredVendors;
 
@@ -394,15 +534,20 @@ function calculatePriceScore(price, allVendors) {
     return Math.max(0, Math.min(100, score));
 }
 
-function calculateReliabilityScore(totalPurchases) {
-    if (totalPurchases >= 50) return 100;
-    if (totalPurchases >= 20) return 90;
-    if (totalPurchases >= 10) return 75;
-    if (totalPurchases >= 5) return 60;
-    if (totalPurchases >= 2) return 40;
-    return 20;
-}
+function calculateReliabilityScore(totalPurchases, vendorSource = 'SAP') {
+    // Email vendors get slightly lower baseline scores since history is less structured
+    const baseAdjustment = vendorSource === 'EMAIL' ? 0.85 : 1.0;
 
+    let score;
+    if (totalPurchases >= 50) score = 100;
+    else if (totalPurchases >= 20) score = 90;
+    else if (totalPurchases >= 10) score = 75;
+    else if (totalPurchases >= 5) score = 60;
+    else if (totalPurchases >= 2) score = 40;
+    else score = 20;
+
+    return score * baseAdjustment;
+}
 function calculateVolumeScore(totalHistoricalQuantity, requestedQuantity) {
     if (!requestedQuantity || requestedQuantity === 0) return 50;
 
@@ -522,9 +667,66 @@ async function syncVendors() {
     }
 }
 
+/**
+ * Enrich email vendors with AI-parsed quotation data
+ */
+async function enrichEmailVendorsWithQuotations(emailVendors, rfqNumber) {
+    if (!rfqNumber || emailVendors.length === 0) {
+        return emailVendors;
+    }
 
+    try {
+        console.log('>> Enriching email vendors with quotation data...');
+
+        // Parse responses from email
+        const responses = await vendorEmailService.parseRFQResponsesFromEmail(rfqNumber);
+
+        return emailVendors.map(vendor => {
+            const response = responses.find(r => r.vendorEmail === vendor.email);
+
+            if (response && response.isValidResponse) {
+                return {
+                    ...vendor,
+                    quotationData: {
+                        totalQuoted: response.totalQuotedAmount,
+                        deliveryDays: response.deliveryTimeInDays,
+                        paymentTerms: response.paymentTerms,
+                        items: response.quotedItems,
+                        hasValidQuotation: true
+                    }
+                };
+            }
+
+            return vendor;
+        });
+
+    } catch (error) {
+        console.error('⚠️ Error enriching email vendors:', error.message);
+        return emailVendors;
+    }
+}
+
+/**
+ * Sync email vendors into the system
+ */
+async function syncEmailVendors() {
+    try {
+        console.log('=== Starting Email Vendor Sync ===');
+
+        const result = await vendorEmailService.storeEmailVendorsInDB();
+
+        console.log(`✅ Synced ${result.length} email vendors`);
+        return result;
+
+    } catch (error) {
+        console.error('❌ Error syncing email vendors:', error);
+        throw error;
+    }
+}
 module.exports = {
     processNaturalLanguageRFQ,
     analyzeHistoricalPurchasesMultiKeyword,
     createRFQFromAnalysis,
+    syncEmailVendors,
+    enrichEmailVendorsWithQuotations,
 };

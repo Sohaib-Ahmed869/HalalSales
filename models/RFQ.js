@@ -22,7 +22,7 @@ const RFQItemSchema = new Schema({
     unit: {
         type: String,
         required: true,
-        enum: ['kg', 'cartons', 'packs', 'pieces', 'liters', 'boxes', 'pallets'],
+        enum: ['kg', 'cartons', 'packs', 'pieces', 'liters', 'boxes', 'pallets','cans'],
     },
     estimatedPrice: {
         type: Number,

@@ -712,10 +712,141 @@ async function parseNaturalLanguageRFQWithFunctions(userInput) {
     }
 }
 
+/**
+ * NEW: Parse vendor information from email using AI
+ */
+async function parseVendorInfoFromEmail (emailData) {
+    try {
+        const prompt = `
+Extract vendor information from this email communication:
+
+Subject: ${emailData.subject}
+Content: ${emailData.text}
+Attachments Text: ${emailData.attachments?.join('\n\n')}
+Email Type: ${emailData.emailType}
+
+Extract and return JSON with:
+{
+    "companyName": "company name if mentioned",
+    "productCategories": ["array", "of", "products", "mentioned"],
+    "certifications": ["halal", "organic", etc if mentioned],
+    "phone": "phone number if found",
+    "address": "address if found",
+    "pricesMentioned": [{"product": "name", "price": number, "unit": "kg"}]
+}
+
+Focus on extracting actual structured data. Return only the JSON.
+`;
+
+        const response = await openai.chat.completions.create({
+            model: 'gpt-4',
+            messages: [
+                {
+                    role: 'system',
+                    content: 'You are a data extraction specialist. Extract structured vendor information from emails. Return only valid JSON.',
+                },
+                {
+                    role: 'user',
+                    content: prompt,
+                },
+            ],
+            temperature: 0.3,
+        });
+
+        const content = response.choices[0].message.content.trim();
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        
+        if (jsonMatch) {
+            return JSON.parse(jsonMatch[0]);
+        }
+
+        return {};
+    } catch (error) {
+        console.error('Error parsing vendor info from email:', error);
+        return {};
+    }
+};
+
+/**
+ * NEW: Parse RFQ response with AI (handles multi-level replies and PDFs)
+ */
+async function parseRFQResponseWithAI (data) {
+    try {
+        const prompt = `
+Analyze this RFQ response for RFQ Number: ${data.rfqNumber}
+
+Vendor: ${data.vendorName} (${data.vendorEmail})
+Date: ${data.date}
+Subject: ${data.emailSubject}
+
+Email Content:
+${data.emailBody}
+
+${data.pdfContent ? `PDF Attachment Content:\n${data.pdfContent}` : ''}
+
+Extract and return JSON:
+{
+    "isValidResponse": true/false,
+    "responseType": "quotation" or "decline" or "question",
+    "quotedItems": [
+        {
+            "productName": "name",
+            "quantity": number,
+            "unit": "kg/cartons/etc",
+            "unitPrice": number,
+            "totalPrice": number,
+            "currency": "EUR/USD/etc"
+        }
+    ],
+    "totalQuotedAmount": number,
+    "deliveryTimeInDays": number,
+    "deliveryDate": "YYYY-MM-DD or null",
+    "paymentTerms": "terms mentioned",
+    "minimumOrder": "if mentioned",
+    "notes": "any special conditions or notes",
+    "certifications": ["any certifications mentioned"],
+    "contactPerson": "name if mentioned",
+    "contactPhone": "phone if mentioned"
+}
+
+Return only valid JSON.
+`;
+
+        const response = await openai.chat.completions.create({
+            model: 'gpt-4',
+            messages: [
+                {
+                    role: 'system',
+                    content: 'You are an RFQ response analyzer. Parse vendor quotations from emails and PDFs. Extract all pricing and delivery information. Return only valid JSON.',
+                },
+                {
+                    role: 'user',
+                    content: prompt,
+                },
+            ],
+            temperature: 0.2,
+        });
+
+        const content = response.choices[0].message.content.trim();
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        
+        if (jsonMatch) {
+            return JSON.parse(jsonMatch[0]);
+        }
+
+        return { isValidResponse: false };
+    } catch (error) {
+        console.error('Error parsing RFQ response with AI:', error);
+        return { isValidResponse: false, error: error.message };
+    }
+};
+
 module.exports = {
     parseNaturalLanguageRFQ,
     parseNaturalLanguageRFQWithFunctions,
     generateSearchKeywords,
     analyzeVendorRecommendations,
     generateRFQEmail,
+    parseVendorInfoFromEmail,
+    parseRFQResponseWithAI,
 };

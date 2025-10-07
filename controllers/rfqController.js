@@ -52,7 +52,7 @@ exports.analyzeRFQRequest = async (req, res) => {
                 })),
                 overallRecommendations: {
                     totalVendorsFound: analysis.vendorRecommendations.total,
-                    topVendorsAcrossAllItems: analysis.vendorRecommendations.topVendors.slice(0, 10).map(vendor => ({
+                    topVendorsAcrossAllItems: analysis.vendorRecommendations.topVendors.map(vendor => ({
                         ...vendor,
                         canSupplyItems: analysis.itemsAnalysis
                             .filter(item => item.vendors.some(v => v._id === vendor._id))

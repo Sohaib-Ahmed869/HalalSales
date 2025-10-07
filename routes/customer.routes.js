@@ -53,6 +53,11 @@ const upload = multer({
   },
 });
 
+router.post(
+  "/sync-c7000-batch",
+  customerController.syncPendingC7000Customers
+);
+
 router.get(
   "/export/excel",
   customerController.exportCustomersToExcel

@@ -145,6 +145,103 @@ exports.getPersonalizedRecommendations = async (req, res) => {
   }
 };
 
+// Sync all pending C7000 customers with SAP
+exports.syncPendingC7000Customers = async (req, res) => {
+  try {
+    console.log("Starting batch sync of C7000 customers...");
+    const startTime = Date.now();
+
+    // Find all customers with C7000 CardCode that are not synced with SAP
+    const pendingCustomers = await Customer.find({
+      CardCode: "C7000",
+      SyncedWithSAP: false
+    });
+
+    console.log(`Found ${pendingCustomers.length} C7000 customers pending SAP sync`);
+
+    if (pendingCustomers.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: "No C7000 customers pending sync",
+        results: {
+          total: 0,
+          synced: 0,
+          failed: 0
+        }
+      });
+    }
+
+    const results = {
+      total: pendingCustomers.length,
+      synced: 0,
+      failed: 0,
+      errors: []
+    };
+
+    // Process each customer sequentially to avoid conflicts
+    for (const customer of pendingCustomers) {
+      try {
+        console.log(`Processing customer: ${customer.CardName} (${customer.CardCode})`);
+
+        // Generate next CardCode from SAP
+        const nextCardCode = await generateNextCardCode();
+        console.log(`Generated new CardCode: ${nextCardCode}`);
+
+        // Update customer with new CardCode
+        customer.CardCode = nextCardCode;
+        customer.updatedAt = new Date();
+        await customer.save();
+
+        // Push to SAP
+        const sapResult = await pushCustomerToSAPInternal(customer);
+
+        if (sapResult.success) {
+          results.synced++;
+          console.log(`✓ Successfully synced ${customer.CardName} with CardCode ${nextCardCode}`);
+        } else {
+          results.failed++;
+          results.errors.push({
+            customerName: customer.CardName,
+            oldCardCode: "C7000",
+            newCardCode: nextCardCode,
+            error: sapResult.error
+          });
+          console.log(`✗ Failed to sync ${customer.CardName}: ${sapResult.error}`);
+        }
+
+      } catch (error) {
+        results.failed++;
+        results.errors.push({
+          customerName: customer.CardName,
+          oldCardCode: "C7000",
+          error: error.message
+        });
+        console.error(`Error processing customer ${customer.CardName}:`, error);
+      }
+    }
+
+    const totalTime = Date.now() - startTime;
+    console.log(`Batch sync completed in ${totalTime}ms`);
+
+    res.status(200).json({
+      success: true,
+      message: `Synced ${results.synced} out of ${results.total} customers`,
+      results: {
+        ...results,
+        processingTimeMs: totalTime
+      }
+    });
+
+  } catch (error) {
+    console.error("Error in batch C7000 sync:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error syncing C7000 customers",
+      error: error.message
+    });
+  }
+};
+
 // Alternative HTTP method (if you prefer to use axios instead of Lambda SDK)
 exports.getPersonalizedRecommendationsHTTP = async (req, res) => {
   try {

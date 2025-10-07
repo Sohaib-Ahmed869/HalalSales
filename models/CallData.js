@@ -38,12 +38,24 @@ const callDataSchema = new mongoose.Schema(
     analysis: { type: String },
     qualityScore: { type: Number, default: 0 },
     analysisTimestamp: { type: Date },
+    summary: { type: String }, // ADD THIS
+
+    // ADD THIS ENTIRE FIELD
+    speakers: [{
+      speaker: { type: String },
+      segments: [{
+        start: { type: String },
+        end: { type: String },
+        text_fr: { type: String },
+        text_en: { type: String }
+      }]
+    }],
 
     structuredAnalysis: {
       generalAnalysis: { type: String },
       speakerIdentification: {
-        agentLines: { type: mongoose.Schema.Types.Mixed }, // Change from String to Mixed type
-        clientLines: { type: mongoose.Schema.Types.Mixed }, // Change from String to Mixed type
+        agentLines: { type: mongoose.Schema.Types.Mixed },
+        clientLines: { type: mongoose.Schema.Types.Mixed },
         confidence: { type: String },
       },
       salesPerformance: {

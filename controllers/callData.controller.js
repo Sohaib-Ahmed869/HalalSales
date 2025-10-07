@@ -4,7 +4,62 @@ const axios = require("axios");
 const { parse } = require("csv-parse");
 const CallData = require("../models/CallData");
 const User = require("../models/User");
+// Helper functions to extract data from scoring explanation
+function extractStrengths(explanation) {
+  const strengthsMatch = explanation.match(/✓ Strengths: ([^\n]+)/);
+  if (strengthsMatch) {
+    return strengthsMatch[1].split(',').map(s => s.trim());
+  }
+  return ["Clear communication", "Professional approach"];
+}
 
+function extractWeaknesses(explanation) {
+  const weaknessMatch = explanation.match(/⚠ Areas for Improvement: ([^\n]+)/);
+  if (weaknessMatch) {
+    return weaknessMatch[1].split(',').map(s => s.trim());
+  }
+  return [];
+}
+
+function extractRecommendations(explanation) {
+  const recommendations = [];
+  const lines = explanation.split('\n');
+  lines.forEach(line => {
+    if (line.includes('⚠')) {
+      recommendations.push(line.replace('⚠', '').trim());
+    }
+  });
+  return recommendations.length > 0 ? recommendations : [
+    "Continue monitoring call quality",
+    "Focus on building rapport with clients"
+  ];
+}
+
+function calculateAgentTalkRatio(speakers) {
+  if (!speakers || speakers.length === 0) return "50%";
+
+  const agentSegments = speakers.find(s => s.speaker === "Agent")?.segments || [];
+  const totalSegments = speakers.reduce((acc, s) => acc + (s.segments?.length || 0), 0);
+
+  if (totalSegments === 0) return "50%";
+
+  return `${Math.round((agentSegments.length / totalSegments) * 100)}%`;
+}
+
+function extractKeyMoments(speakers) {
+  const moments = [];
+  if (!speakers) return moments;
+
+  speakers.forEach(speaker => {
+    speaker.segments?.forEach(seg => {
+      if (seg.text_fr?.length > 100) {
+        moments.push(`${speaker.speaker}: ${seg.text_fr.substring(0, 80)}...`);
+      }
+    });
+  });
+
+  return moments.slice(0, 3);
+}
 // Helper function to parse CSV data
 const parseCSV = (filePath) => {
   return new Promise((resolve, reject) => {
@@ -41,9 +96,9 @@ const transformData = (rawData) => {
         const tagsString = record.Tags.replace(/^\[|\]$/g, "").trim();
         tags = tagsString
           ? tagsString
-              .split(",")
-              .map((tag) => tag.replace(/^"|"$/g, "").trim())
-              .filter((tag) => tag)
+            .split(",")
+            .map((tag) => tag.replace(/^"|"$/g, "").trim())
+            .filter((tag) => tag)
           : [];
       } catch (e) {
         console.error("Error parsing tags:", e);
@@ -151,8 +206,7 @@ const callDataController = {
           });
           savedCount += result.length;
           console.log(
-            `Batch ${Math.floor(i / batchSize) + 1}: ${
-              result.length
+            `Batch ${Math.floor(i / batchSize) + 1}: ${result.length
             } records saved`
           );
         } catch (error) {
@@ -181,10 +235,8 @@ const callDataController = {
             });
 
             console.log(
-              `Batch ${
-                Math.floor(i / batchSize) + 1
-              }: ${insertedCount} saved, ${
-                writeErrors.filter((e) => e.code !== 11000).length
+              `Batch ${Math.floor(i / batchSize) + 1
+              }: ${insertedCount} saved, ${writeErrors.filter((e) => e.code !== 11000).length
               } errors`
             );
           } else {
@@ -252,8 +304,8 @@ const callDataController = {
         // Only include error details if there are errors and the list isn't too long
         ...(errors.length > 0 &&
           errors.length <= 10 && {
-            errorDetails: errors,
-          }),
+          errorDetails: errors,
+        }),
         // If there are many errors, just show a sample
         ...(errors.length > 10 && {
           errorSample: errors.slice(0, 5),
@@ -658,18 +710,18 @@ const callDataController = {
       const filter =
         req.query.direction !== "all"
           ? {
-              direction: req.query.direction,
-              startTime: {
-                $gte: startDateTime,
-                $lte: endDateTime,
-              },
-            }
+            direction: req.query.direction,
+            startTime: {
+              $gte: startDateTime,
+              $lte: endDateTime,
+            },
+          }
           : {
-              startTime: {
-                $gte: startDateTime,
-                $lte: endDateTime,
-              },
-            };
+            startTime: {
+              $gte: startDateTime,
+              $lte: endDateTime,
+            },
+          };
 
       if (req.query.agentId) {
         //find the agent by ID
@@ -772,9 +824,9 @@ const callDataController = {
           answerRate:
             group.totalCalls > 0
               ? (
-                  ((group.totalCalls - group.missedCalls) / group.totalCalls) *
-                  100
-                ).toFixed(1)
+                ((group.totalCalls - group.missedCalls) / group.totalCalls) *
+                100
+              ).toFixed(1)
               : 0,
           avgCallDuration: group.avgCallDuration || 0,
           totalTalkTime: group.inCallDuration || 0,
@@ -1057,7 +1109,6 @@ const callDataController = {
     try {
       const { callID, audioUrl } = req.body;
 
-      // Validate required parameters
       if (!callID) {
         return res.status(400).json({ error: "Missing callID parameter" });
       }
@@ -1068,91 +1119,122 @@ const callDataController = {
         return res.status(404).json({ error: "Call not found" });
       }
 
-      // Check if analysis already exists and is less than 30 days old
+      // Check if analysis already exists and is recent (less than 30 days old)
       if (
         callData.analysis &&
         callData.transcript &&
-        callData.qualityScore > 0
+        callData.qualityScore > 0 &&
+        callData.structuredAnalysis
       ) {
         const analysisAge = callData.analysisTimestamp
-          ? (new Date() - new Date(callData.analysisTimestamp)) /
-            (1000 * 60 * 60 * 24)
+          ? (new Date() - new Date(callData.analysisTimestamp)) / (1000 * 60 * 60 * 24)
           : 999;
 
         if (analysisAge < 30) {
-          // Return existing analysis
+          console.log(`Returning cached analysis for call ${callID}`);
           return res.status(200).json({
             transcript: callData.transcript,
             analysis: callData.analysis,
             qualityScore: callData.qualityScore,
-            structuredAnalysis: callData.structuredAnalysis || null,
+            structuredAnalysis: callData.structuredAnalysis,
+            speakers: callData.speakers || [],
+            summary: callData.summary || "",
             fromCache: true,
           });
         }
       }
 
-      // Continue with API call if analysis doesn't exist or is outdated
-      if (!audioUrl) {
-        return res.status(400).json({ error: "Missing audioUrl parameter" });
+      // Use the file URL from the database if not provided
+      const fileUrl = audioUrl || callData.file;
+      if (!fileUrl) {
+        return res.status(400).json({ error: "No audio file available for this call" });
       }
 
-      // Create axios request to the Flask API
-      const axios = require("axios");
-      try {
-        // Send request to the Flask API
-        const response = await axios.post(
-          "http://127.0.0.1:5001/analyze-call",
-          {
-            audio_url: audioUrl,
-            call_id: callID,
-          }
-        );
-
-        // Get the analysis result
-        const analysisResult = response.data;
-
-        // FIX: Properly update and save the call data
-        await CallData.findOneAndUpdate(
-          { callID: callID },
-          {
-            $set: {
-              transcript: analysisResult.transcript,
-              analysis: analysisResult.analysis,
-              qualityScore: analysisResult.qualityScore || 0,
-              analysisTimestamp: new Date(),
-              structuredAnalysis: analysisResult.structuredAnalysis || null,
-            },
-          },
-          { new: true }
-        );
-
-        console.log(`Analysis saved for call ${callID}`);
-
-        // Return the analysis results to the client
-        return res.status(200).json({
-          ...analysisResult,
-          fromCache: false,
-        });
-      } catch (apiError) {
-        console.error("Error calling analysis API:", apiError.message);
-
-        // Get detailed error if available in the response
-        const errorDetails = apiError.response?.data || {
-          error: apiError.message,
-        };
-
-        return res.status(500).json({
-          error: "Error during call analysis",
-          details: errorDetails,
-          callID,
-        });
-      }
-    } catch (error) {
-      console.error("Error analyzing call:", error);
-      return res.status(500).json({
-        error: "Error analyzing call",
-        details: error.message,
+      // Return 202 immediately - analysis will happen in background
+      res.status(202).json({
+        message: "Analysis started. This may take 30-60 seconds.",
+        callID: callID,
+        estimatedTime: 45
       });
+
+      // Call Python server at 127.0.0.1:5005 in background
+      const axios = require("axios");
+
+      (async () => {
+        try {
+          console.log(`Sending call ${callID} to Python server for analysis...`);
+
+          const pythonResponse = await axios.post(
+            `http://127.0.0.1:5005/api/call-data/analyze/${callData._id}`,
+            {
+              audio_url: fileUrl,
+              call_id: callData._id
+            },
+            {
+              timeout: 120000 // 2 minute timeout
+            }
+          );
+
+          const result = pythonResponse.data;
+
+          // Extract data from Python output
+          const frenchTranscript = result?.transcripts?.fr || "";
+          const scoringExplanation = result?.scoring?.explanation || "";
+          const finalScore = result?.scoring?.final_score || 0;
+
+          // Build structured analysis
+          const structuredAnalysis = {
+            generalAnalysis: result?.summary || "Call analysis completed.",
+            speakerIdentification: {
+              agentLines: result?.speakers
+                ?.find(s => s.speaker === "Agent")
+                ?.segments?.map((seg, idx) => `Line ${idx + 1}: ${seg.text_fr}`) || [],
+              clientLines: result?.speakers
+                ?.find(s => s.speaker === "Client")
+                ?.segments?.map((seg, idx) => `Line ${idx + 1}: ${seg.text_fr}`).join("; ") || "Not identified",
+              confidence: result?.classification?.quality || "medium"
+            },
+            salesPerformance: {
+              score: finalScore,
+              strengths: extractStrengths(scoringExplanation),
+              weaknesses: extractWeaknesses(scoringExplanation),
+              productsDiscussed: result?.products_discussed || [],
+              closingAttempts: 0,
+              objectionHandling: "Standard"
+            },
+            conversationDynamics: {
+              agentTalkRatio: calculateAgentTalkRatio(result?.speakers),
+              keyMoments: extractKeyMoments(result?.speakers),
+              missedOpportunities: extractRecommendations(scoringExplanation).slice(0, 2)
+            },
+            recommendations: extractRecommendations(scoringExplanation)
+          };
+
+          // Save everything to CallData
+          await CallData.findOneAndUpdate(
+            { callID: callID },
+            {
+              $set: {
+                transcript: frenchTranscript,
+                analysis: result?.summary || scoringExplanation,
+                qualityScore: finalScore,
+                analysisTimestamp: new Date(),
+                structuredAnalysis: structuredAnalysis,
+                speakers: result?.speakers || [],
+                summary: result?.summary || ""
+              },
+            },
+            { new: true }
+          );
+
+          console.log(`✅ Analysis completed and saved for call ${callID} (Score: ${finalScore}/10)`);
+        } catch (error) {
+          console.error(`❌ Error analyzing call ${callID}:`, error.message);
+        }
+      })();
+
+    } catch (error) {
+      console.error("Error in analyzeCall:", error);
     }
   },
 };
