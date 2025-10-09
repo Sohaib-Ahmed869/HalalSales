@@ -29,8 +29,8 @@ class TargetScheduler {
         period: "monthly",
         // Current period should be August 2024
         currentPeriodStart: {
-          $gte: new Date("2025-09-01"),
-          $lt: new Date("2025-10-01")
+          $gte: new Date("2025-10-01"),
+          $lt: new Date("2025-11-01")
         }
       }).populate("salesAgent", "firstName lastName email");
 
@@ -48,8 +48,8 @@ class TargetScheduler {
             salesAgent: augustTarget.salesAgent._id,
             period: "monthly",
             currentPeriodStart: {
-              $gte: new Date("2025-08-01"),
-              $lt: new Date("2025-09-01")
+              $gte: new Date("2025-09-01"),
+              $lt: new Date("2025-10-01")
             }
           });
 
@@ -66,10 +66,10 @@ class TargetScheduler {
             targetAmount: augustTarget.targetAmount,
             isRecurring: augustTarget.isRecurring,
             period: "monthly",
-            currentPeriodStart: new Date("2025-08-01"),
-            currentPeriodEnd: new Date("2025-08-31"),
-            deadline: new Date("2025-08-31"),
-            startDate: new Date("2025-08-01"),
+            currentPeriodStart: new Date("2025-09-01"),
+            currentPeriodEnd: new Date("2025-09-30"),
+            deadline: new Date("2025-09-30"),
+            startDate: new Date("2025-09-01"),
             achievedAmount: 0, // You may want to recalculate this from actual July data
             achievementRate: 0,
             status: "completed", // Assuming July is over
@@ -102,7 +102,7 @@ class TargetScheduler {
       for (const augustTarget of augustTargets) {
         try {
           // Check if July period is already in history
-          const julyPeriod = "2024-07";
+          const julyPeriod = "2025-09";
           const existingJulyHistory = augustTarget.historicalPerformance.find(
             (h) => h.period === julyPeriod
           );
