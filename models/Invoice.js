@@ -303,6 +303,29 @@ const invoiceSchema = new mongoose.Schema(
     IndFinal: String,
     DataVersion: Number,
 
+    // SAP Integration fields
+    SyncedWithSAP: {
+      type: Boolean,
+      default: false,
+    },
+    SAPDocEntry: Number,
+    LocalStatus: {
+      type: String,
+      enum: ["Created", "Synced", "SyncFailed"],
+      default: "Created",
+    },
+    SyncErrors: String,
+    LastSyncAttempt: Date,
+    SAPSyncDisabled: {
+      type: Boolean,
+      default: false,
+    },
+
+    // Link to delivery note
+    OriginatingDeliveryNote: Number,
+    U_LocalDocNum: String,
+    U_SourceDeliveryNote: String,
+
     // Custom SAP B1 fields
     U_Route: String,
     U_Notes: String,

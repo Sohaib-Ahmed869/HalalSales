@@ -26,4 +26,25 @@ router.post(
   invoiceController.bulkImportInvoices
 );
 
+// Get single invoice by DocEntry
+router.get("/:docEntry", invoiceController.getInvoiceByDocEntry);
+
+// Create invoice from delivery note
+router.post(
+    "/from-delivery-note/:docEntry",
+    invoiceController.createInvoiceFromDeliveryNote
+);
+
+// Bulk create invoices from delivery notes
+router.post(
+    "/bulk-create-from-delivery-notes",
+    invoiceController.bulkCreateInvoicesFromDeliveryNotes
+);
+
+// Bulk push invoices to SAP
+router.post(
+    "/bulk-push-to-sap",
+    invoiceController.bulkPushInvoicesToSAP
+);
+
 module.exports = router;

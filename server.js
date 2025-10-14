@@ -45,6 +45,10 @@ const restaurantScraperRoutes = require("./routes/restaurantScraper.routes");
 const conversationRoutes = require("./routes/conversation.routes");
 const contactImportRoutes = require("./routes/contactImport.routes");
 const menuMatchRoutes = require("./routes/menuMatch.routes");
+const orderPdfRoutes = require("./routes/orderPdf.routes");
+const deliveryNoteRoutes = require("./routes/deliveryNoteRoutes");
+const deliveryNotePdfRoutes = require('./routes/deliveryNotePdfRoutes');
+const invoicePdfRoutes = require("./routes/invoicePdfRoutes");
 // const vendorEmailRoutes = require('./routes/vendorEmailRoutes');
 const config = require("./services/config");
 const desktimeJob = require("./jobs/desktimeJob");
@@ -191,6 +195,10 @@ app.use('/api/product-analytics', productAnalyticsRoutes);
 app.use("/api/contact-import", contactImportRoutes); // Contact import routes
 // app.use('/api/rfq', rfqRoutes); // RFQ routes
 app.use('/api/menu-match', menuMatchRoutes); // Menu matching routes
+app.use("/api/order-pdf", orderPdfRoutes);
+app.use("/api/delivery-notes", deliveryNoteRoutes);
+app.use("/api/delivery-note-pdf", deliveryNotePdfRoutes);
+app.use("/api/invoice-pdf", invoicePdfRoutes);
 // app.use('/api/vendor-email', vendorEmailRoutes);
 // Health check route
 app.get("/health", (req, res) => {

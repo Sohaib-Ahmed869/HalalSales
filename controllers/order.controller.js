@@ -646,7 +646,7 @@ async function pushOrderToSAPInternal(order) {
         order.DocNum = sapResponse.DocNum;
       }
 
-      order.DocumentStatus = "bost_Closed"; // Or any appropriate status
+      order.DocumentStatus = "bost_Open"; // Or any appropriate status
       order.UpdateDate = new Date();
       order.SyncedWithSAP = true;
       order.LocalStatus = "Synced";
