@@ -43,11 +43,15 @@ const generateOrderPage = async (doc, order, logoBuffer, isFirstOrder = false) =
     const pageHeight = doc.page.height;
     const margin = 40;
     const footerHeight = 80;
-    const maxContentY = pageHeight - footerHeight - 10;
-
+    const maxContentY = pageHeight - footerHeight - 30;  // Changed from -10 to -20 for more buffer
     // Helper to draw footer
     const drawFooter = () => {
-        const footerY = pageHeight - 60;
+        const footerY = pageHeight - 80;
+
+        // Add dotted line above footer
+        doc.strokeColor("#CCCCCC").lineWidth(0.5).dash(2, 2);
+        doc.moveTo(margin, footerY - 10).lineTo(pageWidth - margin, footerY - 10).stroke();
+        doc.undash();
 
         // Left side - Siret and TVA
         doc.fontSize(7).font("Helvetica").fillColor("#000000");
@@ -62,8 +66,8 @@ const generateOrderPage = async (doc, order, logoBuffer, isFirstOrder = false) =
         // Bottom disclaimer - split into two parts to avoid wrapping
         doc.fontSize(6).font("Helvetica").fillColor("#666666");
         const centerX = pageWidth / 2;
-        doc.text("Une copie complète de nos termes et conditions", centerX - 100, footerY + 30, { continued: false });
-        doc.text("sont disponibles sur demande", centerX - 70, footerY + 38, { continued: false });
+        doc.text("Une copie complète de nos termes et conditions sont disponibles sur demande", centerX - 100, footerY + 30, { continued: false });
+
     };
 
     // Helper to draw header
@@ -242,8 +246,8 @@ const generateOrderPage = async (doc, order, logoBuffer, isFirstOrder = false) =
 
     // Helper to draw totals (moved left and positioned after table)
     const drawTotals = (totalExVAT, totalVAT, yPosition) => {
-        const totalsLabelX = pageWidth - 250;
-        const totalsValueX = pageWidth - 100;
+        const totalsLabelX = pageWidth - 220;  // Changed from -250 to -220 (moved 30px right)
+        const totalsValueX = pageWidth - 80;   // Changed from -100 to -80 (moved 20px right)
         const totalIncVAT = totalExVAT + totalVAT;
 
         // Total Avant Remise
@@ -315,7 +319,7 @@ const generateOrderPage = async (doc, order, logoBuffer, isFirstOrder = false) =
             const reserveSpace = isNearEnd ? (totalsHeight + notesHeight) : 0;
 
             if (currentY + rowHeight + reserveSpace > maxContentY) {
-
+                drawFooter();
                 // Add continuation page
                 doc.addPage();
                 currentY = margin + 50;
@@ -341,9 +345,9 @@ const generateOrderPage = async (doc, order, logoBuffer, isFirstOrder = false) =
     }
 
     // Check if we have enough space for table end, notes and totals
-    if (currentY + totalsHeight + notesHeight > maxContentY) {
-        // Draw footer before new page
-        ;
+    // Check if we have enough space for table end, notes and totals
+    if (currentY + totalsHeight + notesHeight + 20 > maxContentY) {  // Added +20 buffer   // Draw footer before new page
+        drawFooter();
 
         // Move to new page if not enough space
         doc.addPage();
@@ -357,6 +361,10 @@ const generateOrderPage = async (doc, order, logoBuffer, isFirstOrder = false) =
     // Notes section and totals in same line
     currentY += 15;
 
+    // Add blue line above totals section
+    doc.strokeColor("#2E5CB8").lineWidth(1.5);
+    doc.moveTo(margin - 15, currentY - 10).lineTo(pageWidth - margin, currentY - 10).stroke();
+
     // Notes on left
     doc.fontSize(8).font("Helvetica").fillColor("#666666");
     doc.text("Notes:", margin, currentY, { continued: false });
@@ -365,7 +373,7 @@ const generateOrderPage = async (doc, order, logoBuffer, isFirstOrder = false) =
     drawTotals(totalExVAT, totalVAT, currentY);
 
     // Draw footer at end of this order
-    ;
+    drawFooter();
 };
 // Main controller function to generate bulk PDFs
 exports.generateBulkOrderPDFs = async (req, res) => {
@@ -380,12 +388,22 @@ exports.generateBulkOrderPDFs = async (req, res) => {
             });
         }
 
-        console.log(`Generating PDF for ${orderIds.length} orders`);
+        console.log(`Generating PDF for ${orderIds.length} orders in specified order`);
 
-        // Fetch all orders
-        const orders = await SalesOrder.find({ _id: { $in: orderIds } })
-            .populate("salesAgent", "firstName lastName email")
-            .sort({ DocNum: 1 });
+        // Fetch orders without sorting
+        const ordersMap = {};
+        const fetchedOrders = await SalesOrder.find({ _id: { $in: orderIds } })
+            .populate("salesAgent", "firstName lastName email");
+
+        // Create a map for quick lookup
+        fetchedOrders.forEach(order => {
+            ordersMap[order._id.toString()] = order;
+        });
+
+        // Maintain the order from orderIds array
+        const orders = orderIds
+            .map(id => ordersMap[id.toString()])
+            .filter(order => order !== undefined);
 
         if (orders.length === 0) {
             return res.status(404).json({
@@ -393,6 +411,8 @@ exports.generateBulkOrderPDFs = async (req, res) => {
                 message: "No orders found"
             });
         }
+
+        console.log(`Orders arranged in click order:`, orders.map(o => o.DocNum));
 
         // Download logo
         const logoUrl = "https://imageshfs.s3.ap-southeast-2.amazonaws.com/image-removebg-preview+(1).png";
@@ -415,15 +435,20 @@ exports.generateBulkOrderPDFs = async (req, res) => {
         // Pipe PDF to response
         doc.pipe(res);
 
-        // Generate page for each order
+        // Generate page for each order IN THE ORDER RECEIVED (FIRST SET)
         for (let i = 0; i < orders.length; i++) {
             await generateOrderPage(doc, orders[i], logoBuffer, i === 0);
+        }
+
+        // Generate page for each order AGAIN (SECOND SET - DUPLICATE)
+        for (let i = 0; i < orders.length; i++) {
+            await generateOrderPage(doc, orders[i], logoBuffer, false);
         }
 
         // Finalize PDF
         doc.end();
 
-        console.log(`PDF generated successfully for ${orders.length} orders`);
+        console.log(`PDF generated successfully for ${orders.length} orders in click order`);
 
     } catch (error) {
         console.error("Error generating bulk PDFs:", error);

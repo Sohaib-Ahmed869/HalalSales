@@ -407,8 +407,6 @@ const DeliveryNoteSchema = new Schema(
         // Document identification
         DocEntry: {
             type: Number,
-            required: true,
-            unique: true,
         },
         DocNum: Number,
         DocType: String,
@@ -853,11 +851,23 @@ const DeliveryNoteSchema = new Schema(
         TaxExtension: TaxExtensionSchema,
         AddressExtension: AddressExtensionSchema,
         DocumentReferences: [DocumentReferenceSchema],
+        hasReturns: {
+            type: Boolean,
+            default: false
+        },
+        returnDocEntries: [{
+            type: Number  // Array of return DocEntry numbers
+        }],
+        totalReturnedAmount: {
+            type: Number,
+            default: 0
+        }
     },
     {
         timestamps: true,
         collection: "DeliveryNotes",
-    }
+    },
+
 );
 
 // Indexes for optimal query performance

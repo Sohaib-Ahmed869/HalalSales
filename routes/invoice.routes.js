@@ -21,14 +21,41 @@ router.get("/search", invoiceController.searchInvoices);
 router.get("/", invoiceController.getInvoices);
 
 router.post(
-  "/bulk-import",
-  upload.single("excelFile"), // Multer middleware for file upload
-  invoiceController.bulkImportInvoices
+    "/bulk-import",
+    upload.single("excelFile"), // Multer middleware for file upload
+    invoiceController.bulkImportInvoices
 );
 
 // Get single invoice by DocEntry
 router.get("/:docEntry", invoiceController.getInvoiceByDocEntry);
 
+// Add to existing routes
+
+// Credit note routes
+router.post(
+    "/:docEntry/credit-note",
+
+    invoiceController.createCreditNoteFromInvoice
+);
+
+router.get(
+    "/:docEntry/credit-notes",
+
+    invoiceController.getCreditNotesForInvoice
+);
+
+// Payment routes
+router.post(
+    "/:docEntry/payment",
+
+    invoiceController.recordPaymentForInvoice
+);
+
+router.get(
+    "/:docEntry/payments",
+
+    invoiceController.getPaymentsForInvoice
+);
 // Create invoice from delivery note
 router.post(
     "/from-delivery-note/:docEntry",

@@ -322,7 +322,31 @@ const CreditNotesSchema = new mongoose.Schema({
   U_U_ROUTEORDER: String,
   U_U_ROUTEPAYAMOUNT: String,
   Document_ApprovalRequests: [String],
-  DocumentLines: [DocumentLineSchema]
+  DocumentLines: [DocumentLineSchema],
+  // Reference tracking
+  BaseType: Number,  // 15=From Delivery Note, 13=From Invoice
+  BaseEntry: Number, // SAP DocEntry of source document
+  OriginatingDocument: String, // Local DocNum for reference
+
+  // Sales agent
+  salesAgent: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    index: true
+  },
+
+  DocumentLines: [DocumentLineSchema],
+
+  CreationDate: Date,
+  UpdateDate: Date,
+}, {
+  timestamps: true,
+  collection: 'creditnotes'
 });
+
+// Indexes for performance
+CreditNotesSchema.index({ CardCode: 1, DocDate: -1 });
+CreditNotesSchema.index({ SyncedWithSAP: 1, LocalStatus: 1 });
+CreditNotesSchema.index({ BaseEntry: 1 });
 
 module.exports = mongoose.model('CreditNotes', CreditNotesSchema);

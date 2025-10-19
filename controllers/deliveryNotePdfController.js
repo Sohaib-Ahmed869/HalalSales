@@ -43,11 +43,16 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
     const pageHeight = doc.page.height;
     const margin = 40;
     const footerHeight = 80;
-    const maxContentY = pageHeight - footerHeight - 10;
+    const maxContentY = pageHeight - footerHeight - 40;
 
     // Helper to draw footer
     const drawFooter = () => {
-        const footerY = pageHeight - 60;
+        const footerY = pageHeight - 80;  // Changed from -60 to -80
+
+        // Add dotted line above footer
+        doc.strokeColor("#CCCCCC").lineWidth(0.5).dash(2, 2);
+        doc.moveTo(margin, footerY - 10).lineTo(pageWidth - margin, footerY - 10).stroke();
+        doc.undash();
 
         // Left side - Siret and TVA
         doc.fontSize(7).font("Helvetica").fillColor("#000000");
@@ -59,11 +64,10 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
         doc.text("IBAN: fr7610107006090001804792320", footerRightX, footerY, { continued: false });
         doc.text("SWIFT: BREDFRPPXXX", footerRightX, footerY + 12, { continued: false });
 
-        // Bottom disclaimer
+        // Bottom disclaimer - single line
         doc.fontSize(6).font("Helvetica").fillColor("#666666");
         const centerX = pageWidth / 2;
-        doc.text("Une copie complète de nos termes et conditions", centerX - 100, footerY + 30, { continued: false });
-        doc.text("sont disponibles sur demande", centerX - 70, footerY + 38, { continued: false });
+        doc.text("Une copie complète de nos termes et conditions sont disponibles sur demande", centerX - 100, footerY + 30, { continued: false });
     };
 
     // Helper to draw header
@@ -228,8 +232,8 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
 
     // Helper to draw totals
     const drawTotals = (totalExVAT, totalVAT, yPosition) => {
-        const totalsLabelX = pageWidth - 250;
-        const totalsValueX = pageWidth - 100;
+        const totalsLabelX = pageWidth - 220;  // Changed from -250 to -220
+        const totalsValueX = pageWidth - 80;
         const totalIncVAT = totalExVAT + totalVAT;
 
         // Total Avant Remise
@@ -292,32 +296,63 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
     const totalsHeight = 140;
     const notesHeight = 30;
 
+    // **NEW: Get returned quantities for this delivery note**
+    let returnedQuantities = {};
+    if (deliveryNote.hasReturns && deliveryNote.returnDocEntries && deliveryNote.returnDocEntries.length > 0) {
+        const Return = require("../models/Return");
+        const returns = await Return.find({
+            DocEntry: { $in: deliveryNote.returnDocEntries }
+        });
+
+        // Calculate total returned quantity per item
+        returns.forEach(returnDoc => {
+            if (returnDoc.DocumentLines && Array.isArray(returnDoc.DocumentLines)) {
+                returnDoc.DocumentLines.forEach(line => {
+                    const key = line.ItemCode;
+                    returnedQuantities[key] = (returnedQuantities[key] || 0) + line.Quantity;
+                });
+            }
+        });
+
+        console.log(`📦 DN ${deliveryNote.DocNum} has returns. Returned quantities:`, returnedQuantities);
+    }
+
     if (deliveryNote.DocumentLines && deliveryNote.DocumentLines.length > 0) {
         for (let i = 0; i < deliveryNote.DocumentLines.length; i++) {
             const line = deliveryNote.DocumentLines[i];
+
+            // **NEW: Calculate net quantity (delivered - returned)**
+            const deliveredQty = line.Quantity || 0;
+            const returnedQty = returnedQuantities[line.ItemCode] || 0;
+            const netQty = deliveredQty - returnedQty;
+
+            // **SKIP lines that are fully returned**
+            if (netQty <= 0) {
+                continue;
+            }
 
             // Check if we need a new page
             const isNearEnd = (i >= deliveryNote.DocumentLines.length - 5);
             const reserveSpace = isNearEnd ? (totalsHeight + notesHeight) : 0;
 
             if (currentY + rowHeight + reserveSpace > maxContentY) {
-                // Add continuation page
+                drawFooter();  // Draw footer before new page
                 doc.addPage();
                 currentY = margin + 50;
                 currentY = drawTableHeader(currentY);
             }
 
-            const lineTotal = (line.Quantity || 0) * (line.Price || line.UnitPrice || 0);
+            // **MODIFIED: Use net quantity for calculations**
+            const lineTotal = netQty * (line.Price || line.UnitPrice || 0);
             const vatAmount = lineTotal * 0.055;
 
             totalExVAT += lineTotal;
             totalVAT += vatAmount;
 
-            // Use regular font for table text
             doc.font("Helvetica").fontSize(8).fillColor("#000000");
             doc.text(line.ItemCode || "", col1, currentY, { continued: false });
             doc.text((line.ItemDescription || "").substring(0, 40), col2, currentY, { continued: false });
-            doc.text((line.Quantity || 0).toString(), col3 + 30, currentY, { continued: false });
+            doc.text(netQty.toString(), col3 + 30, currentY, { continued: false }); // **Show net quantity**
             doc.text(formatCurrency(line.Price || line.UnitPrice || 0, deliveryNote.DocCurrency), col4 + 20, currentY, { continued: false });
             doc.text(formatCurrency(lineTotal, deliveryNote.DocCurrency), col5 + 10, currentY, { continued: false });
             doc.text(formatCurrency(vatAmount, deliveryNote.DocCurrency), col6 + 5, currentY, { continued: false });
@@ -326,7 +361,8 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
     }
 
     // Check if we have enough space for table end, notes and totals
-    if (currentY + totalsHeight + notesHeight > maxContentY) {
+    if (currentY + totalsHeight + notesHeight + 20 > maxContentY) {  // Added +20 buffer
+        drawFooter();  // Draw footer before new page
         // Move to new page if not enough space
         doc.addPage();
         currentY = margin + 50;
@@ -339,12 +375,29 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
     // Notes section and totals in same line
     currentY += 15;
 
+    // Add blue line above totals section
+    doc.strokeColor("#2E5CB8").lineWidth(1.5);
+    doc.moveTo(margin - 15, currentY - 10).lineTo(pageWidth - margin, currentY - 10).stroke();
+
+    // Notes on left
+    doc.fontSize(8).font("Helvetica").fillColor("#666666");
+    doc.text("Notes:", margin, currentY, { continued: false });
+    if (deliveryNote.U_Notes) {
+        doc.fontSize(8).font("Helvetica").fillColor("#000000");
+        doc.text(deliveryNote.U_Notes, margin, currentY + 12, {
+            width: pageWidth - margin - 280,
+            continued: false
+        });
+    }
+
     // Notes on left
     doc.fontSize(8).font("Helvetica").fillColor("#666666");
     doc.text("Notes:", margin, currentY, { continued: false });
 
     // Draw totals on right (same Y position as notes)
     drawTotals(totalExVAT, totalVAT, currentY);
+
+    drawFooter();
 };
 
 // Main controller function to generate bulk PDFs
@@ -360,12 +413,22 @@ exports.generateBulkDeliveryNotePDFs = async (req, res) => {
             });
         }
 
-        console.log(`Generating PDF for ${deliveryNoteIds.length} delivery notes`);
+        console.log(`Generating PDF for ${deliveryNoteIds.length} delivery notes in specified order`);
 
-        // Fetch all delivery notes
-        const deliveryNotes = await DeliveryNote.find({ _id: { $in: deliveryNoteIds } })
-            .populate("salesAgent", "firstName lastName email")
-            .sort({ DocNum: 1 });
+        // Fetch delivery notes without sorting
+        const deliveryNotesMap = {};
+        const fetchedDeliveryNotes = await DeliveryNote.find({ _id: { $in: deliveryNoteIds } })
+            .populate("salesAgent", "firstName lastName email");
+
+        // Create a map for quick lookup
+        fetchedDeliveryNotes.forEach(dn => {
+            deliveryNotesMap[dn._id.toString()] = dn;
+        });
+
+        // Maintain the order from deliveryNoteIds array
+        const deliveryNotes = deliveryNoteIds
+            .map(id => deliveryNotesMap[id.toString()])
+            .filter(dn => dn !== undefined);
 
         if (deliveryNotes.length === 0) {
             return res.status(404).json({
@@ -373,6 +436,8 @@ exports.generateBulkDeliveryNotePDFs = async (req, res) => {
                 message: "No delivery notes found"
             });
         }
+
+        console.log(`Delivery notes arranged in click order:`, deliveryNotes.map(dn => dn.DocNum));
 
         // Download logo
         const logoUrl = "https://imageshfs.s3.ap-southeast-2.amazonaws.com/image-removebg-preview+(1).png";
@@ -395,15 +460,20 @@ exports.generateBulkDeliveryNotePDFs = async (req, res) => {
         // Pipe PDF to response
         doc.pipe(res);
 
-        // Generate page for each delivery note
+        // Generate page for each delivery note IN THE ORDER RECEIVED (FIRST SET)
         for (let i = 0; i < deliveryNotes.length; i++) {
             await generateDeliveryNotePage(doc, deliveryNotes[i], logoBuffer, i === 0);
+        }
+
+        // Generate page for each delivery note AGAIN (SECOND SET - DUPLICATE)
+        for (let i = 0; i < deliveryNotes.length; i++) {
+            await generateDeliveryNotePage(doc, deliveryNotes[i], logoBuffer, false);
         }
 
         // Finalize PDF
         doc.end();
 
-        console.log(`PDF generated successfully for ${deliveryNotes.length} delivery notes`);
+        console.log(`PDF generated successfully for ${deliveryNotes.length} delivery notes in click order`);
 
     } catch (error) {
         console.error("Error generating bulk PDFs:", error);
@@ -418,15 +488,16 @@ exports.generateBulkDeliveryNotePDFs = async (req, res) => {
     }
 };
 
-// Get delivery notes for PDF generation (with filters)
+// In controllers/deliveryNotePdfController.js
+// Replace getDeliveryNotesForPDF function (around line 400)
+
 exports.getDeliveryNotesForPDF = async (req, res) => {
     try {
-        const { fromDate, toDate, cardCode, status, search } = req.query;
+        const { fromDate, toDate, cardCode, status, search, excludeReturns } = req.query;
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 50;
         const skip = (page - 1) * limit;
 
-        // Build query
         const query = {};
 
         if (fromDate && toDate) {
@@ -444,6 +515,10 @@ exports.getDeliveryNotesForPDF = async (req, res) => {
             query.DocumentStatus = status;
         }
 
+        if (excludeReturns === "true") {
+            query.hasReturns = { $ne: true };
+        }
+
         if (search) {
             query.$or = [
                 { DocNum: { $regex: search, $options: "i" } },
@@ -452,10 +527,12 @@ exports.getDeliveryNotesForPDF = async (req, res) => {
             ];
         }
 
-        // Get delivery notes
+        // **NEW: Aggregate to calculate net totals**
+        const Return = require("../models/Return");
+
         const [deliveryNotes, total] = await Promise.all([
             DeliveryNote.find(query)
-                .select("DocNum DocDate CardCode CardName DocTotal DocCurrency DocumentStatus OriginatingOrder SyncedWithSAP")
+                .select("DocNum DocDate CardCode CardName DocTotal DocCurrency DocumentStatus OriginatingOrder SyncedWithSAP hasReturns returnDocEntries totalReturnedAmount DocumentLines")
                 .populate("salesAgent", "firstName lastName")
                 .sort({ DocDate: -1 })
                 .skip(skip)
@@ -464,9 +541,49 @@ exports.getDeliveryNotesForPDF = async (req, res) => {
             DeliveryNote.countDocuments(query)
         ]);
 
+        // **NEW: Calculate net totals for each delivery note**
+        const enrichedDeliveryNotes = await Promise.all(
+            deliveryNotes.map(async (dn) => {
+                if (dn.hasReturns && dn.returnDocEntries && dn.returnDocEntries.length > 0) {
+                    // Get all returns for this DN
+                    const returns = await Return.find({
+                        DocEntry: { $in: dn.returnDocEntries }
+                    }).lean();
+
+                    // Calculate returned quantities per item
+                    const returnedQuantities = {};
+                    let totalReturnAmount = 0;
+
+                    returns.forEach(returnDoc => {
+                        if (returnDoc.DocumentLines) {
+                            returnDoc.DocumentLines.forEach(line => {
+                                returnedQuantities[line.ItemCode] = (returnedQuantities[line.ItemCode] || 0) + line.Quantity;
+                                totalReturnAmount += (line.Quantity * line.Price);
+                            });
+                        }
+                    });
+
+                    // Calculate net total
+                    const netTotal = dn.DocTotal - totalReturnAmount;
+
+                    return {
+                        ...dn,
+                        netDocTotal: netTotal,
+                        totalReturnedAmount: totalReturnAmount,
+                        returnedQuantities
+                    };
+                }
+
+                return {
+                    ...dn,
+                    netDocTotal: dn.DocTotal
+                };
+            })
+        );
+
         res.json({
             success: true,
-            data: deliveryNotes,
+            data: enrichedDeliveryNotes,
             pagination: {
                 page,
                 limit,

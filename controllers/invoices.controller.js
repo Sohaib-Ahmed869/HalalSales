@@ -1,11 +1,14 @@
 const Invoice = require("../models/Invoice");
 const DeliveryNote = require("../models/DeliveryNote");
+const Customer = require('../models/Customer');
 const {
   createInvoiceInSAP,
   getInvoiceFromSAP,
   checkBusinessPartnerExists,
-  getNextInvoiceDocNumFromSAP
+  getNextInvoiceDocNumFromSAP,
+  getNextInvoiceDocEntryFromSAP,
 } = require("../utils/sapB1Integration");
+const { sendInvoiceEmailToCustomer } = require('./invoicePdfController');
 const mongoose = require("mongoose");
 const XLSX = require("xlsx");
 
@@ -108,57 +111,10 @@ async function pushInvoiceToSAPWithRetry(invoice, maxRetries = 3) {
 
 // Helper function to format invoice for SAP
 async function formatInvoiceForSAP(invoice) {
-  const today = new Date();
-
-  const sapInvoice = {
-    CardCode: invoice.CardCode,
-    DocDate: invoice.DocDate || today,
-    DocDueDate: invoice.DocDueDate || today,
-    Comments: invoice.Comments || "",
-    U_Notes: invoice.U_Notes || "",
-    DocumentLines: [],
-  };
-
-  // Process document lines
-  if (invoice.DocumentLines && Array.isArray(invoice.DocumentLines)) {
-    sapInvoice.DocumentLines = invoice.DocumentLines.map((line, index) => {
-      const sapLine = {
-        ItemCode: line.ItemCode,
-        Quantity: Number(line.Quantity || 0),
-        UnitPrice: Number(line.Price || 0),
-        ItemDescription: line.ItemDescription || "",
-        LineNum: index,
-      };
-
-      // If invoice was created from delivery note, add base document reference
-      if (invoice.BaseType && invoice.BaseEntry) {
-        sapLine.BaseType = 15; // 15 = Delivery Note
-        sapLine.BaseEntry = invoice.BaseEntry;
-        sapLine.BaseLine = line.BaseLine || index;
-      }
-
-      return sapLine;
-    });
-  }
-
-  // Add custom fields for tracking
-  if (invoice.U_LocalDocNum) {
-    sapInvoice.U_LocalDocNum = invoice.U_LocalDocNum.toString();
-  }
-
-  if (invoice.U_SourceDeliveryNote) {
-    sapInvoice.U_SourceDeliveryNote = invoice.U_SourceDeliveryNote.toString();
-  }
-
-  console.log("SAP Invoice formatted:", {
-    CardCode: sapInvoice.CardCode,
-    BaseEntry: invoice.BaseEntry,
-    DocumentLines: sapInvoice.DocumentLines.length,
-  });
-
-  return sapInvoice;
+  // Use the centralized formatting function from SAP integration
+  const { formatInvoiceForSAP: sapFormatter } = require("../utils/sapB1Integration");
+  return await sapFormatter(invoice);
 }
-
 // Create invoice from delivery note
 exports.createInvoiceFromDeliveryNote = async (req, res) => {
   try {
@@ -175,7 +131,7 @@ exports.createInvoiceFromDeliveryNote = async (req, res) => {
 
     // Check if invoice already exists
     const existingInvoice = await Invoice.findOne({
-      BaseEntry: deliveryNote.DocEntry
+      BaseEntry: deliveryNote.SAPDocEntry // Check by SAP DocEntry
     });
 
     if (existingInvoice) {
@@ -186,7 +142,7 @@ exports.createInvoiceFromDeliveryNote = async (req, res) => {
       });
     }
 
-    // Check if delivery note is synced with SAP
+    // *** CRITICAL: Check if delivery note is synced with SAP ***
     if (!deliveryNote.SyncedWithSAP || !deliveryNote.SAPDocEntry) {
       return res.status(400).json({
         success: false,
@@ -204,25 +160,24 @@ exports.createInvoiceFromDeliveryNote = async (req, res) => {
     let newDocEntry;
 
     try {
+      const { getNextInvoiceDocNumFromSAP, getNextInvoiceDocEntryFromSAP } = require("../utils/sapB1Integration");
       newDocNum = await getNextInvoiceDocNumFromSAP();
+      newDocEntry = await getNextInvoiceDocEntryFromSAP();
 
       if (newDocNum) {
         console.log(`Using SAP-aligned Invoice DocNum: ${newDocNum}`);
-        newDocEntry = newDocNum;
       } else {
         throw new Error("Could not get DocNum from SAP");
       }
     } catch (sapError) {
       console.warn("Could not get Invoice DocNum from SAP, falling back to local generation:", sapError.message);
-
-      const lastInvoice = await Invoice.findOne().sort({ DocEntry: -1 });
+      const lastInvoice = await Invoice.findOne().sort({ CreatedAt: -1 });
       newDocEntry = lastInvoice ? lastInvoice.DocEntry + 1 : 1;
       newDocNum = newDocEntry;
-
       console.log(`Using local Invoice DocNum: ${newDocNum}`);
     }
 
-    // Create invoice from delivery note
+    // Create invoice from delivery note with proper base references
     const invoice = new Invoice({
       DocEntry: newDocEntry,
       DocNum: newDocNum,
@@ -245,12 +200,12 @@ exports.createInvoiceFromDeliveryNote = async (req, res) => {
       CreationDate: new Date(),
       UpdateDate: new Date(),
 
-      // Reference to source delivery note - USE SAP DOCENTRY
-      BaseType: 15, // Delivery Note
-      BaseEntry: deliveryNote.SAPDocEntry,
-      OriginatingDeliveryNote: deliveryNote.DocNum,
+      // ✅ CRITICAL: Reference to source delivery note - USE SAP DOCENTRY
+      BaseType: 15, // Delivery Note (changed from -1)
+      BaseEntry: deliveryNote.SAPDocEntry, // *** USE SAP DOCENTRY ***
+      OriginatingDeliveryNote: deliveryNote.DocNum, // Keep local DocNum for reference
 
-      // Document lines
+      // ✅ CRITICAL: Document lines with proper base references
       DocumentLines: deliveryNote.DocumentLines.map((line, index) => ({
         LineNum: index,
         ItemCode: line.ItemCode,
@@ -261,8 +216,10 @@ exports.createInvoiceFromDeliveryNote = async (req, res) => {
         Currency: line.Currency || deliveryNote.DocCurrency,
         LineTotal: line.LineTotal,
         VatGroup: line.VatGroup,
-        BaseType: 15,
-        BaseEntry: deliveryNote.DocEntry,
+
+        // ✅ Base document references for each line
+        BaseType: 15, // Delivery Note
+        BaseEntry: deliveryNote.SAPDocEntry, // *** USE SAP DOCENTRY ***
         BaseLine: line.LineNum,
       })),
 
@@ -286,6 +243,8 @@ exports.createInvoiceFromDeliveryNote = async (req, res) => {
 
     await invoice.save();
 
+    console.log(`✅ Created invoice ${newDocNum} with base delivery note DocEntry ${deliveryNote.SAPDocEntry}`);
+
     res.status(201).json({
       success: true,
       message: "Invoice created successfully",
@@ -302,12 +261,469 @@ exports.createInvoiceFromDeliveryNote = async (req, res) => {
   }
 };
 
-// Bulk create invoices from multiple delivery notes
+// Create credit note from invoice
+exports.createCreditNoteFromInvoice = async (req, res) => {
+  try {
+    const { docEntry } = req.params;
+    const { lines, reason } = req.body;
+
+    console.log("\n" + "=".repeat(60));
+    console.log("CREATE CREDIT NOTE REQUEST");
+    console.log("=".repeat(60));
+    console.log("Invoice DocEntry:", docEntry);
+    console.log("Lines:", JSON.stringify(lines, null, 2));
+    console.log("Reason:", reason);
+    console.log("=".repeat(60) + "\n");
+
+    // Validate input
+    if (!lines || !Array.isArray(lines) || lines.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide items to credit"
+      });
+    }
+
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a reason for the credit note"
+      });
+    }
+
+    // Find invoice
+    const invoice = await Invoice.findOne({ DocNum: docEntry });
+    if (!invoice) {
+      return res.status(404).json({
+        success: false,
+        message: "Invoice not found"
+      });
+    }
+
+    // Check if invoice is synced with SAP
+    if (!invoice.SyncedWithSAP || !invoice.SAPDocEntry) {
+      return res.status(400).json({
+        success: false,
+        message: "Invoice must be synced with SAP before creating credit note",
+        debug: {
+          invoiceNum: invoice.DocNum,
+          synced: invoice.SyncedWithSAP,
+          sapDocEntry: invoice.SAPDocEntry
+        }
+      });
+    }
+
+    console.log("Invoice details:", {
+      DocNum: invoice.DocNum,
+      DocEntry: invoice.DocEntry,
+      SAPDocEntry: invoice.SAPDocEntry,
+      CardCode: invoice.CardCode,
+      DocumentLines: invoice.DocumentLines.length
+    });
+
+    // Format credit note for SAP
+    const { formatCreditNoteForSAP } = require("../utils/sapB1Integration");
+
+    const creditNoteData = await formatCreditNoteForSAP({
+      CardCode: invoice.CardCode,
+      CardName: invoice.CardName,
+      DocDate: new Date(),
+      DocDueDate: new Date(),
+      DocCurrency: invoice.DocCurrency || "EUR",
+      Comments: `Credit note for invoice #${invoice.DocNum}: ${reason}`,
+      U_Notes: reason,
+      DocumentLines: lines.map((line) => {
+        // Find the original invoice line
+        const originalLine = invoice.DocumentLines.find(
+          invLine => invLine.ItemCode === line.ItemCode
+        );
+
+        if (!originalLine) {
+          console.warn(`Warning: Original line not found for item ${line.ItemCode}`);
+        }
+
+        return {
+          ItemCode: line.ItemCode,
+          ItemDescription: line.ItemDescription,
+          Quantity: Number(line.Quantity),
+          Price: Number(line.Price),
+          BaseType: 13, // 13 = Invoice
+          BaseEntry: invoice.SAPDocEntry, // Use SAP DocEntry
+          BaseLine: originalLine ? originalLine.LineNum : 0
+        };
+      })
+    });
+
+    // Create in SAP
+    const { createCreditNoteInSAP } = require("../utils/sapB1Integration");
+
+    let sapResponse;
+    try {
+      sapResponse = await createCreditNoteInSAP(creditNoteData);
+    } catch (sapError) {
+      console.error("\n" + "=".repeat(60));
+      console.error("SAP CREDIT NOTE CREATION FAILED");
+      console.error("=".repeat(60));
+      console.error("Error:", sapError.message);
+      console.error("=".repeat(60) + "\n");
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to create credit note in SAP",
+        error: sapError.message,
+        sentData: creditNoteData
+      });
+    }
+
+    if (!sapResponse || !sapResponse.DocEntry) {
+      throw new Error("Invalid response from SAP - no DocEntry received");
+    }
+
+    console.log("\n" + "=".repeat(60));
+    console.log("SAP CREDIT NOTE CREATED SUCCESSFULLY");
+    console.log("=".repeat(60));
+    console.log("DocEntry:", sapResponse.DocEntry);
+    console.log("DocNum:", sapResponse.DocNum);
+    console.log("=".repeat(60) + "\n");
+
+    // Calculate totals
+    const creditTotal = lines.reduce((sum, line) =>
+      sum + (line.Quantity * line.Price), 0
+    );
+    const creditVat = creditTotal * 0.055; // Assuming 5.5% VAT
+
+    // Save credit note in local DB
+    const CreditNote = require("../models/CreditNotes");
+    const creditNote = new CreditNote({
+      DocEntry: sapResponse.DocEntry,
+      DocNum: sapResponse.DocNum,
+      SAPDocEntry: sapResponse.DocEntry,
+      CardCode: invoice.CardCode,
+      CardName: invoice.CardName,
+      DocDate: new Date(),
+      DocDueDate: new Date(),
+      DocCurrency: invoice.DocCurrency || "EUR",
+      Comments: creditNoteData.Comments,
+      U_Notes: reason,
+      BaseType: 13, // From Invoice
+      BaseEntry: invoice.SAPDocEntry,
+      OriginatingDocument: invoice.DocNum.toString(),
+      DocumentLines: lines.map((line, index) => ({
+        LineNum: index,
+        ItemCode: line.ItemCode,
+        ItemDescription: line.ItemDescription,
+        Quantity: line.Quantity,
+        Price: line.Price,
+        LineTotal: line.Quantity * line.Price,
+        BaseType: 13,
+        BaseEntry: invoice.SAPDocEntry,
+        BaseLine: invoice.DocumentLines.find(
+          invLine => invLine.ItemCode === line.ItemCode
+        )?.LineNum || 0
+      })),
+      DocTotal: creditTotal,
+      VatSum: creditVat,
+      SyncedWithSAP: true,
+      LocalStatus: "Synced",
+      salesAgent: invoice.salesAgent,
+      Cancelled: "N",
+      DocumentStatus: "bost_Close",
+      CreationDate: new Date(),
+      UpdateDate: new Date()
+    });
+
+    await creditNote.save();
+
+    // Update invoice with credit note reference
+    invoice.hasCreditNotes = true;
+    invoice.creditNoteDocEntries = invoice.creditNoteDocEntries || [];
+    invoice.creditNoteDocEntries.push(sapResponse.DocEntry);
+    invoice.totalCreditAmount = (invoice.totalCreditAmount || 0) + creditTotal;
+
+    // Update remaining balance
+    invoice.remainingBalance = (invoice.DocTotal || 0) -
+      (invoice.totalCreditAmount || 0) -
+      (invoice.totalPaidAmount || 0);
+
+    // Update payment status
+    if (invoice.remainingBalance <= 0) {
+      invoice.paymentStatus = 'Fully Paid';
+      invoice.DocumentStatus = 'bost_Close';
+    } else if ((invoice.totalPaidAmount || 0) > 0 || (invoice.totalCreditAmount || 0) > 0) {
+      invoice.paymentStatus = 'Partially Paid';
+    }
+
+    await invoice.save();
+
+    res.status(201).json({
+      success: true,
+      message: "Credit note created successfully",
+      data: {
+        creditNote: {
+          DocEntry: creditNote.DocEntry,
+          DocNum: creditNote.DocNum,
+          SAPDocEntry: creditNote.SAPDocEntry,
+          DocTotal: creditNote.DocTotal
+        },
+        invoice: {
+          DocEntry: invoice.DocEntry,
+          DocNum: invoice.DocNum,
+          remainingBalance: invoice.remainingBalance,
+          paymentStatus: invoice.paymentStatus,
+          totalCreditAmount: invoice.totalCreditAmount
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error("\n" + "=".repeat(60));
+    console.error("ERROR IN CREATE CREDIT NOTE");
+    console.error("=".repeat(60));
+    console.error(error);
+    console.error("=".repeat(60) + "\n");
+
+    res.status(500).json({
+      success: false,
+      message: "Error creating credit note",
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+};
+
+// Get credit notes for invoice
+exports.getCreditNotesForInvoice = async (req, res) => {
+  try {
+    const { docEntry } = req.params;
+
+    const invoice = await Invoice.findOne({ DocEntry: docEntry });
+    if (!invoice) {
+      return res.status(404).json({
+        success: false,
+        message: "Invoice not found"
+      });
+    }
+
+    if (!invoice.hasCreditNotes || !invoice.creditNoteDocEntries || invoice.creditNoteDocEntries.length === 0) {
+      return res.json({
+        success: true,
+        data: []
+      });
+    }
+
+    const CreditNote = require("../models/CreditNote");
+    const creditNotes = await CreditNote.find({
+      DocEntry: { $in: invoice.creditNoteDocEntries }
+    }).sort({ DocDate: -1 });
+
+    res.json({
+      success: true,
+      data: creditNotes
+    });
+
+  } catch (error) {
+    console.error("Error fetching credit notes:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching credit notes",
+      error: error.message
+    });
+  }
+};
+
+// Record payment for invoice
+exports.recordPaymentForInvoice = async (req, res) => {
+  try {
+    const { docEntry } = req.params;
+    const { amount, paymentMethod, paymentDate, reference, remarks } = req.body;
+
+    // Validate input
+    if (!amount || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a valid payment amount"
+      });
+    }
+
+    if (!paymentMethod) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide payment method"
+      });
+    }
+
+    // Find invoice
+    const invoice = await Invoice.findOne({ DocEntry: docEntry });
+    if (!invoice) {
+      return res.status(404).json({
+        success: false,
+        message: "Invoice not found"
+      });
+    }
+
+    // Check if invoice is synced with SAP
+    if (!invoice.SyncedWithSAP || !invoice.SAPDocEntry) {
+      return res.status(400).json({
+        success: false,
+        message: "Invoice must be synced with SAP before recording payment"
+      });
+    }
+
+    // Format payment for SAP
+    const paymentData = {
+      CardCode: invoice.CardCode,
+      DocDate: paymentDate || new Date(),
+      DocCurrency: invoice.DocCurrency || "EUR",
+      CashSum: paymentMethod === 'Cash' ? amount : 0,
+      TransferSum: paymentMethod === 'Transfer' ? amount : 0,
+      TransferDate: paymentMethod === 'Transfer' ? (paymentDate || new Date()) : null,
+      TransferReference: reference || "",
+      Remarks: remarks || `Payment for invoice #${invoice.DocNum}`,
+      PaymentInvoices: [{
+        LineNum: 0,
+        DocEntry: invoice.SAPDocEntry,
+        SumApplied: amount,
+        InvoiceType: 'it_Invoice'
+      }]
+    };
+
+    // Create payment in SAP
+    const { createIncomingPaymentInSAP } = require("../utils/sapB1Integration");
+    const sapResponse = await createIncomingPaymentInSAP(paymentData);
+
+    if (!sapResponse || !sapResponse.DocEntry) {
+      throw new Error("Failed to create payment in SAP");
+    }
+
+    // Save payment in local DB
+    const Payment = require("../models/payment");
+    const payment = new Payment({
+      DocEntry: sapResponse.DocEntry,
+      DocNum: sapResponse.DocNum,
+      CardCode: invoice.CardCode,
+      CardName: invoice.CardName,
+      DocDate: paymentDate || new Date(),
+      DocCurrency: invoice.DocCurrency || "EUR",
+      CashSum: paymentData.CashSum,
+      TransferSum: paymentData.TransferSum,
+      TransferDate: paymentData.TransferDate,
+      TransferReference: paymentData.TransferReference,
+      Remarks: paymentData.Remarks,
+      PaymentInvoices: [{
+        LineNum: 0,
+        DocEntry: invoice.SAPDocEntry,
+        SumApplied: amount,
+        InvoiceType: 'it_Invoice'
+      }],
+      verified: true,
+      dateStored: new Date()
+    });
+
+    await payment.save();
+
+    // Update invoice with payment reference
+    invoice.hasPayments = true;
+    invoice.paymentDocEntries = invoice.paymentDocEntries || [];
+    invoice.paymentDocEntries.push(sapResponse.DocEntry);
+    invoice.totalPaidAmount = (invoice.totalPaidAmount || 0) + amount;
+
+    // Update remaining balance
+    invoice.remainingBalance = (invoice.DocTotal || 0) -
+      (invoice.totalCreditAmount || 0) -
+      (invoice.totalPaidAmount || 0);
+
+    // Update payment status
+    if (invoice.remainingBalance <= 0) {
+      invoice.paymentStatus = 'Fully Paid';
+    } else if (invoice.totalPaidAmount > 0 || (invoice.totalCreditAmount || 0) > 0) {
+      invoice.paymentStatus = 'Partially Paid';
+    } else {
+      invoice.paymentStatus = 'Unpaid';
+    }
+
+    // Close invoice if fully paid
+    if (invoice.paymentStatus === 'Fully Paid') {
+      invoice.DocumentStatus = 'bost_Close';
+    }
+
+    await invoice.save();
+
+    res.status(201).json({
+      success: true,
+      message: "Payment recorded successfully",
+      data: {
+        payment: {
+          DocEntry: payment.DocEntry,
+          DocNum: payment.DocNum,
+          amount: amount
+        },
+        invoice: {
+          remainingBalance: invoice.remainingBalance,
+          paymentStatus: invoice.paymentStatus,
+          totalPaidAmount: invoice.totalPaidAmount
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error("Error recording payment:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error recording payment",
+      error: error.message
+    });
+  }
+};
+
+// Get payments for invoice
+exports.getPaymentsForInvoice = async (req, res) => {
+  try {
+    const { docEntry } = req.params;
+
+    const invoice = await Invoice.findOne({ DocEntry: docEntry });
+    if (!invoice) {
+      return res.status(404).json({
+        success: false,
+        message: "Invoice not found"
+      });
+    }
+
+    if (!invoice.hasPayments || !invoice.paymentDocEntries || invoice.paymentDocEntries.length === 0) {
+      return res.json({
+        success: true,
+        data: []
+      });
+    }
+
+    const Payment = require("../models/Payment");
+    const payments = await Payment.find({
+      DocEntry: { $in: invoice.paymentDocEntries }
+    }).sort({ DocDate: -1 });
+
+    res.json({
+      success: true,
+      data: payments
+    });
+
+  } catch (error) {
+    console.error("Error fetching payments:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching payments",
+      error: error.message
+    });
+  }
+};
+
+// controllers/invoiceController.js
+// Replace the bulkCreateInvoicesFromDeliveryNotes function
+
+// Update the bulkCreateInvoicesFromDeliveryNotes function
 exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
   try {
     const { deliveryNoteDocNums, autoSync = false } = req.body;
 
     console.log('Request to bulk create invoices from delivery notes:', deliveryNoteDocNums);
+
     if (!deliveryNoteDocNums || !Array.isArray(deliveryNoteDocNums) || deliveryNoteDocNums.length === 0) {
       return res.status(400).json({
         success: false,
@@ -321,6 +737,11 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
       successful: [],
       failed: [],
       totalProcessed: 0,
+      emailResults: {
+        sent: [],
+        failed: [],
+        skipped: []
+      }
     };
 
     // Process each delivery note
@@ -338,7 +759,7 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
           continue;
         }
 
-        // Check if delivery note is synced with SAP
+        // *** CRITICAL: Check if delivery note is synced with SAP ***
         if (!deliveryNote.SyncedWithSAP || !deliveryNote.SAPDocEntry) {
           results.failed.push({
             docNum,
@@ -351,7 +772,7 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
 
         // Check if invoice already exists
         const existingInvoice = await Invoice.findOne({
-          BaseEntry: deliveryNote.SAPDocEntry
+          BaseEntry: deliveryNote.SAPDocEntry // *** CHECK BY SAP DOCENTRY ***
         });
 
         if (existingInvoice) {
@@ -363,78 +784,240 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
           continue;
         }
 
-        // Get next DocNum for Invoice
-        let newDocNum;
-        let newDocEntry;
+        // Get returns for this delivery note if any
+        let returnedQuantities = {};
+        if (deliveryNote.hasReturns && deliveryNote.returnDocEntries && deliveryNote.returnDocEntries.length > 0) {
+          const Return = require("../models/Return");
+          const returns = await Return.find({
+            DocEntry: { $in: deliveryNote.returnDocEntries }
+          });
 
-        try {
-          newDocNum = await getNextInvoiceDocNumFromSAP();
+          returns.forEach(returnDoc => {
+            if (returnDoc.DocumentLines && Array.isArray(returnDoc.DocumentLines)) {
+              returnDoc.DocumentLines.forEach(line => {
+                const key = line.ItemCode;
+                returnedQuantities[key] = (returnedQuantities[key] || 0) + line.Quantity;
+              });
+            }
+          });
 
-          if (newDocNum) {
-            newDocEntry = newDocNum;
-          } else {
-            throw new Error("Could not get DocNum from SAP");
-          }
-        } catch (sapError) {
-          const lastInvoice = await Invoice.findOne().sort({ DocEntry: -1 });
-          newDocEntry = lastInvoice ? lastInvoice.DocEntry + 1 : 1;
-          newDocNum = newDocEntry;
+          console.log(`📦 Delivery Note ${docNum} has returns. Returned quantities:`, returnedQuantities);
         }
 
-        // Create invoice
-        const invoice = new Invoice({
-          DocEntry: newDocEntry,
-          DocNum: newDocNum,
-          DocType: "dDocument_Items",
-          CardCode: deliveryNote.CardCode,
-          CardName: deliveryNote.CardName,
-          Address: deliveryNote.Address,
-          Address2: deliveryNote.Address2,
-          DocTotal: deliveryNote.DocTotal,
-          DocCurrency: deliveryNote.DocCurrency,
-          VatSum: deliveryNote.VatSum,
-          DocDate: new Date(),
-          DocDueDate: new Date(),
-          CreationDate: new Date(),
-          UpdateDate: new Date(),
-          BaseType: 15,
-          BaseEntry: deliveryNote.SAPDocEntry,
-          OriginatingDeliveryNote: deliveryNote.DocNum,
-          DocumentLines: deliveryNote.DocumentLines.map((line, index) => ({
-            LineNum: index,
-            ItemCode: line.ItemCode,
-            ItemDescription: line.ItemDescription,
-            Quantity: line.Quantity,
-            Price: line.Price || line.UnitPrice,
-            PriceAfterVAT: line.PriceAfterVAT,
-            Currency: line.Currency || deliveryNote.DocCurrency,
-            LineTotal: line.LineTotal,
-            VatGroup: line.VatGroup,
-            BaseType: 15,
-            BaseEntry: deliveryNote.DocEntry,
-            BaseLine: line.LineNum,
-          })),
-          DocumentStatus: "bost_Open",
-          SyncedWithSAP: false,
-          LocalStatus: "Created",
-          salesAgent: deliveryNote.salesAgent,
-          Comments: `Invoice for delivery note #${deliveryNote.DocNum}`,
-          U_Notes: deliveryNote.U_Notes || "",
-          tag: "External Delivery",
-          isDelivery: true,
-          isPOS: false,
+        // Process document lines - subtract returned quantities
+        const invoiceLines = [];
+        let hasValidLines = false;
+        let invoiceTotal = 0;
+        let invoiceVatSum = 0;
+
+        deliveryNote.DocumentLines.forEach((line, index) => {
+          const deliveredQty = line.Quantity || 0;
+          const returnedQty = returnedQuantities[line.ItemCode] || 0;
+          const netQty = deliveredQty - returnedQty;
+
+          if (netQty > 0) {
+            hasValidLines = true;
+            const linePrice = line.Price || line.UnitPrice || 0;
+            const lineTotal = netQty * linePrice;
+            const lineVat = lineTotal * 0.055;
+
+            invoiceTotal += lineTotal;
+            invoiceVatSum += lineVat;
+
+            invoiceLines.push({
+              LineNum: invoiceLines.length,
+              ItemCode: line.ItemCode,
+              ItemDescription: line.ItemDescription,
+              Quantity: netQty,
+              Price: linePrice,
+              PriceAfterVAT: line.PriceAfterVAT,
+              Currency: line.Currency || deliveryNote.DocCurrency,
+              LineTotal: lineTotal,
+              VatGroup: line.VatGroup,
+
+              // ✅ CRITICAL: Base references to delivery note
+              BaseType: 15, // Delivery Note
+              BaseEntry: deliveryNote.SAPDocEntry, // *** SAP DOCENTRY ***
+              BaseLine: line.LineNum,
+            });
+          } else if (netQty < 0) {
+            console.warn(`⚠️ Item ${line.ItemCode} has more returns (${returnedQty}) than delivered (${deliveredQty})`);
+          }
         });
 
-        await invoice.save();
+        if (!hasValidLines) {
+          results.failed.push({
+            docNum,
+            error: "All items have been returned - no items left to invoice",
+            hasReturns: true,
+            returnedQuantities
+          });
+          continue;
+        }
 
-        results.successful.push({
-          docEntry: newDocEntry,
-          docNum: newDocNum,
-          deliveryNoteDocNum: deliveryNote.DocNum,
-          cardCode: deliveryNote.CardCode,
-        });
+        try {
+          // Get next invoice DocNum
+          const { getNextInvoiceDocNumFromSAP, getNextInvoiceDocEntryFromSAP } = require("../utils/sapB1Integration");
+          const newDocNum = await getNextInvoiceDocNumFromSAP();
+          const newDocEntry = await getNextInvoiceDocEntryFromSAP();
 
-        console.log(`✅ Created invoice ${newDocNum} for delivery note ${deliveryNote.DocNum}`);
+          // Create invoice data for SAP - with proper base references
+          // Create invoice data for SAP - with proper base references
+          const invoiceDataForSAP = {
+            CardCode: deliveryNote.CardCode,
+            DocDate: new Date().toISOString().split('T')[0],
+            DocDueDate: new Date().toISOString().split('T')[0],
+            DocCurrency: deliveryNote.DocCurrency || "EUR",
+
+            DocumentLines: invoiceLines.map((line, index) => ({
+              ItemCode: line.ItemCode,
+              ItemDescription: line.ItemDescription,
+              Quantity: line.Quantity,
+              UnitPrice: line.Price,
+              LineNum: index,
+
+              // ✅ ADD THESE BASE REFERENCES
+              BaseType: 15, // Delivery Note
+              BaseEntry: deliveryNote.SAPDocEntry, // *** SAP DOCENTRY ***
+              BaseLine: line.BaseLine,
+            })),
+
+            Comments: deliveryNote.hasReturns
+              ? `Invoice for delivery note #${deliveryNote.DocNum} (with returns deducted)`
+              : `Invoice for delivery note #${deliveryNote.DocNum}`,
+            U_Notes: deliveryNote.U_Notes || "",
+            U_SourceDeliveryNote: deliveryNote.DocNum.toString(),
+          };
+
+          console.log(`Creating invoice in SAP for DN ${docNum} with base references...`);
+          console.log(`Base Delivery Note DocEntry: ${deliveryNote.SAPDocEntry}`);
+
+          const { createInvoiceInSAP } = require("../utils/sapB1Integration");
+          const sapResponse = await createInvoiceInSAP(invoiceDataForSAP);
+
+          if (!sapResponse || !sapResponse.DocEntry) {
+            throw new Error("Invalid response from SAP - no DocEntry received");
+          }
+
+          // Save to local DB
+          const invoice = new Invoice({
+            DocEntry: sapResponse.DocEntry,
+            DocNum: sapResponse.DocNum,
+            SAPDocEntry: sapResponse.DocEntry,
+            DocType: "dDocument_Items",
+            CardCode: deliveryNote.CardCode,
+            CardName: deliveryNote.CardName,
+            Address: deliveryNote.Address,
+            Address2: deliveryNote.Address2,
+            DocTotal: invoiceTotal,
+            DocCurrency: deliveryNote.DocCurrency,
+            VatSum: invoiceVatSum,
+            DocDate: new Date(),
+            DocDueDate: new Date(),
+            CreationDate: new Date(),
+            UpdateDate: new Date(),
+
+            // ✅ Base references
+            BaseType: 15, // Delivery Note
+            BaseEntry: deliveryNote.SAPDocEntry, // *** SAP DOCENTRY ***
+            OriginatingDeliveryNote: deliveryNote.DocNum,
+
+            DocumentLines: invoiceLines,
+            DocumentStatus: "bost_Close",
+            SyncedWithSAP: true,
+            LocalStatus: "Synced",
+            salesAgent: deliveryNote.salesAgent,
+            Comments: invoiceDataForSAP.Comments,
+            U_Notes: deliveryNote.U_Notes || "",
+            tag: "External Delivery",
+            isDelivery: true,
+            isPOS: false,
+          });
+
+          await invoice.save();
+
+          results.successful.push({
+            docEntry: sapResponse.DocEntry,
+            docNum: sapResponse.DocNum,
+            deliveryNoteDocNum: deliveryNote.DocNum,
+            cardCode: deliveryNote.CardCode,
+            hasReturns: deliveryNote.hasReturns,
+            linesAfterReturns: invoiceLines.length,
+            totalAfterReturns: invoiceTotal,
+            syncedToSAP: true,
+            sapDeliveryNoteDocEntry: deliveryNote.SAPDocEntry // For reference
+          });
+
+          console.log(`✅ Created invoice ${sapResponse.DocNum} for DN ${deliveryNote.DocNum} (mapped to SAP DN ${deliveryNote.SAPDocEntry})`);
+
+          // **AUTO EMAIL FUNCTIONALITY**
+          try {
+            const Customer = require("../models/Customer");
+            const customer = await Customer.findOne({ CardCode: deliveryNote.CardCode });
+
+            if (customer && customer.Email) {
+              console.log(`📧 Sending invoice email to ${customer.Email} for invoice ${sapResponse.DocNum}...`);
+
+              const { sendInvoiceEmailToCustomer } = require('./invoicePdfController');
+              const emailResult = await sendInvoiceEmailToCustomer(invoice._id, {
+                recipientEmail: customer.Email,
+                subject: `Facture #${sapResponse.DocNum} - ${deliveryNote.CardName}`,
+                message: `Bonjour,
+
+Veuillez trouver ci-joint votre facture #${sapResponse.DocNum}.
+
+Montant total: ${new Intl.NumberFormat("fr-FR", {
+                  style: "currency",
+                  currency: invoice.DocCurrency || "EUR",
+                }).format(invoiceTotal)}
+Date: ${new Date(invoice.DocDate).toLocaleDateString("fr-FR")}
+Date d'échéance: ${new Date(invoice.DocDueDate).toLocaleDateString("fr-FR")}
+
+Cordialement,
+Halal Food Service`
+              });
+
+              if (emailResult.success) {
+                results.emailResults.sent.push({
+                  invoiceDocNum: sapResponse.DocNum,
+                  cardCode: deliveryNote.CardCode,
+                  email: customer.Email
+                });
+                console.log(`✅ Invoice email sent successfully to ${customer.Email}`);
+              } else {
+                results.emailResults.failed.push({
+                  invoiceDocNum: sapResponse.DocNum,
+                  cardCode: deliveryNote.CardCode,
+                  email: customer.Email,
+                  error: emailResult.error
+                });
+                console.error(`❌ Failed to send invoice email: ${emailResult.error}`);
+              }
+            } else {
+              results.emailResults.skipped.push({
+                invoiceDocNum: sapResponse.DocNum,
+                cardCode: deliveryNote.CardCode,
+                reason: customer ? "No email address" : "Customer not found"
+              });
+              console.log(`⚠️ Skipped email for invoice ${sapResponse.DocNum}: ${customer ? "No email address" : "Customer not found"}`);
+            }
+          } catch (emailError) {
+            console.error(`❌ Error sending invoice email for ${sapResponse.DocNum}:`, emailError);
+            results.emailResults.failed.push({
+              invoiceDocNum: sapResponse.DocNum,
+              cardCode: deliveryNote.CardCode,
+              error: emailError.message
+            });
+          }
+
+        } catch (sapError) {
+          console.error(`❌ Error creating invoice in SAP for DN ${docNum}:`, sapError);
+          results.failed.push({
+            docNum,
+            error: `SAP creation failed: ${sapError.message}`,
+            hasReturns: deliveryNote.hasReturns
+          });
+        }
 
       } catch (error) {
         console.error(`❌ Error processing delivery note ${docNum}:`, error);
@@ -445,29 +1028,11 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
       }
     }
 
-    // If autoSync is enabled, start background sync
-    if (autoSync && results.successful.length > 0) {
-      const invoiceIds = results.successful.map(r => r.docEntry);
-
-      setImmediate(async () => {
-        try {
-          console.log("Starting background SAP sync for invoices...");
-          await exports.bulkPushInvoicesToSAP({
-            body: { invoiceDocEntries: invoiceIds }
-          }, {
-            status: () => ({ json: () => { } })
-          });
-        } catch (error) {
-          console.error("Background sync error:", error);
-        }
-      });
-    }
-
     res.status(200).json({
       success: true,
-      message: `Created ${results.successful.length} invoices`,
+      message: `Created and synced ${results.successful.length} invoices. Sent ${results.emailResults.sent.length} emails.`,
       data: results,
-      autoSyncStarted: autoSync && results.successful.length > 0,
+      allSyncedToSAP: true,
     });
 
   } catch (error) {
@@ -479,8 +1044,8 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
     });
   }
 };
+// Update bulkPushInvoicesToSAP in controllers/invoiceController.js
 
-// Bulk push invoices to SAP
 exports.bulkPushInvoicesToSAP = async (req, res) => {
   try {
     const { invoiceDocEntries } = req.body;
@@ -494,28 +1059,25 @@ exports.bulkPushInvoicesToSAP = async (req, res) => {
     }
 
     console.log(`\n${"=".repeat(60)}`);
-    console.log(`Starting bulk SAP push for ${invoiceDocEntries.length} invoices`);
+    console.log(`Checking sync status for ${invoiceDocEntries.length} invoices`);
     console.log(`${"=".repeat(60)}\n`);
 
     const results = {
       successful: [],
       failed: [],
+      alreadySynced: [],
       totalProcessed: 0,
       startTime: new Date(),
     };
 
-    // Process each invoice with retry logic
     for (const docEntry of invoiceDocEntries) {
       try {
         results.totalProcessed++;
-
-        console.log(`\n[${results.totalProcessed}/${invoiceDocEntries.length}] Processing invoice ${docEntry}...`);
 
         const invoice = await Invoice.findOne({ DocEntry: docEntry })
           .populate("salesAgent", "firstName lastName email");
 
         if (!invoice) {
-          console.error(`❌ Invoice ${docEntry} not found`);
           results.failed.push({
             docEntry,
             error: "Invoice not found",
@@ -525,28 +1087,16 @@ exports.bulkPushInvoicesToSAP = async (req, res) => {
 
         // Check if already synced
         if (invoice.SyncedWithSAP && invoice.SAPDocEntry) {
-          console.log(`⚠️ Invoice ${docEntry} already synced (SAP DocEntry: ${invoice.SAPDocEntry})`);
-          results.failed.push({
-            docEntry,
+          console.log(`✅ Invoice ${invoice.DocNum} already synced (SAP DocEntry: ${invoice.SAPDocEntry})`);
+          results.alreadySynced.push({
+            docEntry: invoice.DocEntry,
             docNum: invoice.DocNum,
-            error: "Already synced with SAP",
             sapDocEntry: invoice.SAPDocEntry,
           });
           continue;
         }
 
-        // Check if sync is disabled
-        if (invoice.SAPSyncDisabled) {
-          console.log(`⚠️ SAP sync disabled for invoice ${docEntry}: ${invoice.SyncErrors}`);
-          results.failed.push({
-            docEntry,
-            docNum: invoice.DocNum,
-            error: invoice.SyncErrors || "SAP sync disabled",
-          });
-          continue;
-        }
-
-        // Push to SAP with retry logic
+        // This invoice needs syncing
         const sapResult = await pushInvoiceToSAPWithRetry(invoice, 3);
 
         if (sapResult.success) {
@@ -556,30 +1106,18 @@ exports.bulkPushInvoicesToSAP = async (req, res) => {
             sapDocEntry: sapResult.SAPDocEntry,
             sapDocNum: sapResult.SAPDocNum,
             cardCode: invoice.CardCode,
-            cardName: invoice.CardName,
             attempts: sapResult.attempts,
           });
-
-          console.log(`✅ Successfully synced invoice ${invoice.DocNum} (Attempts: ${sapResult.attempts})`);
         } else {
           results.failed.push({
             docEntry: invoice.DocEntry,
             docNum: invoice.DocNum,
-            cardCode: invoice.CardCode,
             error: sapResult.error,
             attempts: sapResult.attempts,
           });
-
-          console.error(`❌ Failed to sync invoice ${invoice.DocNum} after ${sapResult.attempts} attempts`);
-        }
-
-        // Small delay between pushes
-        if (results.totalProcessed < invoiceDocEntries.length) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
         }
 
       } catch (error) {
-        console.error(`❌ Unexpected error processing invoice ${docEntry}:`, error);
         results.failed.push({
           docEntry,
           error: error.message,
@@ -591,16 +1129,15 @@ exports.bulkPushInvoicesToSAP = async (req, res) => {
     results.duration = ((results.endTime - results.startTime) / 1000).toFixed(2);
 
     console.log(`\n${"=".repeat(60)}`);
-    console.log(`Bulk SAP Push Summary:`);
-    console.log(`Total Processed: ${results.totalProcessed}`);
-    console.log(`Successful: ${results.successful.length}`);
+    console.log(`Sync Summary:`);
+    console.log(`Already Synced: ${results.alreadySynced.length}`);
+    console.log(`Newly Synced: ${results.successful.length}`);
     console.log(`Failed: ${results.failed.length}`);
-    console.log(`Duration: ${results.duration}s`);
     console.log(`${"=".repeat(60)}\n`);
 
     res.status(200).json({
       success: true,
-      message: `Processed ${results.totalProcessed} invoices: ${results.successful.length} successful, ${results.failed.length} failed`,
+      message: `Processed ${results.totalProcessed} invoices`,
       data: results,
     });
 

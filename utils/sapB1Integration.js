@@ -227,6 +227,42 @@ exports.getNextDocNumFromSeries = async (seriesCode = null) => {
   }
 };
 
+// Format order data specifically for UPDATES (much more restrictive)
+exports.formatOrderForSAPUpdate = async (order) => {
+  // For updates, ONLY send fields that SAP B1 allows updating
+  // CRITICAL: Never include CardCode in updates - SAP doesn't allow changing customer
+  const sapUpdateData = {
+    Comments: order.Comments || "",
+    DocumentLines: []
+  };
+
+  // ✅ ADD: Only include U_Notes if it exists
+  if (order.U_Notes) {
+    sapUpdateData.U_Notes = order.U_Notes;
+  }
+
+  // Process document lines with ONLY updateable fields
+  if (order.DocumentLines && Array.isArray(order.DocumentLines)) {
+    sapUpdateData.DocumentLines = order.DocumentLines.map((line, index) => ({
+      LineNum: index,
+      ItemCode: line.ItemCode,
+      ItemDescription: line.ItemDescription || "",
+      Quantity: Number(line.Quantity || 0),
+      UnitPrice: Number(line.Price || 0),
+      // ✅ REMOVED: PriceList - cannot be updated after creation
+      // ✅ REMOVED: Any base document references
+    }));
+  }
+
+  console.log("SAP Order Update formatted:", {
+    Comments: sapUpdateData.Comments,
+    DocumentLines: sapUpdateData.DocumentLines.length,
+    hasUNotes: !!sapUpdateData.U_Notes
+  });
+
+  return sapUpdateData;
+};
+
 exports.formatOrderForSAP = async (order) => {
   const today = new Date();
 
@@ -286,7 +322,7 @@ exports.formatOrderForSAP = async (order) => {
   console.log("SAP Order formatted:", {
     CardCode: sapOrder.CardCode,
     PriceList: sapOrder.PriceList,
-    U_LocalDocNum: sapOrder.U_LocalDocNum,
+    U_LocalDocNum: sapOrder.DocNum,
     DocumentLines: sapOrder.DocumentLines.map((line) => ({
       ItemCode: line.ItemCode,
       UnitPrice: line.UnitPrice,
@@ -312,7 +348,7 @@ exports.formatDeliveryNoteForSAP = async (deliveryNote, salesOrderDocEntry = nul
     DocumentLines: [],
   };
 
-  // Process document lines
+  // Process document lines with proper base document references
   if (deliveryNote.DocumentLines && Array.isArray(deliveryNote.DocumentLines)) {
     sapDeliveryNote.DocumentLines = deliveryNote.DocumentLines.map((line, index) => {
       const sapLine = {
@@ -325,31 +361,33 @@ exports.formatDeliveryNoteForSAP = async (deliveryNote, salesOrderDocEntry = nul
         LineNum: index,
       };
 
-      // CRITICAL FIX: Only add base document reference if we have a valid DocEntry
+      // ✅ CRITICAL FIX: Include base document references to close the order in SAP
       if (salesOrderDocEntry && salesOrderDocEntry > 0) {
         sapLine.BaseType = 17; // 17 = Sales Order
-        sapLine.BaseEntry = salesOrderDocEntry;
-        sapLine.BaseLine = line.BaseLine || index;
+        sapLine.BaseEntry = salesOrderDocEntry; // SAP's DocEntry for the order
+        sapLine.BaseLine = line.BaseLine !== undefined ? line.BaseLine : index;
+
+        console.log(`Line ${index}: Mapping to Order DocEntry ${salesOrderDocEntry}, Line ${sapLine.BaseLine}`);
       }
-      // If no BaseEntry, SAP will create a standalone delivery note
 
       return sapLine;
     });
   }
 
   // Add custom fields for tracking
-  if (deliveryNote.U_LocalDocNum) {
-    sapDeliveryNote.U_LocalDocNum = deliveryNote.U_LocalDocNum.toString();
+  if (deliveryNote.DocNum) {
+    sapDeliveryNote.U_LocalDocNum = deliveryNote.DocNum.toString();
   }
 
-  if (deliveryNote.U_SourceOrderNum) {
-    sapDeliveryNote.U_SourceOrderNum = deliveryNote.U_SourceOrderNum.toString();
+  if (deliveryNote.OriginatingOrder) {
+    sapDeliveryNote.U_SourceOrderNum = deliveryNote.OriginatingOrder.toString();
   }
 
-  console.log("SAP Delivery Note formatted:", {
+  console.log("SAP Delivery Note formatted with base document:", {
     CardCode: sapDeliveryNote.CardCode,
-    BaseEntry: salesOrderDocEntry,
+    BaseOrderDocEntry: salesOrderDocEntry,
     DocumentLines: sapDeliveryNote.DocumentLines.length,
+    HasBaseReferences: sapDeliveryNote.DocumentLines.some(line => line.BaseType === 17)
   });
 
   return sapDeliveryNote;
@@ -431,7 +469,7 @@ exports.getSalesOrderFromSAP = async (docEntry) => {
     console.log(`Fetching sales order ${docEntry} from SAP B1...`);
 
     const response = await axios.get(
-      `${SAP_CONFIG.serviceLayerUrl}/Orders(${docEntry})`,
+      `${SAP_CONFIG.serviceLayerUrl}/Orders?$filter=DocNum eq ${docEntry}`,
       {
         headers: {
           "Content-Type": "application/json",
@@ -441,7 +479,7 @@ exports.getSalesOrderFromSAP = async (docEntry) => {
     );
 
     console.log("Sales order fetched successfully from SAP B1");
-    return response.data;
+    return response.data.value && response.data.value.length > 0 ? response.data.value[0] : null;
   } catch (error) {
     console.error("Error fetching sales order from SAP B1:", error.message);
 
@@ -457,8 +495,127 @@ exports.getSalesOrderFromSAP = async (docEntry) => {
   }
 };
 
-// Add these functions at the end of your utils/sapB1Integration.js file
-// (after the getSalesOrderFromSAP function)
+// Fetch all sales orders from SAP with filters
+exports.fetchSalesOrdersFromSAP = async (filters = {}) => {
+  try {
+    const sessionId = await getSessionId();
+
+    let filterQuery = "";
+    if (filters.fromDate) {
+      filterQuery += `DocDate ge '${filters.fromDate}'`;
+    }
+    if (filters.toDate) {
+      if (filterQuery) filterQuery += " and ";
+      filterQuery += `DocDate le '${filters.toDate}'`;
+    }
+
+    const url = filterQuery
+      ? `${SAP_CONFIG.serviceLayerUrl}/Orders?$filter=${filterQuery}`
+      : `${SAP_CONFIG.serviceLayerUrl}/Orders`;
+
+    console.log("Fetching orders from SAP:", url);
+
+    const response = await axios.get(url, {
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: `B1SESSION=${sessionId}`,
+      },
+    });
+
+    return response.data.value || [];
+  } catch (error) {
+    console.error("Error fetching orders from SAP:", error.message);
+    if (error.response && error.response.status === 401) {
+      sessionId = null;
+      await getSessionId();
+      return exports.fetchSalesOrdersFromSAP(filters);
+    }
+    throw new Error(`SAP Error: ${error.message}`);
+  }
+};
+
+// Fetch specific sales order from SAP
+exports.getSalesOrderFromSAPByDocNum = async (docNum) => {
+  try {
+    const sessionId = await getSessionId();
+
+    const response = await axios.get(
+      `${SAP_CONFIG.serviceLayerUrl}/Orders?$filter=DocNum eq ${docNum}`,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `B1SESSION=${sessionId}`,
+        },
+      }
+    );
+
+    return response.data.value?.[0] || null;
+  } catch (error) {
+    console.error("Error fetching order from SAP:", error.message);
+    throw new Error(`SAP Error: ${error.message}`);
+  }
+};
+
+// Fetch all delivery notes from SAP with filters
+exports.fetchDeliveryNotesFromSAP = async (filters = {}) => {
+  try {
+    const sessionId = await getSessionId();
+
+    let filterQuery = "";
+    if (filters.fromDate) {
+      filterQuery += `DocDate ge '${filters.fromDate}'`;
+    }
+    if (filters.toDate) {
+      if (filterQuery) filterQuery += " and ";
+      filterQuery += `DocDate le '${filters.toDate}'`;
+    }
+
+    const url = filterQuery
+      ? `${SAP_CONFIG.serviceLayerUrl}/DeliveryNotes?$filter=${filterQuery}`
+      : `${SAP_CONFIG.serviceLayerUrl}/DeliveryNotes`;
+
+    console.log("Fetching delivery notes from SAP:", url);
+
+    const response = await axios.get(url, {
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: `B1SESSION=${sessionId}`,
+      },
+    });
+
+    return response.data.value || [];
+  } catch (error) {
+    console.error("Error fetching delivery notes from SAP:", error.message);
+    if (error.response && error.response.status === 401) {
+      sessionId = null;
+      await getSessionId();
+      return exports.fetchDeliveryNotesFromSAP(filters);
+    }
+    throw new Error(`SAP Error: ${error.message}`);
+  }
+};
+
+// Fetch specific delivery note from SAP
+exports.getDeliveryNoteFromSAPByDocNum = async (docNum) => {
+  try {
+    const sessionId = await getSessionId();
+
+    const response = await axios.get(
+      `${SAP_CONFIG.serviceLayerUrl}/DeliveryNotes?$filter=DocNum eq ${docNum}`,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `B1SESSION=${sessionId}`,
+        },
+      }
+    );
+
+    return response.data.value?.[0] || null;
+  } catch (error) {
+    console.error("Error fetching delivery note from SAP:", error.message);
+    throw new Error(`SAP Error: ${error.message}`);
+  }
+};
 
 // Create a delivery note in SAP B1
 exports.createDeliveryNoteInSAP = async (deliveryNoteData) => {
@@ -566,10 +723,8 @@ exports.getDeliveryNoteFromSAP = async (docEntry) => {
 exports.getNextDeliveryNoteDocNumFromSAP = async () => {
   try {
     const sessionId = await getSessionId();
-
     console.log("Fetching next Delivery Note DocNum from SAP B1...");
 
-    // Get the last delivery note to find the highest DocNum
     const response = await axios.get(
       `${SAP_CONFIG.serviceLayerUrl}/DeliveryNotes?$select=DocNum&$orderby=DocNum desc&$top=1`,
       {
@@ -580,18 +735,12 @@ exports.getNextDeliveryNoteDocNumFromSAP = async () => {
       }
     );
 
-    let nextDocNum = 1; // Default if no delivery notes exist
+    let nextDocNum = 1;
 
-    if (
-      response.data &&
-      response.data.value &&
-      response.data.value.length > 0
-    ) {
+    if (response.data && response.data.value && response.data.value.length > 0) {
       const lastDocNum = response.data.value[0].DocNum;
       nextDocNum = lastDocNum + 1;
-      console.log(
-        `Last Delivery Note DocNum in SAP: ${lastDocNum}, Next DocNum: ${nextDocNum}`
-      );
+      console.log(`Last Delivery Note DocNum in SAP: ${lastDocNum}, Next DocNum: ${nextDocNum}`);
     } else {
       console.log("No existing delivery notes found in SAP, starting with DocNum: 1");
     }
@@ -600,7 +749,6 @@ exports.getNextDeliveryNoteDocNumFromSAP = async () => {
   } catch (error) {
     console.error("Error getting next Delivery Note DocNum from SAP B1:", error.message);
 
-    // If unauthorized, try to login again and retry once
     if (error.response && error.response.status === 401) {
       console.log("Session expired, attempting to login again...");
       sessionId = null;
@@ -608,7 +756,6 @@ exports.getNextDeliveryNoteDocNumFromSAP = async () => {
       return exports.getNextDeliveryNoteDocNumFromSAP();
     }
 
-    // If we can't get DocNum from SAP, fall back to local calculation
     console.warn("Falling back to local DocNum calculation for Delivery Note");
     return null;
   }
@@ -690,10 +837,8 @@ exports.bulkCreateDeliveryNotesInSAP = async (deliveryNotesData) => {
 exports.getNextInvoiceDocNumFromSAP = async () => {
   try {
     const sessionId = await getSessionId();
-
     console.log("Fetching next Invoice DocNum from SAP B1...");
 
-    // Get the last invoice to find the highest DocNum
     const response = await axios.get(
       `${SAP_CONFIG.serviceLayerUrl}/Invoices?$select=DocNum&$orderby=DocNum desc&$top=1`,
       {
@@ -704,18 +849,12 @@ exports.getNextInvoiceDocNumFromSAP = async () => {
       }
     );
 
-    let nextDocNum = 1; // Default if no invoices exist
+    let nextDocNum = 1;
 
-    if (
-      response.data &&
-      response.data.value &&
-      response.data.value.length > 0
-    ) {
+    if (response.data && response.data.value && response.data.value.length > 0) {
       const lastDocNum = response.data.value[0].DocNum;
       nextDocNum = lastDocNum + 1;
-      console.log(
-        `Last Invoice DocNum in SAP: ${lastDocNum}, Next DocNum: ${nextDocNum}`
-      );
+      console.log(`Last Invoice DocNum in SAP: ${lastDocNum}, Next DocNum: ${nextDocNum}`);
     } else {
       console.log("No existing invoices found in SAP, starting with DocNum: 1");
     }
@@ -724,7 +863,6 @@ exports.getNextInvoiceDocNumFromSAP = async () => {
   } catch (error) {
     console.error("Error getting next Invoice DocNum from SAP B1:", error.message);
 
-    // If unauthorized, try to login again and retry once
     if (error.response && error.response.status === 401) {
       console.log("Session expired, attempting to login again...");
       sessionId = null;
@@ -732,34 +870,111 @@ exports.getNextInvoiceDocNumFromSAP = async () => {
       return exports.getNextInvoiceDocNumFromSAP();
     }
 
-    // If we can't get DocNum from SAP, fall back to local calculation
     console.warn("Falling back to local DocNum calculation for Invoice");
     return null;
   }
 };
 
-// Create an invoice in SAP B1
+exports.getNextInvoiceDocEntryFromSAP = async () => {
+  try {
+    const sessionId = await getSessionId();
+    console.log("Fetching next Invoice DocEntry from SAP B1...");
+
+    const response = await axios.get(
+      `${SAP_CONFIG.serviceLayerUrl}/Invoices?$select=DocEntry&$orderby=DocEntry desc&$top=1`,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `B1SESSION=${sessionId}`,
+        },
+      }
+    );
+
+    let nextDocEntry = 1;
+
+    if (response.data && response.data.value && response.data.value.length > 0) {
+      const lastDocEntry = response.data.value[0].DocEntry;
+      nextDocEntry = lastDocEntry + 1;
+      console.log(`Last Invoice DocEntry in SAP: ${lastDocEntry}, Next DocEntry: ${nextDocEntry}`);
+    } else {
+      console.log("No existing invoices found in SAP, starting with DocEntry: 1");
+    }
+
+    return nextDocEntry;
+  } catch (error) {
+    console.error("Error getting next Invoice DocEntry from SAP B1:", error.message);
+
+    if (error.response && error.response.status === 401) {
+      console.log("Session expired, attempting to login again...");
+      sessionId = null;
+      await getSessionId();
+      return exports.getNextInvoiceDocEntryFromSAP();
+    }
+
+    console.warn("Falling back to local DocEntry calculation for Invoice");
+    return null;
+  }
+};
+
+
+// utils/sapB1Integration.js
+// Replace createInvoiceInSAP function
+
 exports.createInvoiceInSAP = async (invoiceData) => {
   try {
-    // Skip SAP sync if disabled (for testing/debugging purposes)
     if (!ENABLE_SAP_SYNC) {
       console.log("SAP sync is disabled. Skipping invoice creation in SAP.");
       return {
         simulated: true,
         message: "SAP sync is disabled",
-        DocEntry: Math.floor(Math.random() * 10000), // Simulate a DocEntry
-        DocNum: Math.floor(Math.random() * 10000), // Simulate a DocNum
+        DocEntry: Math.floor(Math.random() * 10000),
+        DocNum: Math.floor(Math.random() * 10000),
       };
     }
 
     const sessionId = await getSessionId();
 
     console.log("Creating invoice in SAP B1...");
-    console.log("Invoice data being sent:", JSON.stringify(invoiceData, null, 2));
+
+    // ✅ Clean the data - but PRESERVE base references
+    const cleanInvoiceData = {
+      CardCode: invoiceData.CardCode,
+      DocDate: invoiceData.DocDate,
+      DocDueDate: invoiceData.DocDueDate,
+      DocCurrency: invoiceData.DocCurrency,
+      DocumentStatus: "bost_Open",
+      Comments: invoiceData.Comments,
+      U_Notes: invoiceData.U_Notes,
+      DocumentLines: invoiceData.DocumentLines.map((line, index) => {
+        const cleanLine = {
+          ItemCode: line.ItemCode,
+          ItemDescription: line.ItemDescription,
+          Quantity: Number(line.Quantity),
+          UnitPrice: Number(line.UnitPrice),
+          LineNum: index
+        };
+
+        // ✅ CRITICAL FIX: Preserve base document references if they exist
+        if (line.BaseType !== undefined && line.BaseType !== null) {
+          cleanLine.BaseType = Number(line.BaseType);
+          cleanLine.BaseEntry = Number(line.BaseEntry);
+          cleanLine.BaseLine = Number(line.BaseLine !== undefined ? line.BaseLine : index);
+        }
+
+        return cleanLine;
+      })
+    };
+
+    // Add custom fields if they exist
+    if (invoiceData.U_SourceDeliveryNote) {
+      cleanInvoiceData.U_SourceDeliveryNote = invoiceData.U_SourceDeliveryNote;
+    }
+
+    console.log("Clean invoice data:", JSON.stringify(cleanInvoiceData, null, 2));
 
     const response = await axios.post(
       `${SAP_CONFIG.serviceLayerUrl}/Invoices`,
-      invoiceData,
+      cleanInvoiceData,
       {
         headers: {
           "Content-Type": "application/json",
@@ -780,22 +995,12 @@ exports.createInvoiceInSAP = async (invoiceData) => {
     console.error("Error creating invoice in SAP B1:", error.message);
     if (error.response) {
       console.error("SAP Error details:", error.response.data);
-
-      // For debugging, log the full error details
-      if (
-        error.response.data &&
-        error.response.data.error &&
-        error.response.data.error.message
-      ) {
-        console.error(
-          "Error field details:",
-          error.response.data.error.message.value
-        );
+      if (error.response.data?.error?.message) {
+        console.error("Error message:", error.response.data.error.message.value);
       }
     }
 
-    // If unauthorized, try to login again and retry once
-    if (error.response && error.response.status === 401) {
+    if (error.response?.status === 401) {
       console.log("Session expired, attempting to login again...");
       sessionId = null;
       await getSessionId();
@@ -906,5 +1111,475 @@ exports.bulkCreateInvoicesInSAP = async (invoicesData) => {
   } catch (error) {
     console.error("Error in bulk invoice creation:", error.message);
     throw new Error(`SAP Bulk Error: ${error.message}`);
+  }
+};
+
+// ============================================
+// RETURNS FUNCTIONS - CORRECTED
+// ============================================
+
+// Get next Return DocNum from SAP
+exports.getNextReturnDocNumFromSAP = async () => {
+  try {
+    const sessionId = await getSessionId();
+    console.log("Fetching next Return DocNum from SAP B1...");
+
+    // ✅ CORRECT ENDPOINT: Returns (not ReturnsService)
+    const response = await axios.get(
+      `${SAP_CONFIG.serviceLayerUrl}/Returns?$select=DocNum&$orderby=DocNum desc&$top=1`,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `B1SESSION=${sessionId}`,
+        },
+      }
+    );
+
+    let nextDocNum = 1;
+    if (response.data?.value?.length > 0) {
+      const lastDocNum = response.data.value[0].DocNum;
+      nextDocNum = lastDocNum + 1;
+      console.log(`Last Return DocNum in SAP: ${lastDocNum}, Next: ${nextDocNum}`);
+    } else {
+      console.log("No existing returns found in SAP, starting with DocNum: 1");
+    }
+
+    return nextDocNum;
+  } catch (error) {
+    console.error("Error getting next Return DocNum:", error.message);
+    if (error.response?.status === 401) {
+      sessionId = null;
+      await getSessionId();
+      return exports.getNextReturnDocNumFromSAP();
+    }
+    console.warn("Falling back to local DocNum calculation for Return");
+    return null;
+  }
+};
+
+// Create Return in SAP
+exports.createReturnInSAP = async (returnData) => {
+  try {
+    if (!ENABLE_SAP_SYNC) {
+      console.log("SAP sync disabled. Simulating return creation.");
+      return {
+        simulated: true,
+        DocEntry: Math.floor(Math.random() * 10000),
+        DocNum: Math.floor(Math.random() * 10000),
+      };
+    }
+
+    const sessionId = await getSessionId();
+    console.log("Creating return in SAP B1...");
+    console.log("Return data being sent:", JSON.stringify(returnData, null, 2));
+
+    // ✅ CORRECT ENDPOINT: Returns (not ReturnsService)
+    const response = await axios.post(
+      `${SAP_CONFIG.serviceLayerUrl}/Returns`,
+      returnData,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `B1SESSION=${sessionId}`,
+        },
+      }
+    );
+
+    console.log("Return created successfully in SAP B1");
+    console.log("SAP Response:", {
+      DocEntry: response.data.DocEntry,
+      DocNum: response.data.DocNum,
+      CardCode: response.data.CardCode,
+    });
+
+    return response.data;
+  } catch (error) {
+    console.error("Error creating return in SAP B1:", error.message);
+    if (error.response) {
+      console.error("SAP Error details:", error.response.data);
+
+      if (
+        error.response.data &&
+        error.response.data.error &&
+        error.response.data.error.message
+      ) {
+        console.error(
+          "Error field details:",
+          error.response.data.error.message.value
+        );
+      }
+    }
+
+    if (error.response?.status === 401) {
+      console.log("Session expired, attempting to login again...");
+      sessionId = null;
+      await getSessionId();
+      return exports.createReturnInSAP(returnData);
+    }
+
+    throw new Error(`SAP Error: ${error.message}`);
+  }
+};
+
+// ============================================
+// CREDIT NOTES FUNCTIONS
+// ============================================
+
+// Get next Credit Note DocNum from SAP
+exports.getNextCreditNoteDocNumFromSAP = async () => {
+  try {
+    const sessionId = await getSessionId();
+    console.log("Fetching next Credit Note DocNum from SAP B1...");
+
+    const response = await axios.get(
+      `${SAP_CONFIG.serviceLayerUrl}/CreditNotes?$select=DocNum&$orderby=DocNum desc&$top=1`,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `B1SESSION=${sessionId}`,
+        },
+      }
+    );
+
+    let nextDocNum = 1;
+    if (response.data?.value?.length > 0) {
+      const lastDocNum = response.data.value[0].DocNum;
+      nextDocNum = lastDocNum + 1;
+      console.log(`Last Credit Note DocNum in SAP: ${lastDocNum}, Next: ${nextDocNum}`);
+    }
+
+    return nextDocNum;
+  } catch (error) {
+    console.error("Error getting next Credit Note DocNum:", error.message);
+    if (error.response?.status === 401) {
+      sessionId = null;
+      await getSessionId();
+      return exports.getNextCreditNoteDocNumFromSAP();
+    }
+    return null;
+  }
+};
+
+// Create Credit Note in SAP
+exports.createCreditNoteInSAP = async (creditNoteData) => {
+  try {
+    if (!ENABLE_SAP_SYNC) {
+      console.log("SAP sync disabled. Simulating credit note creation.");
+      return {
+        simulated: true,
+        DocEntry: Math.floor(Math.random() * 10000),
+        DocNum: Math.floor(Math.random() * 10000),
+      };
+    }
+
+    const sessionId = await getSessionId();
+    console.log("Creating credit note in SAP B1...");
+
+    const response = await axios.post(
+      `${SAP_CONFIG.serviceLayerUrl}/CreditNotes`,
+      creditNoteData,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `B1SESSION=${sessionId}`,
+        },
+      }
+    );
+
+    console.log("Credit note created successfully:", response.data.DocEntry);
+    return response.data;
+  } catch (error) {
+    console.error("Error creating credit note in SAP:", error.message);
+    if (error.response?.status === 401) {
+      sessionId = null;
+      await getSessionId();
+      return exports.createCreditNoteInSAP(creditNoteData);
+    }
+    throw new Error(`SAP Error: ${error.message}`);
+  }
+};
+
+// utils/sapB1Integration.js
+// Replace formatInvoiceForSAP function
+
+exports.formatInvoiceForSAP = async (invoice) => {
+  const today = new Date().toISOString().split('T')[0];
+
+  const sapInvoice = {
+    CardCode: invoice.CardCode,
+    DocDate: invoice.DocDate ? new Date(invoice.DocDate).toISOString().split('T')[0] : today,
+    DocDueDate: invoice.DocDueDate ? new Date(invoice.DocDueDate).toISOString().split('T')[0] : today,
+    DocCurrency: invoice.DocCurrency || "EUR",
+    Comments: invoice.Comments || "",
+    U_Notes: invoice.U_Notes || "",
+    DocumentLines: [],
+  };
+
+  // ✅ CRITICAL FIX: Include base document references
+  if (invoice.DocumentLines && Array.isArray(invoice.DocumentLines)) {
+    sapInvoice.DocumentLines = invoice.DocumentLines.map((line, index) => {
+      const sapLine = {
+        ItemCode: line.ItemCode,
+        Quantity: Number(line.Quantity || 0),
+        UnitPrice: Number(line.Price || line.UnitPrice || 0),
+        ItemDescription: line.ItemDescription || "",
+        LineNum: index,
+      };
+
+      // ✅ CRITICAL: Include base document references to close the delivery note
+      // Check if this invoice is based on a delivery note
+      if (invoice.BaseEntry && invoice.BaseEntry > 0 && invoice.BaseType === 15) {
+        sapLine.BaseType = 15; // 15 = Delivery Note
+        sapLine.BaseEntry = invoice.BaseEntry; // SAP's DocEntry for delivery note
+        sapLine.BaseLine = line.BaseLine !== undefined ? line.BaseLine : index;
+
+        console.log(`Invoice Line ${index}: Mapping to Delivery Note DocEntry ${invoice.BaseEntry}, Line ${sapLine.BaseLine}`);
+      }
+
+      return sapLine;
+    });
+  }
+
+  // Add tracking fields
+  if (invoice.OriginatingDeliveryNote) {
+    sapInvoice.U_SourceDeliveryNote = invoice.OriginatingDeliveryNote.toString();
+  }
+
+  console.log("SAP Invoice formatted:", {
+    CardCode: sapInvoice.CardCode,
+    BaseDeliveryNoteDocEntry: invoice.BaseEntry,
+    DocumentLines: sapInvoice.DocumentLines.length,
+    HasBaseReferences: sapInvoice.DocumentLines.some(line => line.BaseType === 15),
+    FirstLineBaseEntry: sapInvoice.DocumentLines[0]?.BaseEntry,
+    FirstLineBaseType: sapInvoice.DocumentLines[0]?.BaseType
+  });
+
+  return sapInvoice;
+};
+
+// Format Return for SAP
+exports.formatReturnForSAP = async (returnDoc) => {
+  const today = new Date();
+
+  const sapReturn = {
+    CardCode: returnDoc.CardCode,
+    DocDate: returnDoc.DocDate || today,
+    DocDueDate: returnDoc.DocDueDate || today,
+    Comments: returnDoc.Comments || "",
+    DocumentLines: []
+  };
+
+  if (returnDoc.DocumentLines?.length > 0) {
+    sapReturn.DocumentLines = returnDoc.DocumentLines.map((line, index) => ({
+      ItemCode: line.ItemCode,
+      Quantity: Number(line.Quantity || 0),
+      UnitPrice: Number(line.Price || 0),
+      ItemDescription: line.ItemDescription || "",
+      LineNum: index,
+      BaseType: line.BaseType,
+      BaseEntry: line.BaseEntry,
+      BaseLine: line.BaseLine || index
+    }));
+  }
+
+  return sapReturn;
+};
+
+// Create incoming payment in SAP
+exports.createIncomingPaymentInSAP = async (paymentData) => {
+  try {
+    if (!ENABLE_SAP_SYNC) {
+      console.log("SAP sync disabled. Simulating payment creation.");
+      return {
+        simulated: true,
+        DocEntry: Math.floor(Math.random() * 10000),
+        DocNum: Math.floor(Math.random() * 10000),
+      };
+    }
+
+    const sessionId = await getSessionId();
+    console.log("Creating incoming payment in SAP B1...");
+    console.log("Payment data:", JSON.stringify(paymentData, null, 2));
+
+    const response = await axios.post(
+      `${SAP_CONFIG.serviceLayerUrl}/IncomingPayments`,
+      paymentData,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `B1SESSION=${sessionId}`,
+        },
+      }
+    );
+
+    console.log("Payment created successfully in SAP B1");
+    console.log("SAP Response:", {
+      DocEntry: response.data.DocEntry,
+      DocNum: response.data.DocNum,
+    });
+
+    return response.data;
+  } catch (error) {
+    console.error("Error creating payment in SAP B1:", error.message);
+    if (error.response) {
+      console.error("SAP Error details:", error.response.data);
+    }
+
+    if (error.response?.status === 401) {
+      console.log("Session expired, attempting to login again...");
+      sessionId = null;
+      await getSessionId();
+      return exports.createIncomingPaymentInSAP(paymentData);
+    }
+
+    throw new Error(`SAP Error: ${error.message}`);
+  }
+};
+
+// Format Credit Note for SAP - Based on actual SAP structure
+exports.formatCreditNoteForSAP = async (creditNote) => {
+  const today = new Date().toISOString().split('T')[0];
+
+  // Build the credit note with only fields SAP accepts
+  const sapCreditNote = {
+    CardCode: creditNote.CardCode,
+    DocDate: creditNote.DocDate
+      ? new Date(creditNote.DocDate).toISOString().split('T')[0]
+      : today,
+    DocDueDate: creditNote.DocDueDate
+      ? new Date(creditNote.DocDueDate).toISOString().split('T')[0]
+      : today,
+    DocCurrency: creditNote.DocCurrency || "EUR",
+    DocumentLines: []
+  };
+
+  // Add Comments if provided
+  if (creditNote.Comments) {
+    sapCreditNote.Comments = creditNote.Comments;
+  }
+
+  // Add U_Notes if provided
+  if (creditNote.U_Notes) {
+    sapCreditNote.U_Notes = creditNote.U_Notes;
+  }
+
+  // Process document lines - SAP B1 format
+  if (creditNote.DocumentLines?.length > 0) {
+    sapCreditNote.DocumentLines = creditNote.DocumentLines.map((line, index) => {
+      const sapLine = {
+        LineNum: index,
+        ItemCode: line.ItemCode,
+        ItemDescription: line.ItemDescription || "",
+        Quantity: Number(line.Quantity || 0),
+        // SAP uses "Price" field for credit notes, not "UnitPrice"
+        Price: Number(line.Price || line.UnitPrice || 0),
+      };
+
+      // Add base document references ONLY if they exist and are valid
+      if (line.BaseType !== undefined && line.BaseType !== null) {
+        sapLine.BaseType = Number(line.BaseType); // Must be a number
+
+        if (line.BaseEntry !== undefined && line.BaseEntry !== null) {
+          sapLine.BaseEntry = Number(line.BaseEntry);
+          sapLine.BaseLine = Number(line.BaseLine !== undefined ? line.BaseLine : index);
+        }
+      }
+
+      return sapLine;
+    });
+  }
+
+  console.log("\n" + "=".repeat(60));
+  console.log("FORMATTED CREDIT NOTE FOR SAP");
+  console.log("=".repeat(60));
+  console.log(JSON.stringify(sapCreditNote, null, 2));
+  console.log("=".repeat(60) + "\n");
+
+  return sapCreditNote;
+};
+
+// In updateSalesOrderInSAP function, replace the entire function:
+
+exports.updateSalesOrderInSAP = async (docNum, orderData) => {
+  try {
+    if (!ENABLE_SAP_SYNC) {
+      console.log("SAP sync disabled. Simulating order update.");
+      return {
+        simulated: true,
+        message: "SAP sync is disabled",
+        DocNum: docNum,
+      };
+    }
+
+    const sessionId = await getSessionId();
+
+    console.log(`Finding SAP order with DocNum ${docNum}...`);
+
+    // ✅ STEP 1: Get the DocEntry from DocNum
+    const searchResponse = await axios.get(
+      `${SAP_CONFIG.serviceLayerUrl}/Orders?$filter=DocNum eq ${docNum}&$select=DocEntry,DocNum,CardCode`,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `B1SESSION=${sessionId}`,
+        },
+      }
+    );
+
+    if (!searchResponse.data.value || searchResponse.data.value.length === 0) {
+      throw new Error(`Order with DocNum ${docNum} not found in SAP`);
+    }
+
+    const sapOrder = searchResponse.data.value[0];
+    const docEntry = sapOrder.DocEntry;
+
+    console.log(`Found SAP order: DocEntry=${docEntry}, DocNum=${docNum}, CardCode=${sapOrder.CardCode}`);
+
+    // ✅ STEP 2: Update using DocEntry
+    console.log(`Updating sales order DocEntry ${docEntry} in SAP B1...`);
+    console.log("Update data being sent:", JSON.stringify(orderData, null, 2));
+
+    const response = await axios.patch(
+      `${SAP_CONFIG.serviceLayerUrl}/Orders(${docEntry})`,
+      orderData,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `B1SESSION=${sessionId}`,
+        },
+      }
+    );
+
+    console.log("Sales order updated successfully in SAP B1");
+
+    // SAP PATCH doesn't return the full object, so fetch it
+    const updatedOrder = await exports.getSalesOrderFromSAP(docEntry);
+
+    return updatedOrder;
+  } catch (error) {
+    console.error("Error updating sales order in SAP B1:", error.message);
+    if (error.response) {
+      console.error("SAP Error details:", error.response.data);
+
+      if (
+        error.response.data &&
+        error.response.data.error &&
+        error.response.data.error.message
+      ) {
+        console.error(
+          "Error field details:",
+          error.response.data.error.message.value
+        );
+      }
+    }
+
+    if (error.response && error.response.status === 401) {
+      console.log("Session expired, attempting to login again...");
+      sessionId = null;
+      await getSessionId();
+      return exports.updateSalesOrderInSAP(docNum, orderData);
+    }
+
+    throw new Error(`SAP Error: ${error.message}`);
   }
 };

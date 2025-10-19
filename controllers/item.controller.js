@@ -126,12 +126,8 @@ exports.searchItems = async (req, res) => {
   try {
     const searchTerm = req.query.q;
 
-    if (!searchTerm) {
-      return res.status(400).json({
-        success: false,
-        message: "Please provide a search term",
-      });
-    }
+    console.log("Search Term:", searchTerm); // Debugging line
+
 
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
@@ -167,6 +163,7 @@ exports.searchItems = async (req, res) => {
       data: items,
     });
   } catch (error) {
+    console.error("Error fetching items:", error);  
     res.status(500).json({
       success: false,
       message: "Server Error",

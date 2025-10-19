@@ -49,6 +49,8 @@ const orderPdfRoutes = require("./routes/orderPdf.routes");
 const deliveryNoteRoutes = require("./routes/deliveryNoteRoutes");
 const deliveryNotePdfRoutes = require('./routes/deliveryNotePdfRoutes');
 const invoicePdfRoutes = require("./routes/invoicePdfRoutes");
+const returnRoutes = require('./routes/returnRoutes');
+const creditNoteRoutes = require('./routes/creditNoteRoutes');
 // const vendorEmailRoutes = require('./routes/vendorEmailRoutes');
 const config = require("./services/config");
 const desktimeJob = require("./jobs/desktimeJob");
@@ -199,6 +201,8 @@ app.use("/api/order-pdf", orderPdfRoutes);
 app.use("/api/delivery-notes", deliveryNoteRoutes);
 app.use("/api/delivery-note-pdf", deliveryNotePdfRoutes);
 app.use("/api/invoice-pdf", invoicePdfRoutes);
+app.use('/api/returns', returnRoutes);
+app.use('/api/credit-notes', creditNoteRoutes);
 // app.use('/api/vendor-email', vendorEmailRoutes);
 // Health check route
 app.get("/health", (req, res) => {

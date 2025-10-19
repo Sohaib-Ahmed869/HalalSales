@@ -18,10 +18,7 @@ async function formatDeliveryNoteForSAP(deliveryNote) {
         DocDueDate: deliveryNote.DocDueDate || today,
         Comments: deliveryNote.Comments || "",
         U_Notes: deliveryNote.U_Notes || "",
-
-        // Include price list if available
         PriceList: deliveryNote.PriceList ? parseInt(deliveryNote.PriceList, 10) : 2,
-
         DocumentLines: [],
     };
 
@@ -33,19 +30,20 @@ async function formatDeliveryNoteForSAP(deliveryNote) {
                 Quantity: Number(line.Quantity || 0),
                 UnitPrice: Number(line.Price || line.UnitPrice || 0),
                 ItemDescription: line.ItemDescription || "",
-
-                // Include price list for each line
                 PriceList: line.PriceList
                     ? parseInt(line.PriceList, 10)
                     : deliveryNote.PriceList
                         ? parseInt(deliveryNote.PriceList, 10)
                         : 2,
-
-                // ✅ DO NOT include BaseType, BaseEntry, BaseLine
-                // This creates a standalone delivery note
-
                 LineNum: index,
             };
+
+            // ✅ CRITICAL: Include base document references if available
+            if (line.BaseType && line.BaseEntry) {
+                sapLine.BaseType = Number(line.BaseType);
+                sapLine.BaseEntry = Number(line.BaseEntry);
+                sapLine.BaseLine = Number(line.BaseLine !== undefined ? line.BaseLine : index);
+            }
 
             return sapLine;
         });
@@ -64,6 +62,7 @@ async function formatDeliveryNoteForSAP(deliveryNote) {
     console.log("SAP Delivery Note formatted:", {
         CardCode: sapDeliveryNote.CardCode,
         DocumentLines: sapDeliveryNote.DocumentLines.length,
+        HasBaseReferences: sapDeliveryNote.DocumentLines.some(l => l.BaseType === 17)
     });
 
     return sapDeliveryNote;
@@ -185,7 +184,7 @@ exports.createDeliveryNoteFromOrder = async (req, res) => {
 
         // Check if delivery note already exists for this order
         const existingDeliveryNote = await DeliveryNote.findOne({
-            BaseEntry: salesOrder.DocEntry
+            BaseEntry: salesOrder.SAPDocEntry // Check by SAP DocEntry
         });
 
         if (existingDeliveryNote) {
@@ -194,36 +193,6 @@ exports.createDeliveryNoteFromOrder = async (req, res) => {
                 message: "Delivery note already exists for this order",
                 data: existingDeliveryNote,
             });
-        }
-
-        // *** UPDATED DOCNUM GENERATION FOR DELIVERY NOTES ***
-        // Try to get the next DocNum from SAP first
-        let newDocNum;
-        let newDocEntry;
-
-        try {
-            // Import the function
-            const { getNextDeliveryNoteDocNumFromSAP } = require("../utils/sapB1Integration");
-            newDocNum = await getNextDeliveryNoteDocNumFromSAP();
-
-            if (newDocNum) {
-                console.log(`Using SAP-aligned Delivery Note DocNum: ${newDocNum}`);
-                newDocEntry = newDocNum; // Use the same number for both
-            } else {
-                throw new Error("Could not get DocNum from SAP");
-            }
-        } catch (sapError) {
-            console.warn(
-                "Could not get Delivery Note DocNum from SAP, falling back to local generation:",
-                sapError.message
-            );
-
-            // Fallback to local DocEntry generation
-            const lastDeliveryNote = await DeliveryNote.findOne().sort({ DocEntry: -1 });
-            newDocEntry = lastDeliveryNote ? lastDeliveryNote.DocEntry + 1 : 1;
-            newDocNum = newDocEntry;
-
-            console.log(`Using local Delivery Note DocNum: ${newDocNum}`);
         }
 
         // *** CRITICAL: Check if sales order is synced with SAP ***
@@ -239,7 +208,29 @@ exports.createDeliveryNoteFromOrder = async (req, res) => {
             });
         }
 
-        // Create delivery note from order
+        // Get next DocNum from SAP
+        let newDocNum;
+        let newDocEntry;
+
+        try {
+            const { getNextDeliveryNoteDocNumFromSAP } = require("../utils/sapB1Integration");
+            newDocNum = await getNextDeliveryNoteDocNumFromSAP();
+
+            if (newDocNum) {
+                console.log(`Using SAP-aligned Delivery Note DocNum: ${newDocNum}`);
+                newDocEntry = newDocNum;
+            } else {
+                throw new Error("Could not get DocNum from SAP");
+            }
+        } catch (sapError) {
+            console.warn("Could not get Delivery Note DocNum from SAP, falling back to local generation:", sapError.message);
+            const lastDeliveryNote = await DeliveryNote.findOne().sort({ DocEntry: -1 });
+            newDocEntry = lastDeliveryNote ? lastDeliveryNote.DocEntry + 1 : 1;
+            newDocNum = newDocEntry;
+            console.log(`Using local Delivery Note DocNum: ${newDocNum}`);
+        }
+
+        // Create delivery note from order with proper base references
         const deliveryNote = new DeliveryNote({
             DocEntry: newDocEntry,
             DocNum: newDocNum,
@@ -265,18 +256,30 @@ exports.createDeliveryNoteFromOrder = async (req, res) => {
             CreationDate: new Date(),
             UpdateDate: new Date(),
 
-            // Reference to source order - USE SAP DOCENTRY
+            // ✅ CRITICAL: Reference to source order - USE SAP DOCENTRY
             BaseType: 17, // Sales Order
-            BaseEntry: salesOrder.SAPDocEntry, // *** USE SAP DOCENTRY, NOT LOCAL ***
+            BaseEntry: salesOrder.SAPDocEntry, // *** USE SAP DOCENTRY ***
             OriginatingOrder: salesOrder.DocNum, // Keep local DocNum for reference
 
-            // Document lines - map from order
+            // ✅ CRITICAL: Document lines with proper base references
             DocumentLines: salesOrder.DocumentLines.map((line, index) => ({
-                ...line.toObject(),
                 LineNum: index,
-                BaseType: 17,
-                BaseEntry: salesOrder.DocEntry,
+                ItemCode: line.ItemCode,
+                ItemDescription: line.ItemDescription,
+                Quantity: line.Quantity,
+                Price: line.Price || line.UnitPrice,
+                UnitPrice: line.Price || line.UnitPrice,
+                PriceAfterVAT: line.PriceAfterVAT,
+                Currency: line.Currency || salesOrder.DocCurrency,
+                LineTotal: line.LineTotal,
+                VatGroup: line.VatGroup,
+                PriceList: line.PriceList || salesOrder.PriceList,
+
+                // ✅ Base document references for each line
+                BaseType: 17, // Sales Order
+                BaseEntry: salesOrder.SAPDocEntry, // *** USE SAP DOCENTRY ***
                 BaseLine: line.LineNum,
+
                 ShipDate: new Date(),
                 ActualDeliveryDate: new Date(),
             })),
@@ -295,6 +298,8 @@ exports.createDeliveryNoteFromOrder = async (req, res) => {
         });
 
         await deliveryNote.save();
+
+        console.log(`✅ Created delivery note ${newDocNum} with base order DocEntry ${salesOrder.SAPDocEntry}`);
 
         res.status(201).json({
             success: true,
@@ -315,9 +320,10 @@ exports.createDeliveryNoteFromOrder = async (req, res) => {
 // Bulk create delivery notes from multiple orders
 exports.bulkCreateDeliveryNotesFromOrders = async (req, res) => {
     try {
-        const { orderDocNums, autoSync = false } = req.body;
+        const { orderDocNums, autoSync = false, orderNotes = {} } = req.body;
 
         console.log('Request to bulk create delivery notes from orders:', orderDocNums);
+
         if (!orderDocNums || !Array.isArray(orderDocNums) || orderDocNums.length === 0) {
             return res.status(400).json({
                 success: false,
@@ -361,9 +367,9 @@ exports.bulkCreateDeliveryNotesFromOrders = async (req, res) => {
                     continue;
                 }
 
-                // Check if delivery note already exists - check by SAP DocEntry
+                // Check if delivery note already exists
                 const existingDeliveryNote = await DeliveryNote.findOne({
-                    BaseEntry: salesOrder.SAPDocEntry // *** USE SAP DOCENTRY ***
+                    BaseEntry: salesOrder.SAPDocEntry // *** CHECK BY SAP DOCENTRY ***
                 });
 
                 if (existingDeliveryNote) {
@@ -376,8 +382,7 @@ exports.bulkCreateDeliveryNotesFromOrders = async (req, res) => {
                     continue;
                 }
 
-                // *** UPDATED DOCNUM GENERATION FOR DELIVERY NOTES ***
-                // Try to get the next DocNum from SAP first
+                // Get next DocNum
                 let newDocNum;
                 let newDocEntry;
 
@@ -392,20 +397,26 @@ exports.bulkCreateDeliveryNotesFromOrders = async (req, res) => {
                         throw new Error("Could not get DocNum from SAP");
                     }
                 } catch (sapError) {
-                    console.warn(
-                        "Could not get Delivery Note DocNum from SAP, falling back to local generation:",
-                        sapError.message
-                    );
-
+                    console.warn("Could not get Delivery Note DocNum from SAP, falling back to local generation:", sapError.message);
                     const lastDeliveryNote = await DeliveryNote.findOne().sort({ DocEntry: -1 });
                     newDocEntry = lastDeliveryNote ? lastDeliveryNote.DocEntry + 1 : 1;
                     newDocNum = newDocEntry;
-
                     console.log(`Using local Delivery Note DocNum: ${newDocNum}`);
                 }
 
-                // Create delivery note
-                // Create delivery note
+                // Get custom note for this order
+                const customNote = orderNotes[docEntry] || "";
+                const deliveryNoteComments = customNote
+                    ? `Delivery note for order #${salesOrder.DocNum}\n\n${customNote}`
+                    : `Delivery note for order #${salesOrder.DocNum}`;
+
+                // Update sales order with custom note if provided
+                if (customNote) {
+                    salesOrder.U_Notes = (salesOrder.U_Notes || "") + "\n\n" + customNote;
+                    await salesOrder.save();
+                }
+
+                // Create delivery note with proper base references
                 const deliveryNote = new DeliveryNote({
                     DocEntry: newDocEntry,
                     DocNum: newDocNum,
@@ -424,37 +435,55 @@ exports.bulkCreateDeliveryNotesFromOrders = async (req, res) => {
                     TaxDate: new Date(),
                     CreationDate: new Date(),
                     UpdateDate: new Date(),
+
+                    // ✅ Base references
                     BaseType: 17,
-                    BaseEntry: salesOrder.SAPDocEntry, // *** USE SAP DOCENTRY ***
-                    OriginatingOrder: salesOrder.DocNum, // Keep local DocNum for reference
+                    BaseEntry: salesOrder.SAPDocEntry, // *** SAP DOCENTRY ***
+                    OriginatingOrder: salesOrder.DocNum,
+
+                    // ✅ Lines with base references
                     DocumentLines: salesOrder.DocumentLines.map((line, index) => ({
-                        ...line.toObject(),
                         LineNum: index,
+                        ItemCode: line.ItemCode,
+                        ItemDescription: line.ItemDescription,
+                        Quantity: line.Quantity,
+                        Price: line.Price || line.UnitPrice,
+                        UnitPrice: line.Price || line.UnitPrice,
+                        PriceAfterVAT: line.PriceAfterVAT,
+                        Currency: line.Currency || salesOrder.DocCurrency,
+                        LineTotal: line.LineTotal,
+                        VatGroup: line.VatGroup,
+                        PriceList: line.PriceList || salesOrder.PriceList,
+
+                        // ✅ Base references
                         BaseType: 17,
-                        BaseEntry: salesOrder.DocEntry,
+                        BaseEntry: salesOrder.SAPDocEntry, // *** SAP DOCENTRY ***
                         BaseLine: line.LineNum,
+
                         ShipDate: new Date(),
                         ActualDeliveryDate: new Date(),
                     })),
+
                     DocumentStatus: "bost_Open",
                     SyncedWithSAP: false,
                     LocalStatus: "Created",
                     salesAgent: salesOrder.salesAgent,
-                    Comments: `Delivery note for order #${salesOrder.DocNum}`,
-                    U_Notes: salesOrder.U_Notes || "",
+                    Comments: deliveryNoteComments,
+                    U_Notes: customNote || salesOrder.U_Notes || "",
                 });
 
                 await deliveryNote.save();
 
                 results.successful.push({
                     docEntry: newDocEntry,
-                    docNum: newDocEntry,
+                    docNum: newDocNum,
                     orderDocEntry: salesOrder.DocEntry,
                     orderNum: salesOrder.DocNum,
                     cardCode: salesOrder.CardCode,
+                    sapOrderDocEntry: salesOrder.SAPDocEntry, // For reference
                 });
 
-                console.log(`✅ Created delivery note ${newDocEntry} for order ${salesOrder.DocNum}`);
+                console.log(`✅ Created delivery note ${newDocNum} for order ${salesOrder.DocNum} (mapped to SAP order ${salesOrder.SAPDocEntry})`);
 
             } catch (error) {
                 console.error(`❌ Error processing order ${docEntry}:`, error);
@@ -465,18 +494,17 @@ exports.bulkCreateDeliveryNotesFromOrders = async (req, res) => {
             }
         }
 
-        // If autoSync is enabled, start background sync (don't wait for it)
+        // If autoSync is enabled, start background sync
         if (autoSync && results.successful.length > 0) {
             const deliveryNoteIds = results.successful.map(r => r.docEntry);
 
-            // Start background sync - don't await
             setImmediate(async () => {
                 try {
                     console.log("Starting background SAP sync for delivery notes...");
                     await exports.bulkPushDeliveryNotesToSAP({
                         body: { deliveryNoteDocEntries: deliveryNoteIds }
                     }, {
-                        status: () => ({ json: () => { } }) // Mock response 
+                        status: () => ({ json: () => { } })
                     });
                 } catch (error) {
                     console.error("Background sync error:", error);
@@ -635,7 +663,6 @@ exports.bulkPushDeliveryNotesToSAP = async (req, res) => {
     }
 };
 
-// Get all delivery notes with filters
 exports.getAllDeliveryNotes = async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
@@ -661,6 +688,11 @@ exports.getAllDeliveryNotes = async (req, res) => {
             } else if (req.query.syncStatus === "failed") {
                 query.LocalStatus = "SyncFailed";
             }
+        }
+
+        // **NEW: Filter for returns**
+        if (req.query.excludeReturns === "true") {
+            query.hasReturns = { $ne: true };
         }
 
         if (req.query.fromDate && req.query.toDate) {
@@ -696,7 +728,102 @@ exports.getAllDeliveryNotes = async (req, res) => {
         });
     }
 };
+// Add this new function to controllers/deliveryNoteController.js
 
+exports.getDeliveryNoteWithReturns = async (req, res) => {
+    try {
+        const { docEntry } = req.params;
+
+        const deliveryNote = await DeliveryNote.findOne({ DocEntry: docEntry })
+            .populate("salesAgent", "firstName lastName email")
+            .lean();
+
+        if (!deliveryNote) {
+            return res.status(404).json({
+                success: false,
+                message: "Delivery note not found"
+            });
+        }
+
+        // If no returns, return as-is
+        if (!deliveryNote.hasReturns || !deliveryNote.returnDocEntries || deliveryNote.returnDocEntries.length === 0) {
+            return res.status(200).json({
+                success: true,
+                data: {
+                    deliveryNote,
+                    returns: [],
+                    netLines: deliveryNote.DocumentLines.map(line => ({
+                        ...line,
+                        deliveredQty: line.Quantity,
+                        returnedQty: 0,
+                        netQty: line.Quantity,
+                        netTotal: line.Quantity * (line.Price || line.UnitPrice || 0)
+                    })),
+                    netDocTotal: deliveryNote.DocTotal,
+                    totalReturnedAmount: 0
+                }
+            });
+        }
+
+        // Fetch all returns
+        const Return = require("../models/Return");
+        const returns = await Return.find({
+            DocEntry: { $in: deliveryNote.returnDocEntries }
+        }).lean();
+
+        // Calculate returned quantities per item
+        const returnedQuantities = {};
+        let totalReturnAmount = 0;
+
+        returns.forEach(returnDoc => {
+            if (returnDoc.DocumentLines) {
+                returnDoc.DocumentLines.forEach(line => {
+                    const key = line.ItemCode;
+                    returnedQuantities[key] = (returnedQuantities[key] || 0) + line.Quantity;
+                    totalReturnAmount += (line.Quantity * line.Price);
+                });
+            }
+        });
+
+        // Calculate net lines
+        const netLines = deliveryNote.DocumentLines.map(line => {
+            const deliveredQty = line.Quantity || 0;
+            const returnedQty = returnedQuantities[line.ItemCode] || 0;
+            const netQty = deliveredQty - returnedQty;
+            const netTotal = netQty * (line.Price || line.UnitPrice || 0);
+
+            return {
+                ...line,
+                deliveredQty,
+                returnedQty,
+                netQty,
+                netTotal
+            };
+        });
+
+        const netDocTotal = deliveryNote.DocTotal - totalReturnAmount;
+
+        res.status(200).json({
+            success: true,
+            data: {
+                deliveryNote,
+                returns,
+                netLines,
+                netDocTotal,
+                totalReturnedAmount: totalReturnAmount,
+                netVatSum: netDocTotal * 0.055
+            }
+        });
+
+    } catch (error) {
+        console.error("Error fetching delivery note with returns:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error fetching delivery note details",
+            error: error.message
+        });
+    }
+};
 // Get single delivery note
 exports.getDeliveryNoteByDocEntry = async (req, res) => {
     try {
@@ -791,6 +918,209 @@ exports.createDeliveryNoteInSAP = async (deliveryNoteData) => {
         }
 
         throw new Error(`SAP Error: ${error.message}`);
+    }
+};
+
+// Live sync delivery notes with SAP
+exports.liveSyncDeliveryNotesWithSAP = async (req, res) => {
+    try {
+        console.log("Initiating live sync of delivery notes with SAP...");
+        const { fromDate, toDate } = req.query;
+
+        console.log("\n" + "=".repeat(60));
+        console.log("STARTING LIVE SYNC: DELIVERY NOTES");
+        console.log("=".repeat(60));
+
+        const filters = {};
+        if (fromDate) filters.fromDate = fromDate;
+        if (toDate) filters.toDate = toDate;
+
+        // Fetch delivery notes from SAP
+        const sapDeliveryNotes = await require("../utils/sapB1Integration").fetchDeliveryNotesFromSAP(filters);
+
+        console.log(`Fetched ${sapDeliveryNotes.length} delivery notes from SAP`);
+
+        const results = {
+            created: 0,
+            updated: 0,
+            unchanged: 0,
+            errors: [],
+            details: {
+                created: [],
+                updated: [],
+                unchanged: []
+            }
+        };
+
+        for (const sapDN of sapDeliveryNotes) {
+            try {
+                const existingDN = await DeliveryNote.findOne({ DocNum: sapDN.DocNum });
+
+                if (!existingDN) {
+                    // CREATE NEW DELIVERY NOTE
+                    const newDN = new DeliveryNote({
+                        DocEntry: sapDN.DocEntry,
+                        DocNum: sapDN.DocNum,
+                        DocType: sapDN.DocObjectCode || "dDocument_Items",
+                        CardCode: sapDN.CardCode,
+                        CardName: sapDN.CardName,
+                        Address: sapDN.Address,
+                        Address2: sapDN.Address2,
+                        DocDate: sapDN.DocDate,
+                        DocDueDate: sapDN.DocDueDate,
+                        TaxDate: sapDN.TaxDate,
+                        CreationDate: sapDN.CreationDate || new Date(),
+                        UpdateDate: new Date(),
+                        DocTotal: sapDN.DocTotal,
+                        DocCurrency: sapDN.DocCurrency || "EUR",
+                        VatSum: sapDN.VatSum,
+                        DiscountPercent: sapDN.DiscountPercent,
+                        PriceList: sapDN.PriceList,
+                        BaseType: sapDN.BaseType,
+                        BaseEntry: sapDN.BaseEntry,
+                        OriginatingOrder: sapDN.U_SourceOrderNum || null,
+                        DocumentLines: sapDN.DocumentLines?.map((line, index) => ({
+                            LineNum: line.LineNum || index,
+                            ItemCode: line.ItemCode,
+                            ItemDescription: line.ItemDescription,
+                            Quantity: line.Quantity,
+                            Price: line.Price || line.UnitPrice,
+                            PriceAfterVAT: line.PriceAfterVAT,
+                            Currency: line.Currency || sapDN.DocCurrency,
+                            LineTotal: line.LineTotal,
+                            VatGroup: line.VatGroup,
+                            PriceList: line.PriceList || sapDN.PriceList,
+                            BaseType: line.BaseType,
+                            BaseEntry: line.BaseEntry,
+                            BaseLine: line.BaseLine,
+                            ShipDate: line.ShipDate,
+                            ActualDeliveryDate: line.ActualDeliveryDate
+                        })) || [],
+                        DocumentStatus: sapDN.DocumentStatus || "bost_Open",
+                        Cancelled: sapDN.Cancelled || "N",
+                        SyncedWithSAP: true,
+                        SAPDocEntry: sapDN.DocEntry,
+                        LocalStatus: "Synced",
+                        ImportDate: new Date(),
+                        ImportSource: "Live_Sync",
+                        Comments: sapDN.Comments || "",
+                        U_Notes: sapDN.U_Notes || "Imported via Live Sync from SAP B1"
+                    });
+
+                    await newDN.save();
+                    results.created++;
+                    results.details.created.push({
+                        DocNum: sapDN.DocNum,
+                        CardCode: sapDN.CardCode,
+                        DocTotal: sapDN.DocTotal
+                    });
+
+                    console.log(`✅ Created new delivery note: ${sapDN.DocNum}`);
+
+                } else {
+                    // UPDATE EXISTING DELIVERY NOTE (only if Open)
+                    if (existingDN.DocumentStatus === "bost_Open" || existingDN.DocumentStatus === "O") {
+                        let hasChanges = false;
+
+                        // Check for status change
+                        if (existingDN.DocumentStatus !== sapDN.DocumentStatus) {
+                            existingDN.DocumentStatus = sapDN.DocumentStatus;
+                            hasChanges = true;
+                        }
+
+                        // Check for line changes
+                        if (sapDN.DocumentLines && sapDN.DocumentLines.length > 0) {
+                            const sapLinesJson = JSON.stringify(sapDN.DocumentLines.map(l => ({
+                                ItemCode: l.ItemCode,
+                                Quantity: l.Quantity,
+                                Price: l.Price || l.UnitPrice
+                            })));
+                            const localLinesJson = JSON.stringify(existingDN.DocumentLines.map(l => ({
+                                ItemCode: l.ItemCode,
+                                Quantity: l.Quantity,
+                                Price: l.Price || l.UnitPrice
+                            })));
+
+                            if (sapLinesJson !== localLinesJson) {
+                                existingDN.DocumentLines = sapDN.DocumentLines.map((line, index) => ({
+                                    LineNum: line.LineNum || index,
+                                    ItemCode: line.ItemCode,
+                                    ItemDescription: line.ItemDescription,
+                                    Quantity: line.Quantity,
+                                    Price: line.Price || line.UnitPrice,
+                                    PriceAfterVAT: line.PriceAfterVAT,
+                                    Currency: line.Currency || sapDN.DocCurrency,
+                                    LineTotal: line.LineTotal,
+                                    VatGroup: line.VatGroup,
+                                    PriceList: line.PriceList || sapDN.PriceList,
+                                    BaseType: line.BaseType,
+                                    BaseEntry: line.BaseEntry,
+                                    BaseLine: line.BaseLine,
+                                    ShipDate: line.ShipDate,
+                                    ActualDeliveryDate: line.ActualDeliveryDate
+                                }));
+                                existingDN.DocTotal = sapDN.DocTotal;
+                                existingDN.VatSum = sapDN.VatSum;
+                                hasChanges = true;
+                            }
+                        }
+
+                        if (hasChanges) {
+                            existingDN.UpdateDate = new Date();
+                            existingDN.LocalStatus = "SyncedFromSAP";
+                            await existingDN.save();
+                            results.updated++;
+                            results.details.updated.push({
+                                DocNum: sapDN.DocNum,
+                                CardCode: sapDN.CardCode,
+                                status: sapDN.DocumentStatus
+                            });
+                            console.log(`🔄 Updated delivery note: ${sapDN.DocNum}`);
+                        } else {
+                            results.unchanged++;
+                            results.details.unchanged.push({
+                                DocNum: sapDN.DocNum
+                            });
+                        }
+                    } else {
+                        results.unchanged++;
+                        results.details.unchanged.push({
+                            DocNum: sapDN.DocNum,
+                            reason: "Closed in local system"
+                        });
+                    }
+                }
+
+            } catch (error) {
+                console.error(`❌ Error processing delivery note ${sapDN.DocNum}:`, error);
+                results.errors.push({
+                    DocNum: sapDN.DocNum,
+                    error: error.message
+                });
+            }
+        }
+
+        console.log("\n" + "=".repeat(60));
+        console.log("LIVE SYNC COMPLETED: DELIVERY NOTES");
+        console.log(`Created: ${results.created}`);
+        console.log(`Updated: ${results.updated}`);
+        console.log(`Unchanged: ${results.unchanged}`);
+        console.log(`Errors: ${results.errors.length}`);
+        console.log("=".repeat(60) + "\n");
+
+        res.status(200).json({
+            success: true,
+            message: `Live sync completed: ${results.created} created, ${results.updated} updated, ${results.unchanged} unchanged`,
+            data: results
+        });
+
+    } catch (error) {
+        console.error("Error in live sync:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error during live sync",
+            error: error.message
+        });
     }
 };
 

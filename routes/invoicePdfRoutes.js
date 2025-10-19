@@ -21,4 +21,6 @@ router.post(
     invoicePdfController.emailInvoiceToCustomer
 );
 
+router.post("/bulk-email-by-customer", invoicePdfController.bulkEmailInvoicesByCustomer);
+
 module.exports = router;

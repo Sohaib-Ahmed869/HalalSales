@@ -112,8 +112,7 @@ exports.generatePaymentLinkForOrder = async (req, res) => {
       (line) => `
       <tr>
         <td style="border: 1px solid #ddd; padding: 8px;">${line.ItemCode}</td>
-        <td style="border: 1px solid #ddd; padding: 8px;">${
-          line.ItemDescription
+        <td style="border: 1px solid #ddd; padding: 8px;">${line.ItemDescription
         }</td>
         <td style="border: 1px solid #ddd; padding: 8px;">${line.Quantity}</td>
         <td style="border: 1px solid #ddd; padding: 8px;">€${line.Price.toFixed(
@@ -128,8 +127,7 @@ exports.generatePaymentLinkForOrder = async (req, res) => {
 
     const emailHtml = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-      <h2 style="color: #333;">Demande de Paiement pour la Commande n°${
-        order.DocNum
+      <h2 style="color: #333;">Demande de Paiement pour la Commande n°${order.DocNum
       }</h2>
       <p>Chère ${order.CardName},</p>
       <p>Veuillez trouver ci-dessous le lien de paiement pour votre commande :</p>
@@ -140,8 +138,7 @@ exports.generatePaymentLinkForOrder = async (req, res) => {
         </a>
       </div>
       
-      <p><strong>Le lien de paiement expirera le ${
-        expiryDate.split("T")[0]
+      <p><strong>Le lien de paiement expirera le ${expiryDate.split("T")[0]
       }.</strong></p>
       
       <h3 style="color: #333;">Détails de la commande :</h3>
@@ -162,8 +159,8 @@ exports.generatePaymentLinkForOrder = async (req, res) => {
           <tr style="font-weight: bold; background-color: #f8f9fa;">
             <td colspan="4" style="border: 1px solid #ddd; padding: 12px; text-align: right;">Total de la commande :</td>
             <td style="border: 1px solid #ddd; padding: 12px;">€${order.DocTotal.toFixed(
-              2
-            )}</td>
+        2
+      )}</td>
           </tr>
         </tfoot>
       </table>
@@ -430,7 +427,7 @@ exports.bulkImportSalesOrders = async (req, res) => {
 
         // *** IMPORTANT: Mark as already synced with SAP and imported ***
         SyncedWithSAP: true, // These orders came FROM SAP
-        LocalStatus: "ImportedFromSAP", // Custom status to indicate origin
+        LocalStatus: "Synced", // Custom status to indicate origin
         SAPDocEntry: docEntry, // Use DocEntry as SAP reference
 
         // *** CRITICAL: No salesAgent - indicates SAP origin ***
@@ -981,6 +978,34 @@ exports.getAllOrders = async (req, res) => {
       }
     }
 
+    // *** UPDATED: Delivery date filter - checks both StartDeliveryDate and RequriedDate ***
+    if (req.query.deliveryDateFrom && req.query.deliveryDateTo) {
+      const fromDate = new Date(req.query.deliveryDateFrom);
+      const toDate = new Date(req.query.deliveryDateTo);
+
+      query.$or = query.$or || [];
+      query.$or.push(
+        { StartDeliveryDate: { $gte: fromDate, $lte: toDate } },
+        { RequriedDate: { $gte: fromDate, $lte: toDate } }
+      );
+    } else if (req.query.deliveryDateFrom) {
+      const fromDate = new Date(req.query.deliveryDateFrom);
+
+      query.$or = query.$or || [];
+      query.$or.push(
+        { StartDeliveryDate: { $gte: fromDate } },
+        { RequriedDate: { $gte: fromDate } }
+      );
+    } else if (req.query.deliveryDateTo) {
+      const toDate = new Date(req.query.deliveryDateTo);
+
+      query.$or = query.$or || [];
+      query.$or.push(
+        { StartDeliveryDate: { $lte: toDate } },
+        { RequriedDate: { $lte: toDate } }
+      );
+    }
+
     // Date range filter
     if (req.query.fromDate && req.query.toDate) {
       query.DocDate = {
@@ -1024,7 +1049,7 @@ exports.getAllOrders = async (req, res) => {
       data: orders,
     });
   } catch (error) {
-    console.error("Error fetching orderformatOrderForSAP s:", error);
+    console.error("Error fetching orders:", error);
     res.status(500).json({
       success: false,
       message: "Error fetching orders",
@@ -1116,6 +1141,198 @@ exports.getOrderByDocEntry = async (req, res) => {
       success: false,
       message: "Error fetching order",
       error: error.message,
+    });
+  }
+};
+
+// Live sync orders with SAP
+exports.liveSyncOrdersWithSAP = async (req, res) => {
+  try {
+    const { fromDate, toDate } = req.query;
+
+    console.log("\n" + "=".repeat(60));
+    console.log("STARTING LIVE SYNC: ORDERS");
+    console.log("=".repeat(60));
+
+    const filters = {};
+    if (fromDate) filters.fromDate = fromDate;
+    if (toDate) filters.toDate = toDate;
+
+    // Fetch orders from SAP
+    const sapOrders = await require("../utils/sapB1Integration").fetchSalesOrdersFromSAP(filters);
+
+    console.log(`Fetched ${sapOrders.length} orders from SAP`);
+
+    const results = {
+      created: 0,
+      updated: 0,
+      unchanged: 0,
+      errors: [],
+      details: {
+        created: [],
+        updated: [],
+        unchanged: []
+      }
+    };
+
+    for (const sapOrder of sapOrders) {
+      try {
+        // Find existing order by DocNum (SAP's document number)
+        const existingOrder = await SalesOrder.findOne({ DocNum: sapOrder.DocNum });
+
+        if (!existingOrder) {
+          // CREATE NEW ORDER
+          const newOrder = new SalesOrder({
+            DocEntry: sapOrder.DocEntry,
+            DocNum: sapOrder.DocNum,
+            DocType: sapOrder.DocObjectCode || "dDocument_Items",
+            CardCode: sapOrder.CardCode,
+            CardName: sapOrder.CardName,
+            Address: sapOrder.Address,
+            Address2: sapOrder.Address2,
+            DocDate: sapOrder.DocDate,
+            DocDueDate: sapOrder.DocDueDate,
+            TaxDate: sapOrder.TaxDate,
+            CreationDate: sapOrder.CreationDate || new Date(),
+            UpdateDate: new Date(),
+            DocTotal: sapOrder.DocTotal,
+            DocCurrency: sapOrder.DocCurrency || "EUR",
+            VatSum: sapOrder.VatSum,
+            DiscountPercent: sapOrder.DiscountPercent,
+            PriceList: sapOrder.PriceList,
+            StartDeliveryDate: sapOrder.StartDeliveryDate || sapOrder.DocDate,
+            DocumentLines: sapOrder.DocumentLines?.map((line, index) => ({
+              LineNum: line.LineNum || index,
+              ItemCode: line.ItemCode,
+              ItemDescription: line.ItemDescription,
+              Quantity: line.Quantity,
+              Price: line.Price || line.UnitPrice,
+              PriceAfterVAT: line.PriceAfterVAT,
+              Currency: line.Currency || sapOrder.DocCurrency,
+              LineTotal: line.LineTotal,
+              VatGroup: line.VatGroup,
+              PriceList: line.PriceList || sapOrder.PriceList
+            })) || [],
+            DocumentStatus: sapOrder.DocumentStatus || "bost_Open",
+            Cancelled: sapOrder.Cancelled || "N",
+            SyncedWithSAP: true,
+            SAPDocEntry: sapOrder.DocEntry,
+            LocalStatus: "Synced",
+            ImportDate: new Date(),
+            ImportSource: "Live_Sync",
+            Comments: sapOrder.Comments || "",
+            U_Notes: "Imported via Live Sync from SAP B1"
+          });
+
+          await newOrder.save();
+          results.created++;
+          results.details.created.push({
+            DocNum: sapOrder.DocNum,
+            CardCode: sapOrder.CardCode,
+            DocTotal: sapOrder.DocTotal
+          });
+
+          console.log(`✅ Created new order: ${sapOrder.DocNum}`);
+
+        } else {
+          // UPDATE EXISTING ORDER (only if Open in our system)
+          if (existingOrder.DocumentStatus === "bost_Open" || existingOrder.DocumentStatus === "O") {
+            let hasChanges = false;
+
+            // Check for status change
+            if (existingOrder.DocumentStatus !== sapOrder.DocumentStatus) {
+              existingOrder.DocumentStatus = sapOrder.DocumentStatus;
+              hasChanges = true;
+            }
+
+            // Check for line changes
+            if (sapOrder.DocumentLines && sapOrder.DocumentLines.length > 0) {
+              const sapLinesJson = JSON.stringify(sapOrder.DocumentLines.map(l => ({
+                ItemCode: l.ItemCode,
+                Quantity: l.Quantity,
+                Price: l.Price || l.UnitPrice
+              })));
+              const localLinesJson = JSON.stringify(existingOrder.DocumentLines.map(l => ({
+                ItemCode: l.ItemCode,
+                Quantity: l.Quantity,
+                Price: l.Price || l.UnitPrice
+              })));
+
+              if (sapLinesJson !== localLinesJson) {
+                existingOrder.DocumentLines = sapOrder.DocumentLines.map((line, index) => ({
+                  LineNum: line.LineNum || index,
+                  ItemCode: line.ItemCode,
+                  ItemDescription: line.ItemDescription,
+                  Quantity: line.Quantity,
+                  Price: line.Price || line.UnitPrice,
+                  PriceAfterVAT: line.PriceAfterVAT,
+                  Currency: line.Currency || sapOrder.DocCurrency,
+                  LineTotal: line.LineTotal,
+                  VatGroup: line.VatGroup,
+                  PriceList: line.PriceList || sapOrder.PriceList
+                }));
+                existingOrder.DocTotal = sapOrder.DocTotal;
+                existingOrder.VatSum = sapOrder.VatSum;
+                hasChanges = true;
+              }
+            }
+
+            if (hasChanges) {
+              existingOrder.UpdateDate = new Date();
+              existingOrder.LocalStatus = "SyncedFromSAP";
+              await existingOrder.save();
+              results.updated++;
+              results.details.updated.push({
+                DocNum: sapOrder.DocNum,
+                CardCode: sapOrder.CardCode,
+                status: sapOrder.DocumentStatus
+              });
+              console.log(`🔄 Updated order: ${sapOrder.DocNum}`);
+            } else {
+              results.unchanged++;
+              results.details.unchanged.push({
+                DocNum: sapOrder.DocNum
+              });
+            }
+          } else {
+            // Order is closed in our system, don't update
+            results.unchanged++;
+            results.details.unchanged.push({
+              DocNum: sapOrder.DocNum,
+              reason: "Closed in local system"
+            });
+          }
+        }
+
+      } catch (error) {
+        console.error(`❌ Error processing order ${sapOrder.DocNum}:`, error);
+        results.errors.push({
+          DocNum: sapOrder.DocNum,
+          error: error.message
+        });
+      }
+    }
+
+    console.log("\n" + "=".repeat(60));
+    console.log("LIVE SYNC COMPLETED: ORDERS");
+    console.log(`Created: ${results.created}`);
+    console.log(`Updated: ${results.updated}`);
+    console.log(`Unchanged: ${results.unchanged}`);
+    console.log(`Errors: ${results.errors.length}`);
+    console.log("=".repeat(60) + "\n");
+
+    res.status(200).json({
+      success: true,
+      message: `Live sync completed: ${results.created} created, ${results.updated} updated, ${results.unchanged} unchanged`,
+      data: results
+    });
+
+  } catch (error) {
+    console.error("Error in live sync:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error during live sync",
+      error: error.message
     });
   }
 };
@@ -1231,10 +1448,9 @@ exports.pushUnsyncedOrdersToSAP = async (req, res) => {
     for (const order of unsyncedOrders) {
       try {
         console.log(
-          `Processing order DocEntry: ${order.DocEntry} (Created by: ${
-            order.salesAgent
-              ? order.salesAgent.firstName + " " + order.salesAgent.lastName
-              : "System"
+          `Processing order DocEntry: ${order.DocEntry} (Created by: ${order.salesAgent
+            ? order.salesAgent.firstName + " " + order.salesAgent.lastName
+            : "System"
           })`
         );
 
@@ -1736,9 +1952,8 @@ exports.duplicateOrder = async (req, res) => {
       Payment_id: null,
       payment_status: null,
       Link_sent: false,
-      U_Notes: `Duplicated from order #${originalOrder.DocNum}. ${
-        originalOrder.U_Notes || ""
-      }`,
+      U_Notes: `Duplicated from order #${originalOrder.DocNum}. ${originalOrder.U_Notes || ""
+        }`,
     };
 
     const newOrder = new SalesOrder(duplicateData);
@@ -1763,3 +1978,207 @@ exports.duplicateOrder = async (req, res) => {
     });
   }
 };
+
+// Update an existing sales order
+exports.updateOrder = async (req, res) => {
+  try {
+    const { docEntry } = req.params;
+
+    console.log(`Updating order with DocEntry: ${docEntry}`);
+
+    // Find the existing order
+    const existingOrder = await SalesOrder.findOne({ DocNum: docEntry });
+
+    if (!existingOrder) {
+      return res.status(404).json({
+        success: false,
+        message: `Order with DocEntry ${docEntry} not found`,
+      });
+    }
+
+    // Check permissions for sales agents
+    if (
+      req.user.role === "sales_agent" &&
+      existingOrder.salesAgent &&
+      existingOrder.salesAgent.toString() !== req.user._id.toString()
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to update this order",
+      });
+    }
+
+    // Check permissions for sales managers
+    if (req.user.role === "sales_manager" && existingOrder.salesAgent) {
+      const agent = await User.findById(existingOrder.salesAgent);
+      if (!agent || agent.manager.toString() !== req.user._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: "Not authorized to update this order",
+        });
+      }
+    }
+
+    // Validate items if DocumentLines are being updated
+    if (req.body.DocumentLines && req.body.DocumentLines.length > 0) {
+      const itemCodes = req.body.DocumentLines.map((line) => line.ItemCode);
+      const items = await Item.find({ ItemCode: { $in: itemCodes } });
+
+      const itemMap = {};
+      items.forEach((item) => {
+        itemMap[item.ItemCode] = item;
+      });
+
+      const invalidItems = [];
+      for (const line of req.body.DocumentLines) {
+        const item = itemMap[line.ItemCode];
+
+        if (!item) {
+          invalidItems.push({
+            ItemCode: line.ItemCode,
+            error: "Item not found",
+          });
+          continue;
+        }
+
+        // Add item description if not provided
+        if (!line.ItemDescription && item.ItemName) {
+          line.ItemDescription = item.ItemName;
+        }
+      }
+
+      if (invalidItems.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Order contains invalid items",
+          invalidItems,
+        });
+      }
+
+      // Process document lines
+      const orderPriceList = req.body.PriceList || existingOrder.PriceList || "2";
+      req.body.DocumentLines = req.body.DocumentLines.map((line) => ({
+        ...line,
+        PriceList: line.PriceList
+          ? parseInt(line.PriceList, 10)
+          : parseInt(orderPriceList, 10),
+        LineTotal: (line.Quantity || 0) * (line.Price || 0),
+      }));
+
+      // Recalculate totals
+      let total = 0;
+      for (const line of req.body.DocumentLines) {
+        const lineTotal = line.Quantity * line.Price;
+        line.LineTotal = lineTotal;
+        total += lineTotal;
+      }
+      req.body.DocTotal = total;
+    }
+
+    // Update local order
+    const updateData = {
+      ...req.body,
+      UpdateDate: new Date(),
+      //  LocalStatus: existingOrder.SyncedWithSAP ? "Modified" : existingOrder.LocalStatus,
+    };
+
+    // Don't allow changing these critical fields
+    delete updateData.DocEntry;
+    delete updateData.DocNum;
+    delete updateData.SAPDocEntry;
+    delete updateData.SyncedWithSAP;
+    delete updateData.salesAgent;
+    delete updateData.CreationDate;
+
+    // Update the order in database
+    Object.assign(existingOrder, updateData);
+    await existingOrder.save();
+
+    console.log("Order updated in local database");
+
+    // If the order was previously synced with SAP, update it in SAP as well
+    if (existingOrder.DocNum) {
+      console.log("Order is synced with SAP, updating SAP order...", existingOrder.DocNum);
+
+      try {
+        const currentSAPOrder = await getSalesOrderFromSAP(existingOrder.DocNum);
+        console.log("Current SAP order customer:", currentSAPOrder.CardCode);
+        console.log("Local DB order customer:", existingOrder.CardCode);
+
+        if (currentSAPOrder.CardCode !== existingOrder.CardCode) {
+          console.warn("⚠️ Customer mismatch between SAP and local DB!");
+          console.warn(`SAP: ${currentSAPOrder.CardCode}, Local: ${existingOrder.CardCode}`);
+
+          // Option 1: Reject the update
+          return res.status(400).json({
+            success: false,
+            message: `Cannot update order: Customer mismatch. SAP has ${currentSAPOrder.CardCode}, but local DB has ${existingOrder.CardCode}. Customer cannot be changed after order creation.`,
+            sapCustomer: currentSAPOrder.CardCode,
+            localCustomer: existingOrder.CardCode
+          });
+        }
+
+        // ✅ USE THE NEW UPDATE-SPECIFIC FORMAT FUNCTION
+        const { formatOrderForSAPUpdate } = require("../utils/sapB1Integration");
+        const sapUpdateData = await formatOrderForSAPUpdate(existingOrder);
+
+        console.log("Clean SAP update data:", JSON.stringify(sapUpdateData, null, 2));
+
+        // Update in SAP
+        const { updateSalesOrderInSAP } = require("../utils/sapB1Integration");
+        await updateSalesOrderInSAP(existingOrder.DocNum, sapUpdateData);
+
+        existingOrder.LocalStatus = "Synced";
+        existingOrder.SyncErrors = null;
+        await existingOrder.save();
+
+        console.log("Order updated successfully in SAP");
+
+        return res.status(200).json({
+          success: true,
+          message: "Order updated successfully in both database and SAP",
+          data: existingOrder,
+          sapSync: {
+            success: true,
+            message: "Successfully synced to SAP",
+          },
+        });
+      } catch (sapError) {
+        console.error("Failed to update order in SAP:", sapError);
+
+        existingOrder.LocalStatus = "SyncFailed";
+        existingOrder.SyncErrors = sapError.message;
+        existingOrder.LastSyncAttempt = new Date();
+        await existingOrder.save();
+
+        return res.status(200).json({
+          success: true,
+          message: "Order updated in database but failed to sync with SAP",
+          data: existingOrder,
+          sapSync: {
+            success: false,
+            error: sapError.message,
+          },
+        });
+      }
+    } else {
+      // Order was never synced to SAP
+      return res.status(200).json({
+        success: true,
+        message: "Order updated successfully in database",
+        data: existingOrder,
+        sapSync: {
+          success: false,
+          message: "Order not synced with SAP",
+        },
+      });
+    }
+  } catch (error) {
+    console.error("Error updating order:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error updating order",
+      error: error.message,
+    });
+  }
+};  

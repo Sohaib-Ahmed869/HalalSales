@@ -42,7 +42,7 @@ const invoiceSchema = new mongoose.Schema(
     DocEntry: {
       type: Number,
       required: true,
-      unique: true,
+
     },
     DocNum: {
       type: Number,
@@ -343,6 +343,40 @@ const invoiceSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
     },
+    // Credit note tracking
+    hasCreditNotes: {
+      type: Boolean,
+      default: false,
+    },
+    creditNoteDocEntries: [{
+      type: Number
+    }],
+    totalCreditAmount: {
+      type: Number,
+      default: 0
+    },
+
+    // Payment tracking
+    hasPayments: {
+      type: Boolean,
+      default: false,
+    },
+    paymentDocEntries: [{
+      type: Number
+    }],
+    totalPaidAmount: {
+      type: Number,
+      default: 0
+    },
+    remainingBalance: {
+      type: Number,
+      default: 0
+    },
+    paymentStatus: {
+      type: String,
+      enum: ['Unpaid', 'Partially Paid', 'Fully Paid', 'Overpaid'],
+      default: 'Unpaid'
+    },
 
     // Document lines array
     DocumentLines: [
@@ -358,6 +392,7 @@ const invoiceSchema = new mongoose.Schema(
         LineTotal: Number,
         VatGroup: String,
       },
+
     ],
 
     // Document approval requests array

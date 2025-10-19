@@ -15,7 +15,7 @@ const upload = multer({
   fileFilter: (req, file, cb) => {
     if (
       file.mimetype ===
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
       file.mimetype === "application/vnd.ms-excel"
     ) {
       cb(null, true);
@@ -24,6 +24,8 @@ const upload = multer({
     }
   },
 });
+
+router.get("/live-sync", orderController.liveSyncOrdersWithSAP);
 
 // sales order routes
 router.post(
@@ -39,6 +41,11 @@ router.post(
   upload.single("file"),
   orderController.bulkImportSalesOrders
 );
+
+// @route   PUT /api/orders/:docEntry
+// @desc    Update an existing sales order
+// @access  Private
+router.put("/:docEntry", auth, orderController.updateOrder);
 
 // Statistics and analytics
 router.get("/stats", auth, orderController.getOrderStats);

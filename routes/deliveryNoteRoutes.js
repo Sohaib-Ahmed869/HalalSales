@@ -3,7 +3,7 @@ const express = require("express");
 const router = express.Router();
 const deliveryNoteController = require("../controllers/deliveryNoteController");
 const { auth } = require("../middleware/auth");
-
+router.get("/live-sync", deliveryNoteController.liveSyncDeliveryNotesWithSAP)
 // Get all delivery notes
 router.get(
     "/",
@@ -17,6 +17,8 @@ router.get(
     auth,
     deliveryNoteController.getDeliveryNoteByDocEntry
 );
+
+router.get("/:docEntry/with-returns", auth, deliveryNoteController.getDeliveryNoteWithReturns);
 
 // Create delivery note from order
 router.post(
