@@ -6,7 +6,7 @@ const morgan = require("morgan");
 const path = require("path");
 const fs = require("fs");
 require("dotenv").config();
-
+ 
 // Import routes
 const authRoutes = require("./routes/auth.routes");
 const customerRoutes = require("./routes/customer.routes");
@@ -261,3 +261,4 @@ process.on("unhandledRejection", (err) => {
     process.exit(1);
   }
 });
+ 

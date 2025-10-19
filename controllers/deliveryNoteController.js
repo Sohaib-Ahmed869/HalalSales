@@ -676,9 +676,9 @@ exports.getAllDeliveryNotes = async (req, res) => {
             query.CardCode = { $regex: req.query.cardCode, $options: "i" };
         }
 
-        if (req.query.status) {
-            query.DocumentStatus = req.query.status;
-        }
+
+        query.DocumentStatus = 'bost_Open';
+
 
         if (req.query.syncStatus) {
             if (req.query.syncStatus === "synced") {
@@ -921,205 +921,21 @@ exports.createDeliveryNoteInSAP = async (deliveryNoteData) => {
     }
 };
 
-// Live sync delivery notes with SAP
+// Live sync delivery notes with SAP - NOW USES STATUS SYNC
 exports.liveSyncDeliveryNotesWithSAP = async (req, res) => {
     try {
-        console.log("Initiating live sync of delivery notes with SAP...");
-        const { fromDate, toDate } = req.query;
-
         console.log("\n" + "=".repeat(60));
-        console.log("STARTING LIVE SYNC: DELIVERY NOTES");
+        console.log("STARTING LIVE SYNC: DELIVERY NOTES (Using Status Sync)");
         console.log("=".repeat(60));
 
-        const filters = {};
-        if (fromDate) filters.fromDate = fromDate;
-        if (toDate) filters.toDate = toDate;
-
-        // Fetch delivery notes from SAP
-        const sapDeliveryNotes = await require("../utils/sapB1Integration").fetchDeliveryNotesFromSAP(filters);
-
-        console.log(`Fetched ${sapDeliveryNotes.length} delivery notes from SAP`);
-
-        const results = {
-            created: 0,
-            updated: 0,
-            unchanged: 0,
-            errors: [],
-            details: {
-                created: [],
-                updated: [],
-                unchanged: []
-            }
-        };
-
-        for (const sapDN of sapDeliveryNotes) {
-            try {
-                const existingDN = await DeliveryNote.findOne({ DocNum: sapDN.DocNum });
-
-                if (!existingDN) {
-                    // CREATE NEW DELIVERY NOTE
-                    const newDN = new DeliveryNote({
-                        DocEntry: sapDN.DocEntry,
-                        DocNum: sapDN.DocNum,
-                        DocType: sapDN.DocObjectCode || "dDocument_Items",
-                        CardCode: sapDN.CardCode,
-                        CardName: sapDN.CardName,
-                        Address: sapDN.Address,
-                        Address2: sapDN.Address2,
-                        DocDate: sapDN.DocDate,
-                        DocDueDate: sapDN.DocDueDate,
-                        TaxDate: sapDN.TaxDate,
-                        CreationDate: sapDN.CreationDate || new Date(),
-                        UpdateDate: new Date(),
-                        DocTotal: sapDN.DocTotal,
-                        DocCurrency: sapDN.DocCurrency || "EUR",
-                        VatSum: sapDN.VatSum,
-                        DiscountPercent: sapDN.DiscountPercent,
-                        PriceList: sapDN.PriceList,
-                        BaseType: sapDN.BaseType,
-                        BaseEntry: sapDN.BaseEntry,
-                        OriginatingOrder: sapDN.U_SourceOrderNum || null,
-                        DocumentLines: sapDN.DocumentLines?.map((line, index) => ({
-                            LineNum: line.LineNum || index,
-                            ItemCode: line.ItemCode,
-                            ItemDescription: line.ItemDescription,
-                            Quantity: line.Quantity,
-                            Price: line.Price || line.UnitPrice,
-                            PriceAfterVAT: line.PriceAfterVAT,
-                            Currency: line.Currency || sapDN.DocCurrency,
-                            LineTotal: line.LineTotal,
-                            VatGroup: line.VatGroup,
-                            PriceList: line.PriceList || sapDN.PriceList,
-                            BaseType: line.BaseType,
-                            BaseEntry: line.BaseEntry,
-                            BaseLine: line.BaseLine,
-                            ShipDate: line.ShipDate,
-                            ActualDeliveryDate: line.ActualDeliveryDate
-                        })) || [],
-                        DocumentStatus: sapDN.DocumentStatus || "bost_Open",
-                        Cancelled: sapDN.Cancelled || "N",
-                        SyncedWithSAP: true,
-                        SAPDocEntry: sapDN.DocEntry,
-                        LocalStatus: "Synced",
-                        ImportDate: new Date(),
-                        ImportSource: "Live_Sync",
-                        Comments: sapDN.Comments || "",
-                        U_Notes: sapDN.U_Notes || "Imported via Live Sync from SAP B1"
-                    });
-
-                    await newDN.save();
-                    results.created++;
-                    results.details.created.push({
-                        DocNum: sapDN.DocNum,
-                        CardCode: sapDN.CardCode,
-                        DocTotal: sapDN.DocTotal
-                    });
-
-                    console.log(`✅ Created new delivery note: ${sapDN.DocNum}`);
-
-                } else {
-                    // UPDATE EXISTING DELIVERY NOTE (only if Open)
-                    if (existingDN.DocumentStatus === "bost_Open" || existingDN.DocumentStatus === "O") {
-                        let hasChanges = false;
-
-                        // Check for status change
-                        if (existingDN.DocumentStatus !== sapDN.DocumentStatus) {
-                            existingDN.DocumentStatus = sapDN.DocumentStatus;
-                            hasChanges = true;
-                        }
-
-                        // Check for line changes
-                        if (sapDN.DocumentLines && sapDN.DocumentLines.length > 0) {
-                            const sapLinesJson = JSON.stringify(sapDN.DocumentLines.map(l => ({
-                                ItemCode: l.ItemCode,
-                                Quantity: l.Quantity,
-                                Price: l.Price || l.UnitPrice
-                            })));
-                            const localLinesJson = JSON.stringify(existingDN.DocumentLines.map(l => ({
-                                ItemCode: l.ItemCode,
-                                Quantity: l.Quantity,
-                                Price: l.Price || l.UnitPrice
-                            })));
-
-                            if (sapLinesJson !== localLinesJson) {
-                                existingDN.DocumentLines = sapDN.DocumentLines.map((line, index) => ({
-                                    LineNum: line.LineNum || index,
-                                    ItemCode: line.ItemCode,
-                                    ItemDescription: line.ItemDescription,
-                                    Quantity: line.Quantity,
-                                    Price: line.Price || line.UnitPrice,
-                                    PriceAfterVAT: line.PriceAfterVAT,
-                                    Currency: line.Currency || sapDN.DocCurrency,
-                                    LineTotal: line.LineTotal,
-                                    VatGroup: line.VatGroup,
-                                    PriceList: line.PriceList || sapDN.PriceList,
-                                    BaseType: line.BaseType,
-                                    BaseEntry: line.BaseEntry,
-                                    BaseLine: line.BaseLine,
-                                    ShipDate: line.ShipDate,
-                                    ActualDeliveryDate: line.ActualDeliveryDate
-                                }));
-                                existingDN.DocTotal = sapDN.DocTotal;
-                                existingDN.VatSum = sapDN.VatSum;
-                                hasChanges = true;
-                            }
-                        }
-
-                        if (hasChanges) {
-                            existingDN.UpdateDate = new Date();
-                            existingDN.LocalStatus = "SyncedFromSAP";
-                            await existingDN.save();
-                            results.updated++;
-                            results.details.updated.push({
-                                DocNum: sapDN.DocNum,
-                                CardCode: sapDN.CardCode,
-                                status: sapDN.DocumentStatus
-                            });
-                            console.log(`🔄 Updated delivery note: ${sapDN.DocNum}`);
-                        } else {
-                            results.unchanged++;
-                            results.details.unchanged.push({
-                                DocNum: sapDN.DocNum
-                            });
-                        }
-                    } else {
-                        results.unchanged++;
-                        results.details.unchanged.push({
-                            DocNum: sapDN.DocNum,
-                            reason: "Closed in local system"
-                        });
-                    }
-                }
-
-            } catch (error) {
-                console.error(`❌ Error processing delivery note ${sapDN.DocNum}:`, error);
-                results.errors.push({
-                    DocNum: sapDN.DocNum,
-                    error: error.message
-                });
-            }
-        }
-
-        console.log("\n" + "=".repeat(60));
-        console.log("LIVE SYNC COMPLETED: DELIVERY NOTES");
-        console.log(`Created: ${results.created}`);
-        console.log(`Updated: ${results.updated}`);
-        console.log(`Unchanged: ${results.unchanged}`);
-        console.log(`Errors: ${results.errors.length}`);
-        console.log("=".repeat(60) + "\n");
-
-        res.status(200).json({
-            success: true,
-            message: `Live sync completed: ${results.created} created, ${results.updated} updated, ${results.unchanged} unchanged`,
-            data: results
-        });
-
+        // Simply call the status sync function
+        return await exports.syncDeliveryNoteStatusesFromSAP(req, res);
     } catch (error) {
         console.error("Error in live sync:", error);
         res.status(500).json({
             success: false,
             message: "Error during live sync",
-            error: error.message
+            error: error.message,
         });
     }
 };
@@ -1155,5 +971,361 @@ exports.getDeliveryNoteFromSAP = async (docEntry) => {
         }
 
         throw new Error(`SAP Error: ${error.message}`);
+    }
+};
+
+// Sync delivery note statuses from SAP - Sync statuses based on open DNs in SAP
+// Sync delivery note statuses from SAP - Sync statuses based on open DNs in SAP
+exports.syncDeliveryNoteStatusesFromSAP = async (req, res) => {
+    try {
+        console.log("\n" + "=".repeat(60));
+        console.log("STARTING DELIVERY NOTE STATUS SYNC FROM SAP");
+        console.log("=".repeat(60));
+
+        const { loginToSAP } = require("../utils/sapB1Integration");
+        const axios = require("axios");
+        const dotenv = require("dotenv");
+        dotenv.config();
+
+        const SAP_CONFIG = {
+            serviceLayerUrl: process.env.SAP_SERVICE_LAYER_URL,
+            companyDB: process.env.COMPANY_DB,
+            username: process.env.USER_NAME,
+            password: process.env.PASSWORD,
+        };
+
+        // Login to SAP
+        const sessionId = await loginToSAP();
+        const headers = {
+            "Content-Type": "application/json",
+            Cookie: `B1SESSION=${sessionId}`,
+        };
+
+        // *** FETCH ONLY OPEN DELIVERY NOTES FROM SAP ***
+        let openDNsInSAP = [];
+        let totalFetched = 0;
+
+        // Fetch OPEN delivery notes from SAP
+        let nextLink = `${SAP_CONFIG.serviceLayerUrl}/DeliveryNotes?$filter=DocumentStatus eq 'bost_Open'&$orderby=DocNum`;
+
+        console.log("Fetching open delivery notes from SAP...");
+
+        while (nextLink) {
+            try {
+                console.log(`Fetching batch from SAP...`);
+                const response = await axios.get(nextLink, { headers });
+
+                const currentBatch = response.data.value;
+                console.log(`Fetched ${currentBatch.length} delivery notes in this batch`);
+
+                // Store full delivery note details
+                openDNsInSAP.push(...currentBatch);
+                totalFetched += currentBatch.length;
+
+                console.log(`Total open delivery notes fetched so far: ${totalFetched}`);
+
+                // Get next link for pagination
+                nextLink = response.data["odata.nextLink"];
+
+                if (nextLink && nextLink.startsWith("DeliveryNotes")) {
+                    nextLink = `${SAP_CONFIG.serviceLayerUrl}/${nextLink}`;
+                }
+
+                // Small delay to avoid overwhelming SAP
+                if (nextLink) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+
+            } catch (error) {
+                console.error("Error fetching batch from SAP:", error.message);
+                if (error.response) {
+                    console.error("SAP Error details:", error.response.data);
+                }
+                break;
+            }
+        }
+
+        console.log(`\nTotal OPEN delivery notes in SAP: ${openDNsInSAP.length}`);
+
+        const sapOpenDocNums = openDNsInSAP.map(dn => dn.DocNum);
+        console.log("Sample open DocNums in SAP:", sapOpenDocNums.slice(0, 20), "...");
+
+        // Find ALL delivery notes in local DB BEFORE any changes
+        const allLocalDNs = await DeliveryNote.find({})
+            .select("DocNum DocumentStatus CardCode CardName BaseEntry OriginatingOrder DocTotal DocCurrency");
+
+        console.log(`\nTotal delivery notes in local DB: ${allLocalDNs.length}`);
+
+        // Separate local DNs by status BEFORE any changes
+        const localOpenDNs = allLocalDNs.filter(dn =>
+            dn.DocumentStatus === 'bost_Open' || dn.DocumentStatus === 'O'
+        );
+        const localClosedDNs = allLocalDNs.filter(dn =>
+            dn.DocumentStatus === 'bost_Close' || dn.DocumentStatus === 'C'
+        );
+
+        console.log(`Open locally (BEFORE): ${localOpenDNs.length}`);
+        console.log(`Closed locally (BEFORE): ${localClosedDNs.length}`);
+
+        const localOpenDocNums = localOpenDNs.map(dn => dn.DocNum);
+        const allLocalDocNums = allLocalDNs.map(dn => dn.DocNum);
+
+        // Store INITIAL counts
+        const initialOpenCount = localOpenDNs.length;
+        const initialClosedCount = localClosedDNs.length;
+
+        const results = {
+            totalOpenInSAP: openDNsInSAP.length,
+            totalInLocalDB: allLocalDNs.length,
+            openInLocal: initialOpenCount,
+            closedInLocal: initialClosedCount,
+            dnsClosed: 0,
+            dnsOpened: 0,
+            dnsCreated: 0,
+            errors: [],
+            closedDNs: [],
+            openedDNs: [],
+            createdDNs: [],
+        };
+
+        // *** 1. CLOSE DNs that are OPEN locally but NOT in SAP's open list ***
+        const dnsToClose = localOpenDNs.filter(dn => !sapOpenDocNums.includes(dn.DocNum));
+
+        console.log(`\n🔍 FULL DEBUG:`);
+        console.log(`Total SAP DocNums: ${sapOpenDocNums.length}`);
+        console.log(`Total Local DocNums: ${localOpenDocNums.length}`);
+        console.log(`ALL SAP DocNums:`, sapOpenDocNums.sort((a, b) => a - b));
+        console.log(`ALL Local DocNums:`, localOpenDocNums.sort((a, b) => a - b));
+
+        // Find the difference
+        const localNotInSAP = localOpenDocNums.filter(docNum => !sapOpenDocNums.includes(docNum));
+        console.log(`\n❌ Local DocNums NOT in SAP (should be 3):`, localNotInSAP);
+
+        // Check if those 3 are actually in SAP
+        localNotInSAP.forEach(docNum => {
+            const inSAP = sapOpenDocNums.includes(docNum);
+            console.log(`DocNum ${docNum}: In SAP? ${inSAP}`);
+        });
+        // Check which local DNs are NOT in SAP
+        const notInSAP = localOpenDocNums.filter(docNum => !sapOpenDocNums.includes(docNum));
+        console.log(`\n🔍 Local DocNums NOT in SAP open list (${notInSAP.length}):`, notInSAP);
+
+        // Check if it's a type mismatch issue
+        const sapSet = new Set(sapOpenDocNums.map(n => String(n)));
+        const localNotInSAPStrings = localOpenDocNums.filter(docNum => !sapSet.has(String(docNum)));
+        console.log(`\n🔍 Using String comparison (${localNotInSAPStrings.length}):`, localNotInSAPStrings);
+
+        console.log(`\nDelivery notes to CLOSE (open locally, NOT in SAP open list): ${dnsToClose.length}`);
+        if (dnsToClose.length > 0) {
+            console.log(`DocNums to close:`, dnsToClose.map(dn => dn.DocNum));
+        }
+
+        for (const dn of dnsToClose) {
+            try {
+                console.log(`Closing delivery note DocNum: ${dn.DocNum} (${dn.CardCode})`);
+
+                dn.DocumentStatus = "bost_Close";
+                dn.UpdateDate = new Date();
+                dn.LocalStatus = "Synced";
+                dn.U_Notes = (dn.U_Notes || "") + ` [Auto-closed via status sync on ${new Date().toISOString()}]`;
+
+                await dn.save();
+
+                results.dnsClosed++;
+                results.closedDNs.push({
+                    DocNum: dn.DocNum,
+                    CardCode: dn.CardCode,
+                    CardName: dn.CardName,
+                });
+
+                console.log(`✅ Delivery note ${dn.DocNum} closed successfully`);
+
+            } catch (error) {
+                console.error(`❌ Error closing delivery note ${dn.DocNum}:`, error.message);
+                results.errors.push({
+                    DocNum: dn.DocNum,
+                    action: "close",
+                    error: error.message,
+                });
+            }
+        }
+
+        // *** 2. OPEN DNs that are CLOSED locally but in SAP's open list ***
+        const dnsToOpen = localClosedDNs.filter(dn => sapOpenDocNums.includes(dn.DocNum));
+
+        console.log(`\nDelivery notes to OPEN (closed locally, IN SAP open list): ${dnsToOpen.length}`);
+        if (dnsToOpen.length > 0) {
+            console.log(`DocNums to open:`, dnsToOpen.map(dn => dn.DocNum));
+        }
+
+        for (const dn of dnsToOpen) {
+            try {
+                console.log(`Opening delivery note DocNum: ${dn.DocNum} (${dn.CardCode})`);
+
+                dn.DocumentStatus = "bost_Open";
+                dn.UpdateDate = new Date();
+                dn.LocalStatus = "Synced";
+                dn.U_Notes = (dn.U_Notes || "") + ` [Auto-opened via status sync on ${new Date().toISOString()}]`;
+
+                await dn.save();
+
+                results.dnsOpened++;
+                results.openedDNs.push({
+                    DocNum: dn.DocNum,
+                    CardCode: dn.CardCode,
+                    CardName: dn.CardName,
+                });
+
+                console.log(`✅ Delivery note ${dn.DocNum} opened successfully`);
+
+            } catch (error) {
+                console.error(`❌ Error opening delivery note ${dn.DocNum}:`, error.message);
+                results.errors.push({
+                    DocNum: dn.DocNum,
+                    action: "open",
+                    error: error.message,
+                });
+            }
+        }
+
+        // *** 3. CREATE DNs that are in SAP's open list but NOT locally ***
+        const missingDNDocNums = sapOpenDocNums.filter(docNum => !allLocalDocNums.includes(docNum));
+
+        console.log(`\nMissing delivery notes to CREATE: ${missingDNDocNums.length}`);
+        if (missingDNDocNums.length > 0) {
+            console.log(`DocNums to create:`, missingDNDocNums);
+        }
+
+        for (const docNum of missingDNDocNums) {
+            try {
+                // Find the full delivery note details from our SAP data
+                const sapDN = openDNsInSAP.find(dn => dn.DocNum === docNum);
+
+                if (!sapDN) {
+                    console.log(`⚠️ Could not find details for DocNum ${docNum}`);
+                    continue;
+                }
+
+                console.log(`Creating missing delivery note DocNum: ${sapDN.DocNum} (${sapDN.CardCode})`);
+
+                // Create the delivery note in local DB
+                const newDN = new DeliveryNote({
+                    DocEntry: sapDN.DocEntry,
+                    DocNum: sapDN.DocNum,
+                    DocType: sapDN.DocObjectCode || "dDocument_Items",
+                    CardCode: sapDN.CardCode,
+                    CardName: sapDN.CardName,
+                    Address: sapDN.Address,
+                    Address2: sapDN.Address2,
+                    DocDate: sapDN.DocDate,
+                    DocDueDate: sapDN.DocDueDate,
+                    TaxDate: sapDN.TaxDate,
+                    CreationDate: sapDN.CreationDate || new Date(),
+                    UpdateDate: new Date(),
+                    DocTotal: sapDN.DocTotal,
+                    DocCurrency: sapDN.DocCurrency || "EUR",
+                    VatSum: sapDN.VatSum,
+                    DiscountPercent: sapDN.DiscountPercent,
+                    PriceList: sapDN.PriceList,
+
+                    // Base references
+                    BaseType: sapDN.BaseType,
+                    BaseEntry: sapDN.BaseEntry,
+                    OriginatingOrder: sapDN.U_SourceOrderNum || null,
+
+                    // Document lines with base references
+                    DocumentLines: sapDN.DocumentLines?.map((line, index) => ({
+                        LineNum: line.LineNum || index,
+                        ItemCode: line.ItemCode,
+                        ItemDescription: line.ItemDescription,
+                        Quantity: line.Quantity,
+                        Price: line.Price || line.UnitPrice,
+                        UnitPrice: line.Price || line.UnitPrice,
+                        PriceAfterVAT: line.PriceAfterVAT,
+                        Currency: line.Currency || sapDN.DocCurrency,
+                        LineTotal: line.LineTotal,
+                        VatGroup: line.VatGroup,
+                        PriceList: line.PriceList || sapDN.PriceList,
+
+                        // Base references for lines
+                        BaseType: line.BaseType,
+                        BaseEntry: line.BaseEntry,
+                        BaseLine: line.BaseLine,
+
+                        ShipDate: line.ShipDate,
+                        ActualDeliveryDate: line.ActualDeliveryDate,
+                    })) || [],
+
+                    DocumentStatus: "bost_Open",
+                    Cancelled: sapDN.Cancelled || "N",
+                    SyncedWithSAP: true,
+                    SAPDocEntry: sapDN.DocEntry,
+                    LocalStatus: "Synced",
+                    ImportDate: new Date(),
+                    ImportSource: "Status_Sync",
+                    Comments: sapDN.Comments || "",
+                    U_Notes: "Imported via Status Sync from SAP B1 - Missing Open Delivery Note",
+                });
+
+                await newDN.save();
+
+                results.dnsCreated++;
+                results.createdDNs.push({
+                    DocNum: sapDN.DocNum,
+                    CardCode: sapDN.CardCode,
+                    CardName: sapDN.CardName,
+                    DocTotal: sapDN.DocTotal,
+                });
+
+                console.log(`✅ Delivery note ${sapDN.DocNum} created successfully`);
+
+            } catch (error) {
+                console.error(`❌ Error creating delivery note ${docNum}:`, error.message);
+                results.errors.push({
+                    DocNum: docNum,
+                    action: "create",
+                    error: error.message,
+                });
+            }
+        }
+
+        // *** CALCULATE FINAL COUNTS USING INITIAL VALUES ***
+        const finalLocalOpenCount = initialOpenCount - results.dnsClosed + results.dnsOpened + results.dnsCreated;
+        const finalLocalClosedCount = initialClosedCount + results.dnsClosed - results.dnsOpened;
+
+        console.log("\n" + "=".repeat(60));
+        console.log("DELIVERY NOTE STATUS SYNC COMPLETED");
+        console.log(`Open in SAP: ${results.totalOpenInSAP}`);
+        console.log(`Open in Local (before): ${results.openInLocal}`);
+        console.log(`Closed in Local (before): ${results.closedInLocal}`);
+        console.log(`Actions taken:`);
+        console.log(`  - Closed: ${results.dnsClosed}`);
+        console.log(`  - Opened: ${results.dnsOpened}`);
+        console.log(`  - Created: ${results.dnsCreated}`);
+        console.log(`Calculation: ${results.openInLocal} - ${results.dnsClosed} + ${results.dnsOpened} + ${results.dnsCreated} = ${finalLocalOpenCount}`);
+        console.log(`Open in Local (after): ${finalLocalOpenCount}`);
+        console.log(`Closed in Local (after): ${finalLocalClosedCount}`);
+        console.log(`Errors: ${results.errors.length}`);
+        console.log(`MATCHED: ${finalLocalOpenCount === results.totalOpenInSAP ? '✅ YES' : '❌ NO'}`);
+        console.log("=".repeat(60) + "\n");
+
+        res.status(200).json({
+            success: true,
+            message: `Status sync completed. ${results.dnsClosed} closed, ${results.dnsOpened} opened, ${results.dnsCreated} created.`,
+            data: {
+                ...results,
+                finalLocalOpenCount,
+                finalLocalClosedCount,
+                matched: finalLocalOpenCount === results.totalOpenInSAP,
+            },
+        });
+
+    } catch (error) {
+        console.error("Error in syncDeliveryNoteStatusesFromSAP:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error syncing delivery note statuses from SAP",
+            error: error.message,
+        });
     }
 };

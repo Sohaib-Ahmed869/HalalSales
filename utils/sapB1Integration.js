@@ -87,6 +87,8 @@ async function getSessionId() {
   return sessionId;
 }
 
+exports.loginToSAP = loginToSAP;
+
 // Check if a business partner exists in SAP
 exports.checkBusinessPartnerExists = async (cardCode) => {
   try {

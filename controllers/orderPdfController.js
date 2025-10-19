@@ -16,10 +16,19 @@ const downloadImage = async (url) => {
 
 // Helper function to format currency
 const formatCurrency = (amount, currency = "EUR") => {
-    return new Intl.NumberFormat("fr-FR", {
-        style: "currency",
-        currency: currency,
+    const formatted = new Intl.NumberFormat("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
     }).format(amount);
+
+    // Add currency symbol
+    const currencySymbols = {
+        "EUR": "€",
+        "USD": "$",
+        "GBP": "£"
+    };
+
+    return `${formatted} ${currencySymbols[currency] || currency}`;
 };
 
 // Helper function to format date

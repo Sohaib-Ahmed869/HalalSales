@@ -1145,194 +1145,21 @@ exports.getOrderByDocEntry = async (req, res) => {
   }
 };
 
-// Live sync orders with SAP
+// Live sync orders with SAP - NOW USES STATUS SYNC
 exports.liveSyncOrdersWithSAP = async (req, res) => {
   try {
-    const { fromDate, toDate } = req.query;
-
     console.log("\n" + "=".repeat(60));
-    console.log("STARTING LIVE SYNC: ORDERS");
+    console.log("STARTING LIVE SYNC: ORDERS (Using Status Sync)");
     console.log("=".repeat(60));
 
-    const filters = {};
-    if (fromDate) filters.fromDate = fromDate;
-    if (toDate) filters.toDate = toDate;
-
-    // Fetch orders from SAP
-    const sapOrders = await require("../utils/sapB1Integration").fetchSalesOrdersFromSAP(filters);
-
-    console.log(`Fetched ${sapOrders.length} orders from SAP`);
-
-    const results = {
-      created: 0,
-      updated: 0,
-      unchanged: 0,
-      errors: [],
-      details: {
-        created: [],
-        updated: [],
-        unchanged: []
-      }
-    };
-
-    for (const sapOrder of sapOrders) {
-      try {
-        // Find existing order by DocNum (SAP's document number)
-        const existingOrder = await SalesOrder.findOne({ DocNum: sapOrder.DocNum });
-
-        if (!existingOrder) {
-          // CREATE NEW ORDER
-          const newOrder = new SalesOrder({
-            DocEntry: sapOrder.DocEntry,
-            DocNum: sapOrder.DocNum,
-            DocType: sapOrder.DocObjectCode || "dDocument_Items",
-            CardCode: sapOrder.CardCode,
-            CardName: sapOrder.CardName,
-            Address: sapOrder.Address,
-            Address2: sapOrder.Address2,
-            DocDate: sapOrder.DocDate,
-            DocDueDate: sapOrder.DocDueDate,
-            TaxDate: sapOrder.TaxDate,
-            CreationDate: sapOrder.CreationDate || new Date(),
-            UpdateDate: new Date(),
-            DocTotal: sapOrder.DocTotal,
-            DocCurrency: sapOrder.DocCurrency || "EUR",
-            VatSum: sapOrder.VatSum,
-            DiscountPercent: sapOrder.DiscountPercent,
-            PriceList: sapOrder.PriceList,
-            StartDeliveryDate: sapOrder.StartDeliveryDate || sapOrder.DocDate,
-            DocumentLines: sapOrder.DocumentLines?.map((line, index) => ({
-              LineNum: line.LineNum || index,
-              ItemCode: line.ItemCode,
-              ItemDescription: line.ItemDescription,
-              Quantity: line.Quantity,
-              Price: line.Price || line.UnitPrice,
-              PriceAfterVAT: line.PriceAfterVAT,
-              Currency: line.Currency || sapOrder.DocCurrency,
-              LineTotal: line.LineTotal,
-              VatGroup: line.VatGroup,
-              PriceList: line.PriceList || sapOrder.PriceList
-            })) || [],
-            DocumentStatus: sapOrder.DocumentStatus || "bost_Open",
-            Cancelled: sapOrder.Cancelled || "N",
-            SyncedWithSAP: true,
-            SAPDocEntry: sapOrder.DocEntry,
-            LocalStatus: "Synced",
-            ImportDate: new Date(),
-            ImportSource: "Live_Sync",
-            Comments: sapOrder.Comments || "",
-            U_Notes: "Imported via Live Sync from SAP B1"
-          });
-
-          await newOrder.save();
-          results.created++;
-          results.details.created.push({
-            DocNum: sapOrder.DocNum,
-            CardCode: sapOrder.CardCode,
-            DocTotal: sapOrder.DocTotal
-          });
-
-          console.log(`✅ Created new order: ${sapOrder.DocNum}`);
-
-        } else {
-          // UPDATE EXISTING ORDER (only if Open in our system)
-          if (existingOrder.DocumentStatus === "bost_Open" || existingOrder.DocumentStatus === "O") {
-            let hasChanges = false;
-
-            // Check for status change
-            if (existingOrder.DocumentStatus !== sapOrder.DocumentStatus) {
-              existingOrder.DocumentStatus = sapOrder.DocumentStatus;
-              hasChanges = true;
-            }
-
-            // Check for line changes
-            if (sapOrder.DocumentLines && sapOrder.DocumentLines.length > 0) {
-              const sapLinesJson = JSON.stringify(sapOrder.DocumentLines.map(l => ({
-                ItemCode: l.ItemCode,
-                Quantity: l.Quantity,
-                Price: l.Price || l.UnitPrice
-              })));
-              const localLinesJson = JSON.stringify(existingOrder.DocumentLines.map(l => ({
-                ItemCode: l.ItemCode,
-                Quantity: l.Quantity,
-                Price: l.Price || l.UnitPrice
-              })));
-
-              if (sapLinesJson !== localLinesJson) {
-                existingOrder.DocumentLines = sapOrder.DocumentLines.map((line, index) => ({
-                  LineNum: line.LineNum || index,
-                  ItemCode: line.ItemCode,
-                  ItemDescription: line.ItemDescription,
-                  Quantity: line.Quantity,
-                  Price: line.Price || line.UnitPrice,
-                  PriceAfterVAT: line.PriceAfterVAT,
-                  Currency: line.Currency || sapOrder.DocCurrency,
-                  LineTotal: line.LineTotal,
-                  VatGroup: line.VatGroup,
-                  PriceList: line.PriceList || sapOrder.PriceList
-                }));
-                existingOrder.DocTotal = sapOrder.DocTotal;
-                existingOrder.VatSum = sapOrder.VatSum;
-                hasChanges = true;
-              }
-            }
-
-            if (hasChanges) {
-              existingOrder.UpdateDate = new Date();
-              existingOrder.LocalStatus = "SyncedFromSAP";
-              await existingOrder.save();
-              results.updated++;
-              results.details.updated.push({
-                DocNum: sapOrder.DocNum,
-                CardCode: sapOrder.CardCode,
-                status: sapOrder.DocumentStatus
-              });
-              console.log(`🔄 Updated order: ${sapOrder.DocNum}`);
-            } else {
-              results.unchanged++;
-              results.details.unchanged.push({
-                DocNum: sapOrder.DocNum
-              });
-            }
-          } else {
-            // Order is closed in our system, don't update
-            results.unchanged++;
-            results.details.unchanged.push({
-              DocNum: sapOrder.DocNum,
-              reason: "Closed in local system"
-            });
-          }
-        }
-
-      } catch (error) {
-        console.error(`❌ Error processing order ${sapOrder.DocNum}:`, error);
-        results.errors.push({
-          DocNum: sapOrder.DocNum,
-          error: error.message
-        });
-      }
-    }
-
-    console.log("\n" + "=".repeat(60));
-    console.log("LIVE SYNC COMPLETED: ORDERS");
-    console.log(`Created: ${results.created}`);
-    console.log(`Updated: ${results.updated}`);
-    console.log(`Unchanged: ${results.unchanged}`);
-    console.log(`Errors: ${results.errors.length}`);
-    console.log("=".repeat(60) + "\n");
-
-    res.status(200).json({
-      success: true,
-      message: `Live sync completed: ${results.created} created, ${results.updated} updated, ${results.unchanged} unchanged`,
-      data: results
-    });
-
+    // Simply call the status sync function
+    return await exports.syncOrderStatusesFromSAP(req, res);
   } catch (error) {
     console.error("Error in live sync:", error);
     res.status(500).json({
       success: false,
       message: "Error during live sync",
-      error: error.message
+      error: error.message,
     });
   }
 };
@@ -2181,4 +2008,254 @@ exports.updateOrder = async (req, res) => {
       error: error.message,
     });
   }
-};  
+};
+
+const dotenv = require("dotenv");
+
+// Load environment variables
+dotenv.config();
+
+// SAP B1 Service Layer Configuration
+const SAP_CONFIG = {
+  serviceLayerUrl: process.env.SAP_SERVICE_LAYER_URL,
+  companyDB: process.env.COMPANY_DB,
+  username: process.env.USER_NAME,
+  password: process.env.PASSWORD,
+};
+
+// Sync order statuses from SAP - Close orders that are closed in SAP and create missing ones
+exports.syncOrderStatusesFromSAP = async (req, res) => {
+  try {
+    console.log("\n" + "=".repeat(60));
+    console.log("STARTING ORDER STATUS SYNC FROM SAP");
+    console.log("=".repeat(60));
+
+    const { loginToSAP } = require("../utils/sapB1Integration");
+
+    // Login to SAP
+    const sessionId = await loginToSAP();
+    const headers = {
+      "Content-Type": "application/json",
+      Cookie: `B1SESSION=${sessionId}`,
+    };
+
+    let openOrdersInSAP = [];
+    let totalFetched = 0;
+
+    // Fetch all OPEN orders from SAP with full details
+    let nextLink = `${SAP_CONFIG.serviceLayerUrl}/Orders?$filter=DocumentStatus eq 'bost_Open'&$orderby=DocNum`;
+
+    console.log("Fetching open orders from SAP...");
+
+    while (nextLink) {
+      try {
+        console.log(`Fetching batch from SAP...`);
+        const response = await axios.get(nextLink, { headers });
+
+        const currentBatch = response.data.value;
+        console.log(`Fetched ${currentBatch.length} orders in this batch`);
+
+        // Store full order details
+        openOrdersInSAP.push(...currentBatch);
+        totalFetched += currentBatch.length;
+
+        console.log(`Total open orders fetched so far: ${totalFetched}`);
+
+        // Get next link for pagination
+        nextLink = response.data["odata.nextLink"];
+
+        if (nextLink && nextLink.startsWith("Orders")) {
+          nextLink = `${SAP_CONFIG.serviceLayerUrl}/${nextLink}`;
+        }
+
+        // Small delay to avoid overwhelming SAP
+        if (nextLink) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
+      } catch (error) {
+        console.error("Error fetching batch from SAP:", error.message);
+        if (error.response) {
+          console.error("SAP Error details:", error.response.data);
+        }
+        break;
+      }
+    }
+
+    console.log(`\nTotal open orders in SAP: ${openOrdersInSAP.length}`);
+
+    const sapOpenDocNums = openOrdersInSAP.map(order => order.DocNum);
+    console.log("Sample open DocNums in SAP:", sapOpenDocNums.slice(0, 20), "...");
+
+    // Now find all orders in local DB that are marked as Open
+    const localOpenOrders = await SalesOrder.find({
+      DocumentStatus: { $in: ["bost_Open", "O"] },
+    }).select("DocNum DocumentStatus CardCode CardName");
+
+    console.log(`\nTotal open orders in local DB: ${localOpenOrders.length}`);
+
+    const localOpenDocNums = localOpenOrders.map(order => order.DocNum);
+
+    // Find orders that are open locally but NOT in SAP's open list
+    const ordersToClose = localOpenOrders.filter(
+      order => !sapOpenDocNums.includes(order.DocNum)
+    );
+
+    // Find orders that are open in SAP but NOT in local DB
+    const missingOrderDocNums = sapOpenDocNums.filter(
+      docNum => !localOpenDocNums.includes(docNum)
+    );
+
+    console.log(`\nOrders to close: ${ordersToClose.length}`);
+    console.log(`Missing orders to create: ${missingOrderDocNums.length}`);
+
+    const results = {
+      totalOpenInSAP: openOrdersInSAP.length,
+      totalOpenInLocalDB: localOpenOrders.length,
+      ordersClosed: 0,
+      ordersCreated: 0,
+      errors: [],
+      closedOrders: [],
+      createdOrders: [],
+    };
+
+    // Close the orders that should be closed
+    for (const order of ordersToClose) {
+      try {
+        console.log(`Closing order DocNum: ${order.DocNum} (${order.CardCode})`);
+
+        order.DocumentStatus = "bost_Close";
+        order.UpdateDate = new Date();
+        order.LocalStatus = "Synced";
+        order.U_Notes = (order.U_Notes || "") + ` [Auto-closed via status sync on ${new Date().toISOString()}]`;
+
+        await order.save();
+
+        results.ordersClosed++;
+        results.closedOrders.push({
+          DocNum: order.DocNum,
+          CardCode: order.CardCode,
+          CardName: order.CardName,
+        });
+
+        console.log(`✅ Order ${order.DocNum} closed successfully`);
+
+      } catch (error) {
+        console.error(`❌ Error closing order ${order.DocNum}:`, error.message);
+        results.errors.push({
+          DocNum: order.DocNum,
+          action: "close",
+          error: error.message,
+        });
+      }
+    }
+
+    // Create missing orders from SAP
+    for (const docNum of missingOrderDocNums) {
+      try {
+        // Find the full order details from our SAP data
+        const sapOrder = openOrdersInSAP.find(order => order.DocNum === docNum);
+
+        if (!sapOrder) {
+          console.log(`⚠️ Could not find details for DocNum ${docNum}`);
+          continue;
+        }
+
+        console.log(`Creating missing order DocNum: ${sapOrder.DocNum} (${sapOrder.CardCode})`);
+
+        // Create the order in local DB
+        const newOrder = new SalesOrder({
+          DocEntry: sapOrder.DocEntry,
+          DocNum: sapOrder.DocNum,
+          DocType: sapOrder.DocObjectCode || "dDocument_Items",
+          CardCode: sapOrder.CardCode,
+          CardName: sapOrder.CardName,
+          Address: sapOrder.Address,
+          Address2: sapOrder.Address2,
+          DocDate: sapOrder.DocDate,
+          DocDueDate: sapOrder.DocDueDate,
+          TaxDate: sapOrder.TaxDate,
+          CreationDate: sapOrder.CreationDate || new Date(),
+          UpdateDate: new Date(),
+          DocTotal: sapOrder.DocTotal,
+          DocCurrency: sapOrder.DocCurrency || "EUR",
+          VatSum: sapOrder.VatSum,
+          DiscountPercent: sapOrder.DiscountPercent,
+          PriceList: sapOrder.PriceList,
+          StartDeliveryDate: sapOrder.StartDeliveryDate || sapOrder.DocDate,
+          DocumentLines: sapOrder.DocumentLines?.map((line, index) => ({
+            LineNum: line.LineNum || index,
+            ItemCode: line.ItemCode,
+            ItemDescription: line.ItemDescription,
+            Quantity: line.Quantity,
+            Price: line.Price || line.UnitPrice,
+            PriceAfterVAT: line.PriceAfterVAT,
+            Currency: line.Currency || sapOrder.DocCurrency,
+            LineTotal: line.LineTotal,
+            VatGroup: line.VatGroup,
+            PriceList: line.PriceList || sapOrder.PriceList
+          })) || [],
+          DocumentStatus: sapOrder.DocumentStatus || "bost_Open",
+          Cancelled: sapOrder.Cancelled || "N",
+          SyncedWithSAP: true,
+          SAPDocEntry: sapOrder.DocEntry,
+          LocalStatus: "Synced",
+          ImportDate: new Date(),
+          ImportSource: "Status_Sync",
+          Comments: sapOrder.Comments || "",
+          U_Notes: "Imported via Status Sync from SAP B1 - Missing Order",
+        });
+
+        await newOrder.save();
+
+        results.ordersCreated++;
+        results.createdOrders.push({
+          DocNum: sapOrder.DocNum,
+          CardCode: sapOrder.CardCode,
+          CardName: sapOrder.CardName,
+          DocTotal: sapOrder.DocTotal,
+        });
+
+        console.log(`✅ Order ${sapOrder.DocNum} created successfully`);
+
+      } catch (error) {
+        console.error(`❌ Error creating order ${docNum}:`, error.message);
+        results.errors.push({
+          DocNum: docNum,
+          action: "create",
+          error: error.message,
+        });
+      }
+    }
+
+    const finalLocalOpenCount = localOpenOrders.length - results.ordersClosed + results.ordersCreated;
+
+    console.log("\n" + "=".repeat(60));
+    console.log("ORDER STATUS SYNC COMPLETED");
+    console.log(`Open orders in SAP: ${results.totalOpenInSAP}`);
+    console.log(`Open orders in Local DB (before): ${results.totalOpenInLocalDB}`);
+    console.log(`Orders closed: ${results.ordersClosed}`);
+    console.log(`Orders created: ${results.ordersCreated}`);
+    console.log(`Open orders in Local DB (after): ${finalLocalOpenCount}`);
+    console.log(`Errors: ${results.errors.length}`);
+    console.log("=".repeat(60) + "\n");
+
+    res.status(200).json({
+      success: true,
+      message: `Order status sync completed. ${results.ordersClosed} orders closed, ${results.ordersCreated} orders created.`,
+      data: {
+        ...results,
+        finalLocalOpenCount,
+        matched: finalLocalOpenCount === results.totalOpenInSAP,
+      },
+    });
+
+  } catch (error) {
+    console.error("Error in syncOrderStatusesFromSAP:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error syncing order statuses from SAP",
+      error: error.message,
+    });
+  }
+};
