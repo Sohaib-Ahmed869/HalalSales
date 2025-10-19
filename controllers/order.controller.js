@@ -2023,6 +2023,48 @@ const SAP_CONFIG = {
   password: process.env.PASSWORD,
 };
 
+// Update order notes
+exports.updateOrderNotes = async (req, res) => {
+  try {
+    const { docNum } = req.params;
+    const { notes } = req.body;
+
+    console.log(`Updating notes for order ${docNum}`);
+
+    const order = await SalesOrder.findOne({ DocNum: docNum });
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: `Order with DocNum ${docNum} not found`,
+      });
+    }
+
+    // Update the U_Notes field
+    order.U_Notes = notes || "";
+    order.UpdateDate = new Date();
+
+    await order.save();
+
+    console.log(`✅ Notes updated successfully for order ${docNum}`);
+
+    res.status(200).json({
+      success: true,
+      message: "Order notes updated successfully",
+      data: {
+        DocNum: order.DocNum,
+        U_Notes: order.U_Notes,
+      },
+    });
+  } catch (error) {
+    console.error("Error updating order notes:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error updating order notes",
+      error: error.message,
+    });
+  }
+};
 // Sync order statuses from SAP - Close orders that are closed in SAP and create missing ones
 exports.syncOrderStatusesFromSAP = async (req, res) => {
   try {

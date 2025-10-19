@@ -339,6 +339,19 @@ exports.bulkCreateDeliveryNotesFromOrders = async (req, res) => {
             totalProcessed: 0,
         };
 
+        // **TRACK THE HIGHEST DOCENTRY IN THIS BATCH**
+        let currentMaxDocEntry = null;
+
+        // Get the absolute latest DocEntry from DB once before the loop
+        try {
+            const lastDeliveryNote = await DeliveryNote.findOne().sort({ DocEntry: -1 });
+            currentMaxDocEntry = lastDeliveryNote ? lastDeliveryNote.DocEntry : 0;
+            console.log(`Starting bulk creation from DocEntry: ${currentMaxDocEntry + 1}`);
+        } catch (error) {
+            console.error("Error getting last DocEntry:", error);
+            currentMaxDocEntry = 0;
+        }
+
         // Process each order
         for (const docEntry of orderDocNums) {
             try {
@@ -382,27 +395,12 @@ exports.bulkCreateDeliveryNotesFromOrders = async (req, res) => {
                     continue;
                 }
 
-                // Get next DocNum
-                let newDocNum;
-                let newDocEntry;
+                // **INCREMENT FOR EACH NEW DELIVERY NOTE IN THIS BATCH**
+                currentMaxDocEntry++;
+                const newDocNum = currentMaxDocEntry;
+                const newDocEntry = currentMaxDocEntry;
 
-                try {
-                    const { getNextDeliveryNoteDocNumFromSAP } = require("../utils/sapB1Integration");
-                    newDocNum = await getNextDeliveryNoteDocNumFromSAP();
-
-                    if (newDocNum) {
-                        console.log(`Using SAP-aligned Delivery Note DocNum: ${newDocNum}`);
-                        newDocEntry = newDocNum;
-                    } else {
-                        throw new Error("Could not get DocNum from SAP");
-                    }
-                } catch (sapError) {
-                    console.warn("Could not get Delivery Note DocNum from SAP, falling back to local generation:", sapError.message);
-                    const lastDeliveryNote = await DeliveryNote.findOne().sort({ DocEntry: -1 });
-                    newDocEntry = lastDeliveryNote ? lastDeliveryNote.DocEntry + 1 : 1;
-                    newDocNum = newDocEntry;
-                    console.log(`Using local Delivery Note DocNum: ${newDocNum}`);
-                }
+                console.log(`Creating DN with DocEntry: ${newDocEntry} for order ${salesOrder.DocNum}`);
 
                 // Get custom note for this order
                 const customNote = orderNotes[docEntry] || "";
