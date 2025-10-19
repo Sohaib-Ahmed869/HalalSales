@@ -368,21 +368,11 @@ exports.bulkCreateDeliveryNotesFromOrders = async (req, res) => {
                     continue;
                 }
 
-                // *** CRITICAL: Check if sales order is synced with SAP ***
-                if (!salesOrder.SyncedWithSAP || !salesOrder.SAPDocEntry) {
-                    results.failed.push({
-                        docEntry,
-                        orderNum: salesOrder.DocNum,
-                        error: "Sales order not synced with SAP. Cannot create delivery note.",
-                        synced: salesOrder.SyncedWithSAP,
-                        sapDocEntry: salesOrder.SAPDocEntry
-                    });
-                    continue;
-                }
+               
 
                 // Check if delivery note already exists
                 const existingDeliveryNote = await DeliveryNote.findOne({
-                    BaseEntry: salesOrder.SAPDocEntry // *** CHECK BY SAP DOCENTRY ***
+                    BaseEntry: salesOrder.SAPDocEntry ? salesOrder.SAPDocEntry : salesOrder.DocEntry
                 });
 
                 if (existingDeliveryNote) {
