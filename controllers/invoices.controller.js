@@ -717,7 +717,7 @@ exports.getPaymentsForInvoice = async (req, res) => {
 // controllers/invoiceController.js
 // Replace the bulkCreateInvoicesFromDeliveryNotes function
 
-// Update the bulkCreateInvoicesFromDeliveryNotes function
+// controllers/invoiceController.js
 exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
   try {
     const { deliveryNoteDocNums, autoSync = false } = req.body;
@@ -743,6 +743,19 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
         skipped: []
       }
     };
+
+    // ✅ FIX: Get NEXT DocNum from SAP ONCE before the loop
+    let nextDocNum;
+    try {
+      const { getNextInvoiceDocNumFromSAP } = require("../utils/sapB1Integration");
+      nextDocNum = await getNextInvoiceDocNumFromSAP();
+      console.log(`✅ Starting DocNum sequence from SAP: ${nextDocNum}`);
+    } catch (sapError) {
+      console.warn("Could not get DocNum from SAP, using local fallback");
+      const lastInvoice = await Invoice.findOne().sort({ DocNum: -1 });
+      nextDocNum = lastInvoice ? lastInvoice.DocNum + 1 : 1;
+      console.log(`✅ Starting DocNum sequence (local): ${nextDocNum}`);
+    }
 
     // Process each delivery note
     for (const docNum of deliveryNoteDocNums) {
@@ -772,7 +785,7 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
 
         // Check if invoice already exists
         const existingInvoice = await Invoice.findOne({
-          BaseEntry: deliveryNote.SAPDocEntry // *** CHECK BY SAP DOCENTRY ***
+          BaseEntry: deliveryNote.SAPDocEntry
         });
 
         if (existingInvoice) {
@@ -835,9 +848,9 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
               LineTotal: lineTotal,
               VatGroup: line.VatGroup,
 
-              // ✅ CRITICAL: Base references to delivery note
+              // ✅ Base references to delivery note
               BaseType: 15, // Delivery Note
-              BaseEntry: deliveryNote.SAPDocEntry, // *** SAP DOCENTRY ***
+              BaseEntry: deliveryNote.SAPDocEntry,
               BaseLine: line.LineNum,
             });
           } else if (netQty < 0) {
@@ -856,13 +869,13 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
         }
 
         try {
-          // Get next invoice DocNum
-          const { getNextInvoiceDocNumFromSAP, getNextInvoiceDocEntryFromSAP } = require("../utils/sapB1Integration");
-          const newDocNum = await getNextInvoiceDocNumFromSAP();
-          const newDocEntry = await getNextInvoiceDocEntryFromSAP();
+          // ✅ FIX: Use the incrementing DocNum instead of fetching from SAP each time
+          const currentDocNum = nextDocNum;
+          const currentDocEntry = nextDocNum; // Use same value
 
-          // Create invoice data for SAP - with proper base references
-          // Create invoice data for SAP - with proper base references
+          console.log(`📝 Creating invoice ${currentDocNum} for DN ${docNum}`);
+
+          // Create invoice data for SAP
           const invoiceDataForSAP = {
             CardCode: deliveryNote.CardCode,
             DocDate: new Date().toISOString().split('T')[0],
@@ -876,9 +889,8 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
               UnitPrice: line.Price,
               LineNum: index,
 
-              // ✅ ADD THESE BASE REFERENCES
               BaseType: 15, // Delivery Note
-              BaseEntry: deliveryNote.SAPDocEntry, // *** SAP DOCENTRY ***
+              BaseEntry: deliveryNote.SAPDocEntry,
               BaseLine: line.BaseLine,
             })),
 
@@ -890,7 +902,6 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
           };
 
           console.log(`Creating invoice in SAP for DN ${docNum} with base references...`);
-          console.log(`Base Delivery Note DocEntry: ${deliveryNote.SAPDocEntry}`);
 
           const { createInvoiceInSAP } = require("../utils/sapB1Integration");
           const sapResponse = await createInvoiceInSAP(invoiceDataForSAP);
@@ -898,6 +909,10 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
           if (!sapResponse || !sapResponse.DocEntry) {
             throw new Error("Invalid response from SAP - no DocEntry received");
           }
+
+          // ✅ FIX: Increment for next invoice
+          nextDocNum++;
+          console.log(`✅ Next invoice will use DocNum: ${nextDocNum}`);
 
           // Save to local DB
           const invoice = new Invoice({
@@ -917,9 +932,8 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
             CreationDate: new Date(),
             UpdateDate: new Date(),
 
-            // ✅ Base references
             BaseType: 15, // Delivery Note
-            BaseEntry: deliveryNote.SAPDocEntry, // *** SAP DOCENTRY ***
+            BaseEntry: deliveryNote.SAPDocEntry,
             OriginatingDeliveryNote: deliveryNote.DocNum,
 
             DocumentLines: invoiceLines,
@@ -945,10 +959,10 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
             linesAfterReturns: invoiceLines.length,
             totalAfterReturns: invoiceTotal,
             syncedToSAP: true,
-            sapDeliveryNoteDocEntry: deliveryNote.SAPDocEntry // For reference
+            sapDeliveryNoteDocEntry: deliveryNote.SAPDocEntry
           });
 
-          console.log(`✅ Created invoice ${sapResponse.DocNum} for DN ${deliveryNote.DocNum} (mapped to SAP DN ${deliveryNote.SAPDocEntry})`);
+          console.log(`✅ Created invoice ${sapResponse.DocNum} for DN ${deliveryNote.DocNum}`);
 
           // **AUTO EMAIL FUNCTIONALITY**
           try {
@@ -956,7 +970,7 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
             const customer = await Customer.findOne({ CardCode: deliveryNote.CardCode });
 
             if (customer && customer.Email) {
-              console.log(`📧 Sending invoice email to ${customer.Email} for invoice ${sapResponse.DocNum}...`);
+              console.log(`📧 Sending invoice email to ${customer.Email}...`);
 
               const { sendInvoiceEmailToCustomer } = require('./invoicePdfController');
               const emailResult = await sendInvoiceEmailToCustomer(invoice._id, {
@@ -983,7 +997,7 @@ Halal Food Service`
                   cardCode: deliveryNote.CardCode,
                   email: customer.Email
                 });
-                console.log(`✅ Invoice email sent successfully to ${customer.Email}`);
+                console.log(`✅ Invoice email sent to ${customer.Email}`);
               } else {
                 results.emailResults.failed.push({
                   invoiceDocNum: sapResponse.DocNum,
@@ -999,10 +1013,9 @@ Halal Food Service`
                 cardCode: deliveryNote.CardCode,
                 reason: customer ? "No email address" : "Customer not found"
               });
-              console.log(`⚠️ Skipped email for invoice ${sapResponse.DocNum}: ${customer ? "No email address" : "Customer not found"}`);
             }
           } catch (emailError) {
-            console.error(`❌ Error sending invoice email for ${sapResponse.DocNum}:`, emailError);
+            console.error(`❌ Error sending invoice email:`, emailError);
             results.emailResults.failed.push({
               invoiceDocNum: sapResponse.DocNum,
               cardCode: deliveryNote.CardCode,
