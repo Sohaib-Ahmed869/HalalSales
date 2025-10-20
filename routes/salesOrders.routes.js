@@ -24,10 +24,14 @@ const upload = multer({
     }
   },
 });
+router.post(
+  "/update-notes-from-sap",
+  orderController.updateNotesForOpenOrders
+);
 router.patch("/:docNum/notes", auth, orderController.updateOrderNotes);
 
 router.post("/sync-statuses-from-sap", orderController.syncOrderStatusesFromSAP);
-router.post("/sync-statuses", auth, orderController.syncOrderStatusesFromSAP); 
+router.post("/sync-statuses", auth, orderController.syncOrderStatusesFromSAP);
 router.get("/live-sync", orderController.liveSyncOrdersWithSAP);
 
 // sales order routes

@@ -440,7 +440,7 @@ exports.bulkImportSalesOrders = async (req, res) => {
         // Add import metadata
         ImportDate: new Date(),
         ImportSource: "SAP_B1_Bulk_Import",
-        U_Notes: "Imported from SAP B1 bulk export",
+        U_Notes: row["Remarks"] || row["U_Notes"] || "",
       };
 
       newOrders.push(salesOrder);
@@ -911,7 +911,6 @@ exports.createOrder = async (req, res) => {
 
 // Add this filter option to your getAllOrders function
 // Add this to the existing filters section:
-
 exports.getAllOrders = async (req, res) => {
   try {
     console.log("Fetching all orders with enhanced filtering");
@@ -960,7 +959,7 @@ exports.getAllOrders = async (req, res) => {
       }
     }
 
-    // *** NEW: Order origin filter ***
+    // Order origin filter
     if (req.query.orderOrigin) {
       switch (req.query.orderOrigin) {
         case "system":
@@ -978,7 +977,7 @@ exports.getAllOrders = async (req, res) => {
       }
     }
 
-    // *** UPDATED: Delivery date filter - checks both StartDeliveryDate and RequriedDate ***
+    // Delivery date filter - checks both StartDeliveryDate and RequriedDate
     if (req.query.deliveryDateFrom && req.query.deliveryDateTo) {
       const fromDate = new Date(req.query.deliveryDateFrom);
       const toDate = new Date(req.query.deliveryDateTo);
@@ -1023,31 +1022,87 @@ exports.getAllOrders = async (req, res) => {
       query.salesAgent = req.query.salesAgent;
     }
 
-    // Build sort object
-    const sortObj = {};
-    sortObj[sortBy] = sortOrder;
-
     console.log("Query:", JSON.stringify(query, null, 2));
-    console.log("Sort:", sortObj);
 
-    const orders = await SalesOrder.find(query)
-      .populate("salesAgent", "firstName lastName email")
-      .skip(skip)
-      .limit(limit)
-      .sort(sortObj);
+    // *** ENHANCED SORTING LOGIC ***
+    let sortObj = {};
 
-    const total = await SalesOrder.countDocuments(query);
+    // Special handling for delivery date sorting
+    if (sortBy === "StartDeliveryDate" || sortBy === "deliveryDate") {
+      // We need to use aggregation to handle the coalesce logic
+      const orders = await SalesOrder.aggregate([
+        { $match: query },
+        {
+          $addFields: {
+            // Create a computed field that uses StartDeliveryDate if it exists, otherwise RequriedDate
+            effectiveDeliveryDate: {
+              $ifNull: ["$StartDeliveryDate", "$RequriedDate"]
+            }
+          }
+        },
+        { $sort: { effectiveDeliveryDate: sortOrder } },
+        { $skip: skip },
+        { $limit: limit },
+        {
+          $lookup: {
+            from: "users",
+            localField: "salesAgent",
+            foreignField: "_id",
+            as: "salesAgent"
+          }
+        },
+        {
+          $unwind: {
+            path: "$salesAgent",
+            preserveNullAndEmptyArrays: true
+          }
+        },
+        {
+          $project: {
+            "salesAgent.password": 0,
+            "salesAgent.resetPasswordToken": 0,
+            "salesAgent.resetPasswordExpire": 0
+          }
+        }
+      ]);
 
-    console.log(`Found ${orders.length} orders out of ${total} total`);
+      const total = await SalesOrder.countDocuments(query);
 
-    res.status(200).json({
-      success: true,
-      count: orders.length,
-      total,
-      page,
-      pages: Math.ceil(total / limit),
-      data: orders,
-    });
+      console.log(`Found ${orders.length} orders out of ${total} total (sorted by delivery date)`);
+
+      return res.status(200).json({
+        success: true,
+        count: orders.length,
+        total,
+        page,
+        pages: Math.ceil(total / limit),
+        data: orders,
+      });
+    } else {
+      // Standard sorting for other fields
+      sortObj[sortBy] = sortOrder;
+
+      console.log("Sort:", sortObj);
+
+      const orders = await SalesOrder.find(query)
+        .populate("salesAgent", "firstName lastName email")
+        .skip(skip)
+        .limit(limit)
+        .sort(sortObj);
+
+      const total = await SalesOrder.countDocuments(query);
+
+      console.log(`Found ${orders.length} orders out of ${total} total`);
+
+      res.status(200).json({
+        success: true,
+        count: orders.length,
+        total,
+        page,
+        pages: Math.ceil(total / limit),
+        data: orders,
+      });
+    }
   } catch (error) {
     console.error("Error fetching orders:", error);
     res.status(500).json({
@@ -2129,12 +2184,67 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
     const sapOpenDocNums = openOrdersInSAP.map(order => order.DocNum);
     console.log("Sample open DocNums in SAP:", sapOpenDocNums.slice(0, 20), "...");
 
-    // Now find all orders in local DB that are marked as Open
+    // *** STEP 1: REMOVE DUPLICATES SILENTLY ***
+    console.log("\n🔍 Checking for duplicate orders in local DB...");
+
+    // Find all orders (not just open ones) grouped by DocNum
+    const allOrders = await SalesOrder.find({}).select("_id DocNum DocumentStatus CreationDate");
+
+    // Group by DocNum to find duplicates
+    const docNumGroups = {};
+    allOrders.forEach(order => {
+      if (!docNumGroups[order.DocNum]) {
+        docNumGroups[order.DocNum] = [];
+      }
+      docNumGroups[order.DocNum].push(order);
+    });
+
+    // Find DocNums that have duplicates
+    const duplicateDocNums = Object.keys(docNumGroups).filter(
+      docNum => docNumGroups[docNum].length > 1
+    );
+
+    let duplicatesRemoved = 0;
+
+    if (duplicateDocNums.length > 0) {
+      console.log(`Found ${duplicateDocNums.length} DocNums with duplicates`);
+
+      for (const docNum of duplicateDocNums) {
+        const duplicates = docNumGroups[docNum];
+        console.log(`DocNum ${docNum} has ${duplicates.length} copies`);
+
+        // Sort by CreationDate (keep the oldest/first one)
+        duplicates.sort((a, b) => new Date(a.CreationDate) - new Date(b.CreationDate));
+
+        // Keep the first one, delete the rest
+        const toKeep = duplicates[0];
+        const toDelete = duplicates.slice(1);
+
+        console.log(`  Keeping order ${toKeep._id} (created: ${toKeep.CreationDate})`);
+
+        for (const duplicate of toDelete) {
+          try {
+            await SalesOrder.findByIdAndDelete(duplicate._id);
+            duplicatesRemoved++;
+            console.log(`  ✅ Deleted duplicate ${duplicate._id}`);
+          } catch (deleteError) {
+            console.error(`  ❌ Failed to delete duplicate ${duplicate._id}:`, deleteError.message);
+          }
+        }
+      }
+
+      console.log(`\n✨ Removed ${duplicatesRemoved} duplicate orders`);
+    } else {
+      console.log("✅ No duplicates found");
+    }
+
+    // *** STEP 2: CONTINUE WITH NORMAL SYNC ***
+    // Now find all orders in local DB that are marked as Open (after duplicate removal)
     const localOpenOrders = await SalesOrder.find({
       DocumentStatus: { $in: ["bost_Open", "O"] },
     }).select("DocNum DocumentStatus CardCode CardName");
 
-    console.log(`\nTotal open orders in local DB: ${localOpenOrders.length}`);
+    console.log(`\nTotal open orders in local DB (after duplicate removal): ${localOpenOrders.length}`);
 
     const localOpenDocNums = localOpenOrders.map(order => order.DocNum);
 
@@ -2156,6 +2266,7 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
       totalOpenInLocalDB: localOpenOrders.length,
       ordersClosed: 0,
       ordersCreated: 0,
+      duplicatesRemoved: duplicatesRemoved, // Track but don't show on frontend
       errors: [],
       closedOrders: [],
       createdOrders: [],
@@ -2225,6 +2336,7 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
           DiscountPercent: sapOrder.DiscountPercent,
           PriceList: sapOrder.PriceList,
           StartDeliveryDate: sapOrder.StartDeliveryDate || sapOrder.DocDate,
+          RequriedDate: sapOrder.RequriedDate || sapOrder.DocDate,
           DocumentLines: sapOrder.DocumentLines?.map((line, index) => ({
             LineNum: line.LineNum || index,
             ItemCode: line.ItemCode,
@@ -2245,7 +2357,7 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
           ImportDate: new Date(),
           ImportSource: "Status_Sync",
           Comments: sapOrder.Comments || "",
-          U_Notes: "Imported via Status Sync from SAP B1 - Missing Order",
+          U_Notes: sapOrder.Remarks || sapOrder.U_Notes || "",
         });
 
         await newOrder.save();
@@ -2274,6 +2386,7 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
 
     console.log("\n" + "=".repeat(60));
     console.log("ORDER STATUS SYNC COMPLETED");
+    console.log(`Duplicates removed: ${duplicatesRemoved}`);
     console.log(`Open orders in SAP: ${results.totalOpenInSAP}`);
     console.log(`Open orders in Local DB (before): ${results.totalOpenInLocalDB}`);
     console.log(`Orders closed: ${results.ordersClosed}`);
@@ -2289,6 +2402,7 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
         ...results,
         finalLocalOpenCount,
         matched: finalLocalOpenCount === results.totalOpenInSAP,
+        // Don't expose duplicatesRemoved to frontend - it's handled silently
       },
     });
 
@@ -2297,6 +2411,170 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error syncing order statuses from SAP",
+      error: error.message,
+    });
+  }
+};
+
+// Update notes for all open orders from SAP
+exports.updateNotesForOpenOrders = async (req, res) => {
+  try {
+    console.log("\n" + "=".repeat(60));
+    console.log("UPDATING NOTES FOR ALL OPEN ORDERS FROM SAP");
+    console.log("=".repeat(60));
+
+    const { loginToSAP } = require("../utils/sapB1Integration");
+    const axios = require("axios");
+
+    // Login to SAP
+    const sessionId = await loginToSAP();
+    const headers = {
+      "Content-Type": "application/json",
+      Cookie: `B1SESSION=${sessionId}`,
+    };
+
+    let openOrdersInSAP = [];
+    let totalFetched = 0;
+
+    // Fetch all OPEN orders from SAP with full details
+    let nextLink = `${SAP_CONFIG.serviceLayerUrl}/Orders?$filter=DocumentStatus eq 'bost_Open'&$orderby=DocNum`;
+
+    console.log("Fetching open orders from SAP...");
+
+    while (nextLink) {
+      try {
+        console.log(`Fetching batch from SAP...`);
+        const response = await axios.get(nextLink, { headers });
+
+        const currentBatch = response.data.value;
+        console.log(`Fetched ${currentBatch.length} orders in this batch`);
+
+        openOrdersInSAP.push(...currentBatch);
+        totalFetched += currentBatch.length;
+
+        console.log(`Total open orders fetched so far: ${totalFetched}`);
+
+        nextLink = response.data["odata.nextLink"];
+
+        if (nextLink && nextLink.startsWith("Orders")) {
+          nextLink = `${SAP_CONFIG.serviceLayerUrl}/${nextLink}`;
+        }
+
+        if (nextLink) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+
+      } catch (error) {
+        console.error("Error fetching batch from SAP:", error.message);
+        if (error.response) {
+          console.error("SAP Error details:", error.response.data);
+        }
+        break;
+      }
+    }
+
+    console.log(`\nTotal open orders fetched from SAP: ${openOrdersInSAP.length}`);
+
+    // Find all open orders in local DB
+    const localOpenOrders = await SalesOrder.find({
+      DocumentStatus: { $in: ["bost_Open", "O"] },
+    }).select("DocNum U_Notes");
+
+    console.log(`Total open orders in local DB: ${localOpenOrders.length}`);
+
+    const results = {
+      totalInSAP: openOrdersInSAP.length,
+      totalInLocal: localOpenOrders.length,
+      updated: 0,
+      notFoundInSAP: 0,
+      noRemarks: 0,
+      alreadyUpToDate: 0,
+      errors: [],
+      updatedOrders: [],
+    };
+
+    // Create a map of SAP orders by DocNum for quick lookup
+    const sapOrdersMap = {};
+    openOrdersInSAP.forEach(order => {
+      sapOrdersMap[order.DocNum] = order;
+    });
+
+    // Update each local open order
+    for (const localOrder of localOpenOrders) {
+      try {
+        const sapOrder = sapOrdersMap[localOrder.DocNum];
+
+        if (!sapOrder) {
+          console.log(`⚠️ Order ${localOrder.DocNum} not found in SAP open orders`);
+          results.notFoundInSAP++;
+          continue;
+        }
+
+        // Get remarks from SAP (try multiple possible field names)
+        const remarks = sapOrder.Remarks || sapOrder.JournalMemo || sapOrder.U_Remarks || "";
+
+        if (!remarks || remarks.trim() === "") {
+          console.log(`ℹ️ Order ${localOrder.DocNum} has no remarks in SAP`);
+          results.noRemarks++;
+          continue;
+        }
+
+        // Check if already up to date
+        if (localOrder.U_Notes === remarks) {
+          console.log(`✓ Order ${localOrder.DocNum} already has correct notes`);
+          results.alreadyUpToDate++;
+          continue;
+        }
+
+        // Update the notes
+        const oldNotes = localOrder.U_Notes || "(empty)";
+        localOrder.U_Notes = remarks;
+        localOrder.UpdateDate = new Date();
+
+        await localOrder.save();
+
+        results.updated++;
+        results.updatedOrders.push({
+          DocNum: localOrder.DocNum,
+          oldNotes: oldNotes.substring(0, 50),
+          newNotes: remarks.substring(0, 50),
+        });
+
+        console.log(`✅ Updated Order ${localOrder.DocNum}`);
+        console.log(`   Old: ${oldNotes.substring(0, 60)}...`);
+        console.log(`   New: ${remarks.substring(0, 60)}...`);
+
+      } catch (error) {
+        console.error(`❌ Error updating order ${localOrder.DocNum}:`, error.message);
+        results.errors.push({
+          DocNum: localOrder.DocNum,
+          error: error.message,
+        });
+      }
+    }
+
+    console.log("\n" + "=".repeat(60));
+    console.log("NOTES UPDATE COMPLETED");
+    console.log(`Total orders in SAP: ${results.totalInSAP}`);
+    console.log(`Total orders in Local DB: ${results.totalInLocal}`);
+    console.log(`Updated: ${results.updated}`);
+    console.log(`Already up to date: ${results.alreadyUpToDate}`);
+    console.log(`No remarks in SAP: ${results.noRemarks}`);
+    console.log(`Not found in SAP: ${results.notFoundInSAP}`);
+    console.log(`Errors: ${results.errors.length}`);
+    console.log("=".repeat(60) + "\n");
+
+    res.status(200).json({
+      success: true,
+      message: `Notes update completed. ${results.updated} orders updated.`,
+      data: results,
+    });
+
+  } catch (error) {
+    console.error("Error updating notes from SAP:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error updating notes from SAP",
       error: error.message,
     });
   }

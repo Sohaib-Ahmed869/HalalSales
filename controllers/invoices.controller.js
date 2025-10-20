@@ -129,9 +129,39 @@ exports.createInvoiceFromDeliveryNote = async (req, res) => {
       });
     }
 
+    // ✅ FIX: Determine the correct SAP BaseEntry for invoice
+    let sapBaseEntry;
+    let isFromSAPOrder = false;
+
+    // Check if DN has salesAgent to determine origin
+    if (!deliveryNote.salesAgent) {
+      isFromSAPOrder = true;
+      // Use DocEntry as the SAP reference
+      sapBaseEntry = deliveryNote.DocEntry;
+      console.log(`📦 DN from SAP order. Using DocEntry ${sapBaseEntry} as BaseEntry`);
+    } else {
+      // System-created DN - check if synced
+      if (!deliveryNote.SyncedWithSAP || !deliveryNote.SAPDocEntry) {
+        return res.status(400).json({
+          success: false,
+          message: `Delivery note ${deliveryNote.DocNum} is not synced with SAP. Cannot create invoice.`,
+          data: {
+            deliveryNoteDocNum: deliveryNote.DocNum,
+            synced: deliveryNote.SyncedWithSAP,
+            sapDocEntry: deliveryNote.SAPDocEntry
+          }
+        });
+      }
+      sapBaseEntry = deliveryNote.SAPDocEntry;
+      console.log(`🆕 System-created DN. Using SAPDocEntry ${sapBaseEntry} as BaseEntry`);
+    }
+
     // Check if invoice already exists
     const existingInvoice = await Invoice.findOne({
-      BaseEntry: deliveryNote.SAPDocEntry // Check by SAP DocEntry
+      $or: [
+        { BaseEntry: sapBaseEntry },
+        { OriginatingDeliveryNote: deliveryNote.DocNum }
+      ]
     });
 
     if (existingInvoice) {
@@ -142,42 +172,21 @@ exports.createInvoiceFromDeliveryNote = async (req, res) => {
       });
     }
 
-    // *** CRITICAL: Check if delivery note is synced with SAP ***
-    if (!deliveryNote.SyncedWithSAP || !deliveryNote.SAPDocEntry) {
-      return res.status(400).json({
-        success: false,
-        message: `Delivery note ${deliveryNote.DocNum} is not synced with SAP. Cannot create invoice.`,
-        data: {
-          deliveryNoteDocNum: deliveryNote.DocNum,
-          synced: deliveryNote.SyncedWithSAP,
-          sapDocEntry: deliveryNote.SAPDocEntry
-        }
-      });
-    }
-
-    // Get next DocNum for Invoice
-    let newDocNum;
-    let newDocEntry;
-
+    // Get next DocNum
+    let newDocNum, newDocEntry;
     try {
       const { getNextInvoiceDocNumFromSAP, getNextInvoiceDocEntryFromSAP } = require("../utils/sapB1Integration");
       newDocNum = await getNextInvoiceDocNumFromSAP();
       newDocEntry = await getNextInvoiceDocEntryFromSAP();
-
-      if (newDocNum) {
-        console.log(`Using SAP-aligned Invoice DocNum: ${newDocNum}`);
-      } else {
-        throw new Error("Could not get DocNum from SAP");
-      }
+      console.log(`Using SAP-aligned Invoice DocNum: ${newDocNum}`);
     } catch (sapError) {
-      console.warn("Could not get Invoice DocNum from SAP, falling back to local generation:", sapError.message);
       const lastInvoice = await Invoice.findOne().sort({ CreatedAt: -1 });
       newDocEntry = lastInvoice ? lastInvoice.DocEntry + 1 : 1;
       newDocNum = newDocEntry;
       console.log(`Using local Invoice DocNum: ${newDocNum}`);
     }
 
-    // Create invoice from delivery note with proper base references
+    // ✅ Create invoice with CORRECT base references
     const invoice = new Invoice({
       DocEntry: newDocEntry,
       DocNum: newDocNum,
@@ -200,12 +209,12 @@ exports.createInvoiceFromDeliveryNote = async (req, res) => {
       CreationDate: new Date(),
       UpdateDate: new Date(),
 
-      // ✅ CRITICAL: Reference to source delivery note - USE SAP DOCENTRY
-      BaseType: 15, // Delivery Note (changed from -1)
-      BaseEntry: deliveryNote.SAPDocEntry, // *** USE SAP DOCENTRY ***
-      OriginatingDeliveryNote: deliveryNote.DocNum, // Keep local DocNum for reference
+      // ✅ CRITICAL: Use CORRECT SAP reference
+      BaseType: 15, // Delivery Note
+      BaseEntry: sapBaseEntry, // *** CORRECTED ***
+      OriginatingDeliveryNote: deliveryNote.DocNum,
 
-      // ✅ CRITICAL: Document lines with proper base references
+      // ✅ Document lines with proper base references
       DocumentLines: deliveryNote.DocumentLines.map((line, index) => ({
         LineNum: index,
         ItemCode: line.ItemCode,
@@ -217,9 +226,9 @@ exports.createInvoiceFromDeliveryNote = async (req, res) => {
         LineTotal: line.LineTotal,
         VatGroup: line.VatGroup,
 
-        // ✅ Base document references for each line
+        // ✅ Base references for each line
         BaseType: 15, // Delivery Note
-        BaseEntry: deliveryNote.SAPDocEntry, // *** USE SAP DOCENTRY ***
+        BaseEntry: sapBaseEntry, // *** CORRECTED ***
         BaseLine: line.LineNum,
       })),
 
@@ -231,8 +240,10 @@ exports.createInvoiceFromDeliveryNote = async (req, res) => {
       // Copy sales agent if exists
       salesAgent: deliveryNote.salesAgent,
 
-      // Comments
-      Comments: `Invoice for delivery note #${deliveryNote.DocNum}`,
+      // Comments with metadata
+      Comments: isFromSAPOrder
+        ? `Invoice for DN #${deliveryNote.DocNum} (from SAP order, DN Entry: ${sapBaseEntry})`
+        : `Invoice for delivery note #${deliveryNote.DocNum}`,
       U_Notes: deliveryNote.U_Notes || "",
 
       // Custom tracking fields
@@ -243,12 +254,18 @@ exports.createInvoiceFromDeliveryNote = async (req, res) => {
 
     await invoice.save();
 
-    console.log(`✅ Created invoice ${newDocNum} with base delivery note DocEntry ${deliveryNote.SAPDocEntry}`);
+    console.log(`✅ Created invoice ${newDocNum} with BaseEntry ${sapBaseEntry} (From SAP: ${isFromSAPOrder})`);
 
     res.status(201).json({
       success: true,
       message: "Invoice created successfully",
       data: invoice,
+      debug: {
+        isFromSAPOrder,
+        sapBaseEntry,
+        dnDocNum: deliveryNote.DocNum,
+        dnDocEntry: deliveryNote.DocEntry
+      }
     });
 
   } catch (error) {
@@ -772,20 +789,37 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
           continue;
         }
 
-        // *** CRITICAL: Check if delivery note is synced with SAP ***
-        if (!deliveryNote.SyncedWithSAP || !deliveryNote.SAPDocEntry) {
-          results.failed.push({
-            docNum,
-            error: "Delivery note not synced with SAP",
-            synced: deliveryNote.SyncedWithSAP,
-            sapDocEntry: deliveryNote.SAPDocEntry
-          });
-          continue;
+        // ✅ FIX: Determine the correct SAP BaseEntry for invoice
+        let sapBaseEntry;
+        let isFromSAPOrder = false;
+
+        // Check if DN has salesAgent to determine origin
+        if (!deliveryNote.salesAgent) {
+          isFromSAPOrder = true;
+          // Use DocEntry as the SAP reference (it's already the SAP DocEntry)
+          sapBaseEntry = deliveryNote.DocEntry;
+          console.log(`📦 DN ${docNum} from SAP order. Using DocEntry ${sapBaseEntry} as BaseEntry`);
+        } else {
+          // System-created DN - check if synced
+          if (!deliveryNote.SyncedWithSAP || !deliveryNote.SAPDocEntry) {
+            results.failed.push({
+              docNum,
+              error: "Delivery note not synced with SAP",
+              synced: deliveryNote.SyncedWithSAP,
+              sapDocEntry: deliveryNote.SAPDocEntry
+            });
+            continue;
+          }
+          sapBaseEntry = deliveryNote.SAPDocEntry;
+          console.log(`🆕 DN ${docNum} system-created. Using SAPDocEntry ${sapBaseEntry} as BaseEntry`);
         }
 
-        // Check if invoice already exists
+        // Check if invoice already exists - use the correct sapBaseEntry
         const existingInvoice = await Invoice.findOne({
-          BaseEntry: deliveryNote.SAPDocEntry
+          $or: [
+            { BaseEntry: sapBaseEntry },
+            { OriginatingDeliveryNote: deliveryNote.DocNum }
+          ]
         });
 
         if (existingInvoice) {
@@ -890,7 +924,7 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
               LineNum: index,
 
               BaseType: 15, // Delivery Note
-              BaseEntry: deliveryNote.SAPDocEntry,
+              BaseEntry: sapBaseEntry,
               BaseLine: line.BaseLine,
             })),
 
@@ -933,7 +967,7 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
             UpdateDate: new Date(),
 
             BaseType: 15, // Delivery Note
-            BaseEntry: deliveryNote.SAPDocEntry,
+            BaseEntry: sapBaseEntry,
             OriginatingDeliveryNote: deliveryNote.DocNum,
 
             DocumentLines: invoiceLines,
@@ -959,7 +993,7 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
             linesAfterReturns: invoiceLines.length,
             totalAfterReturns: invoiceTotal,
             syncedToSAP: true,
-            sapDeliveryNoteDocEntry: deliveryNote.SAPDocEntry
+            sapDeliveryNoteDocEntry: sapBaseEntry, 
           });
 
           console.log(`✅ Created invoice ${sapResponse.DocNum} for DN ${deliveryNote.DocNum}`);
