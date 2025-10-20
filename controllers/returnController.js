@@ -1,4 +1,4 @@
-// controllers/returnController.js
+// controllers/returnController.js - FIXED VERSION
 const Return = require("../models/Return");
 const DeliveryNote = require("../models/DeliveryNote");
 const {
@@ -8,11 +8,7 @@ const {
     checkBusinessPartnerExists
 } = require("../utils/sapB1Integration");
 
-// controllers/returnController.js - Update createReturnFromDeliveryNote
-
-// controllers/returnController.js
-// Replace the entire createReturnFromDeliveryNote function
-
+// ✅ FIXED: Create return with proper base document references
 exports.createReturnFromDeliveryNote = async (req, res) => {
     try {
         const { deliveryNoteDocEntry } = req.params;
@@ -39,6 +35,7 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
         let docTotal = 0;
         let vatSum = 0;
 
+        // ✅ CRITICAL FIX: Include base document references to link and close DN
         const processedLines = returnLines.map((line, index) => {
             const lineTotal = line.Quantity * line.Price;
             const lineTax = lineTotal * 0.055;
@@ -46,41 +43,71 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
             docTotal += lineTotal;
             vatSum += lineTax;
 
+            // Find the original DN line to get BaseLine
+            const originalLine = deliveryNote.DocumentLines.find(
+                dnLine => dnLine.ItemCode === line.ItemCode
+            );
+
             return {
                 ItemCode: line.ItemCode,
                 ItemDescription: line.ItemDescription,
                 Quantity: line.Quantity,
                 UnitPrice: line.Price,
                 LineNum: index,
-                // ✅ CRITICAL: Do NOT include BaseType, BaseEntry, BaseLine for returns
-                // SAP Returns don't support base document references from delivery notes
+
+                // ✅ CRITICAL: Include base document references
+                // BaseType 15 = Delivery Note
+                BaseType: 15,
+                BaseEntry: deliveryNote.SAPDocEntry, // SAP's DocEntry for the DN
+                BaseLine: originalLine ? originalLine.LineNum : index
             };
+        });
+
+        console.log("Creating return with base DN references:", {
+            BaseEntry: deliveryNote.SAPDocEntry,
+            BaseType: 15,
+            DNDocNum: deliveryNote.DocNum,
+            Lines: processedLines.length
         });
 
         // **STEP 1: Create in SAP first**
         try {
-            const { createReturnInSAP } = require("../utils/sapB1Integration");
-
             const returnDataForSAP = {
                 CardCode: deliveryNote.CardCode,
                 DocDate: new Date(),
                 DocDueDate: new Date(),
                 Comments: comments || `Return for DN #${deliveryNote.DocNum}. Reason: ${reason || 'Not specified'}`,
-                DocumentLines: processedLines
+                DocumentLines: processedLines.map(line => ({
+                    ItemCode: line.ItemCode,
+                    ItemDescription: line.ItemDescription,
+                    Quantity: line.Quantity,
+                    UnitPrice: line.UnitPrice,
+                    LineNum: line.LineNum,
+
+                    // ✅ CRITICAL: Base document references for SAP
+                    BaseType: 15, // Delivery Note
+                    BaseEntry: deliveryNote.SAPDocEntry,
+                    BaseLine: line.BaseLine
+                }))
             };
 
-            console.log("Creating return in SAP...");
+            console.log("Return data for SAP:", JSON.stringify(returnDataForSAP, null, 2));
+
             const sapResponse = await createReturnInSAP(returnDataForSAP);
 
             if (!sapResponse || !sapResponse.DocEntry) {
                 throw new Error("Invalid response from SAP - no DocEntry received");
             }
 
+            console.log("✅ Return created in SAP:", {
+                DocEntry: sapResponse.DocEntry,
+                DocNum: sapResponse.DocNum
+            });
+
             // **STEP 2: Save to local DB with SAP-assigned DocEntry/DocNum**
-            const Return = require("../models/Return");
             const returnDoc = new Return({
-                DocEntry: sapResponse.DocEntry,  // ✅ Use SAP DocEntry
-                DocNum: sapResponse.DocNum,      // ✅ Use SAP DocNum
+                DocEntry: sapResponse.DocEntry,
+                DocNum: sapResponse.DocNum,
                 SAPDocEntry: sapResponse.DocEntry,
                 DocType: "dDocument_Items",
                 CardCode: deliveryNote.CardCode,
@@ -91,8 +118,12 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
                 VatSum: vatSum,
                 DocDate: new Date(),
                 DocDueDate: new Date(),
+
+                // ✅ Base document references
+                BaseType: 15, // Delivery Note
                 BaseEntry: deliveryNote.SAPDocEntry,
                 OriginatingDocument: deliveryNote.DocNum,
+
                 Comments: returnDataForSAP.Comments,
                 DocumentLines: processedLines.map((line, index) => ({
                     LineNum: index,
@@ -101,11 +132,17 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
                     Quantity: line.Quantity,
                     Price: line.UnitPrice,
                     LineTotal: line.Quantity * line.UnitPrice,
-                    VatGroup: returnLines[index].VatGroup
+                    VatGroup: returnLines[index].VatGroup,
+
+                    // ✅ Base references in local DB too
+                    BaseType: 15,
+                    BaseEntry: deliveryNote.SAPDocEntry,
+                    BaseLine: line.BaseLine
                 })),
-                DocumentStatus: "bost_Close",    // Already synced
-                SyncedWithSAP: true,             // ✅ Already synced
-                LocalStatus: "Synced",           // ✅ Already synced
+
+                DocumentStatus: "bost_Close",
+                SyncedWithSAP: true,
+                LocalStatus: "Synced",
                 salesAgent: deliveryNote.salesAgent
             });
 
@@ -118,14 +155,26 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
             deliveryNote.totalReturnedAmount = (deliveryNote.totalReturnedAmount || 0) + docTotal;
             await deliveryNote.save();
 
-            console.log(`✅ Return created successfully: DocEntry ${sapResponse.DocEntry}, DocNum ${sapResponse.DocNum}`);
-            console.log(`✅ Delivery note ${deliveryNote.DocNum} marked with return`);
+            // **STEP 4: Check if DN should be closed (full return)**
+            const totalDNAmount = deliveryNote.DocTotal;
+            const totalReturned = deliveryNote.totalReturnedAmount;
+
+            if (Math.abs(totalDNAmount - totalReturned) < 0.01) {
+                console.log(`✅ Full return detected - DN #${deliveryNote.DocNum} should be closed in SAP`);
+                // SAP will automatically close the DN due to base document references
+            } else {
+                console.log(`ℹ️ Partial return - DN #${deliveryNote.DocNum} remains open`);
+            }
+
+            console.log(`✅ Return ${sapResponse.DocNum} linked to DN ${deliveryNote.DocNum}`);
 
             res.status(201).json({
                 success: true,
                 message: "Return created and synced to SAP successfully",
                 data: returnDoc,
-                syncedToSAP: true
+                syncedToSAP: true,
+                linkedToDeliveryNote: deliveryNote.DocNum,
+                isFullReturn: Math.abs(totalDNAmount - totalReturned) < 0.01
             });
 
         } catch (sapError) {
@@ -147,14 +196,11 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
     }
 };
 
-// controllers/returnController.js
-// Replace pushReturnToSAP function
-
+// Push return to SAP (for unsynced returns)
 exports.pushReturnToSAP = async (req, res) => {
     try {
         const { docEntry } = req.params;
 
-        const Return = require("../models/Return");
         const returnDoc = await Return.findOne({ DocEntry: docEntry });
 
         if (!returnDoc) {
@@ -176,9 +222,7 @@ exports.pushReturnToSAP = async (req, res) => {
         }
 
         // Check business partner
-        const { checkBusinessPartnerExists, createReturnInSAP } = require("../utils/sapB1Integration");
         const bpExists = await checkBusinessPartnerExists(returnDoc.CardCode);
-
         if (!bpExists) {
             returnDoc.SyncErrors = `Business partner ${returnDoc.CardCode} not found in SAP`;
             returnDoc.LocalStatus = "SyncFailed";
@@ -191,7 +235,7 @@ exports.pushReturnToSAP = async (req, res) => {
             });
         }
 
-        // Format and push to SAP
+        // Format and push to SAP with base references
         const returnDataForSAP = {
             CardCode: returnDoc.CardCode,
             DocDate: returnDoc.DocDate || new Date(),
@@ -202,8 +246,12 @@ exports.pushReturnToSAP = async (req, res) => {
                 ItemDescription: line.ItemDescription,
                 Quantity: line.Quantity,
                 UnitPrice: line.Price,
-                LineNum: index
-                // ✅ No BaseType, BaseEntry, BaseLine
+                LineNum: index,
+
+                // ✅ Include base references
+                BaseType: line.BaseType || 15,
+                BaseEntry: line.BaseEntry || returnDoc.BaseEntry,
+                BaseLine: line.BaseLine !== undefined ? line.BaseLine : index
             }))
         };
 

@@ -1172,10 +1172,10 @@ exports.createReturnInSAP = async (returnData) => {
     }
 
     const sessionId = await getSessionId();
-    console.log("Creating return in SAP B1...");
+    console.log("Creating return in SAP B1 with base document references...");
     console.log("Return data being sent:", JSON.stringify(returnData, null, 2));
 
-    // ✅ CORRECT ENDPOINT: Returns (not ReturnsService)
+    // ✅ CORRECT ENDPOINT: Returns
     const response = await axios.post(
       `${SAP_CONFIG.serviceLayerUrl}/Returns`,
       returnData,
@@ -1275,7 +1275,8 @@ exports.createCreditNoteInSAP = async (creditNoteData) => {
     }
 
     const sessionId = await getSessionId();
-    console.log("Creating credit note in SAP B1...");
+    console.log("Creating credit note in SAP B1 with base document references...");
+    console.log("Credit note data being sent:", JSON.stringify(creditNoteData, null, 2));
 
     const response = await axios.post(
       `${SAP_CONFIG.serviceLayerUrl}/CreditNotes`,
@@ -1288,16 +1289,77 @@ exports.createCreditNoteInSAP = async (creditNoteData) => {
       }
     );
 
-    console.log("Credit note created successfully:", response.data.DocEntry);
+    console.log("Credit note created successfully in SAP B1");
+    console.log("SAP Response:", {
+      DocEntry: response.data.DocEntry,
+      DocNum: response.data.DocNum,
+      CardCode: response.data.CardCode,
+    });
+
     return response.data;
   } catch (error) {
     console.error("Error creating credit note in SAP:", error.message);
+    if (error.response) {
+      console.error("SAP Error details:", error.response.data);
+
+      if (
+        error.response.data &&
+        error.response.data.error &&
+        error.response.data.error.message
+      ) {
+        console.error(
+          "Error field details:",
+          error.response.data.error.message.value
+        );
+      }
+    }
+
     if (error.response?.status === 401) {
+      console.log("Session expired, attempting to login again...");
       sessionId = null;
       await getSessionId();
       return exports.createCreditNoteInSAP(creditNoteData);
     }
+
     throw new Error(`SAP Error: ${error.message}`);
+  }
+};
+
+// Get next Credit Note DocNum from SAP - ✅ VERIFIED CORRECT
+exports.getNextCreditNoteDocNumFromSAP = async () => {
+  try {
+    const sessionId = await getSessionId();
+    console.log("Fetching next Credit Note DocNum from SAP B1...");
+
+    const response = await axios.get(
+      `${SAP_CONFIG.serviceLayerUrl}/CreditNotes?$select=DocNum&$orderby=DocNum desc&$top=1`,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `B1SESSION=${sessionId}`,
+        },
+      }
+    );
+
+    let nextDocNum = 1;
+    if (response.data?.value?.length > 0) {
+      const lastDocNum = response.data.value[0].DocNum;
+      nextDocNum = lastDocNum + 1;
+      console.log(`Last Credit Note DocNum in SAP: ${lastDocNum}, Next: ${nextDocNum}`);
+    } else {
+      console.log("No existing credit notes found in SAP, starting with DocNum: 1");
+    }
+
+    return nextDocNum;
+  } catch (error) {
+    console.error("Error getting next Credit Note DocNum:", error.message);
+    if (error.response?.status === 401) {
+      sessionId = null;
+      await getSessionId();
+      return exports.getNextCreditNoteDocNumFromSAP();
+    }
+    console.warn("Falling back to local DocNum calculation for Credit Note");
+    return null;
   }
 };
 
@@ -1378,11 +1440,21 @@ exports.formatReturnForSAP = async (returnDoc) => {
       UnitPrice: Number(line.Price || 0),
       ItemDescription: line.ItemDescription || "",
       LineNum: index,
-      BaseType: line.BaseType,
+
+      // ✅ CRITICAL: Base document references to link and close DN
+      // BaseType 15 = Delivery Note (for returns)
+      BaseType: line.BaseType || 15,
       BaseEntry: line.BaseEntry,
-      BaseLine: line.BaseLine || index
+      BaseLine: line.BaseLine !== undefined ? line.BaseLine : index
     }));
   }
+
+  console.log("SAP Return formatted with base references:", {
+    CardCode: sapReturn.CardCode,
+    DocumentLines: sapReturn.DocumentLines.length,
+    HasBaseReferences: sapReturn.DocumentLines.some(l => l.BaseType === 15),
+    BaseEntry: sapReturn.DocumentLines[0]?.BaseEntry
+  });
 
   return sapReturn;
 };
@@ -1465,7 +1537,7 @@ exports.formatCreditNoteForSAP = async (creditNote) => {
     sapCreditNote.U_Notes = creditNote.U_Notes;
   }
 
-  // Process document lines - SAP B1 format
+  // Process document lines with base references
   if (creditNote.DocumentLines?.length > 0) {
     sapCreditNote.DocumentLines = creditNote.DocumentLines.map((line, index) => {
       const sapLine = {
@@ -1473,13 +1545,14 @@ exports.formatCreditNoteForSAP = async (creditNote) => {
         ItemCode: line.ItemCode,
         ItemDescription: line.ItemDescription || "",
         Quantity: Number(line.Quantity || 0),
-        // SAP uses "Price" field for credit notes, not "UnitPrice"
+        // SAP uses "Price" field for credit notes
         Price: Number(line.Price || line.UnitPrice || 0),
       };
 
-      // Add base document references ONLY if they exist and are valid
+      // ✅ CRITICAL: Include base document references to link and close invoice
+      // BaseType 13 = AR Invoice
       if (line.BaseType !== undefined && line.BaseType !== null) {
-        sapLine.BaseType = Number(line.BaseType); // Must be a number
+        sapLine.BaseType = Number(line.BaseType);
 
         if (line.BaseEntry !== undefined && line.BaseEntry !== null) {
           sapLine.BaseEntry = Number(line.BaseEntry);
@@ -1491,11 +1564,12 @@ exports.formatCreditNoteForSAP = async (creditNote) => {
     });
   }
 
-  console.log("\n" + "=".repeat(60));
-  console.log("FORMATTED CREDIT NOTE FOR SAP");
-  console.log("=".repeat(60));
-  console.log(JSON.stringify(sapCreditNote, null, 2));
-  console.log("=".repeat(60) + "\n");
+  console.log("SAP Credit Note formatted with base references:", {
+    CardCode: sapCreditNote.CardCode,
+    DocumentLines: sapCreditNote.DocumentLines.length,
+    HasBaseReferences: sapCreditNote.DocumentLines.some(l => l.BaseType === 13),
+    BaseEntry: sapCreditNote.DocumentLines[0]?.BaseEntry
+  });
 
   return sapCreditNote;
 };

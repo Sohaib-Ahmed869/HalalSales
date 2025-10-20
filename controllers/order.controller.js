@@ -440,7 +440,7 @@ exports.bulkImportSalesOrders = async (req, res) => {
         // Add import metadata
         ImportDate: new Date(),
         ImportSource: "SAP_B1_Bulk_Import",
-        U_Notes: row["Remarks"] || row["U_Notes"] || "",
+        U_Notes: row["Comments"] || "",
       };
 
       newOrders.push(salesOrder);
@@ -2357,7 +2357,7 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
           ImportDate: new Date(),
           ImportSource: "Status_Sync",
           Comments: sapOrder.Comments || "",
-          U_Notes: sapOrder.Remarks || sapOrder.U_Notes || "",
+          U_Notes: sapOrder.Comments || "",
         });
 
         await newOrder.save();
@@ -2511,8 +2511,8 @@ exports.updateNotesForOpenOrders = async (req, res) => {
         }
 
         // Get remarks from SAP (try multiple possible field names)
-        const remarks = sapOrder.Remarks || sapOrder.JournalMemo || sapOrder.U_Remarks || "";
-
+        // Get comments from SAP
+        const remarks = sapOrder.Comments || "";
         if (!remarks || remarks.trim() === "") {
           console.log(`ℹ️ Order ${localOrder.DocNum} has no remarks in SAP`);
           results.noRemarks++;

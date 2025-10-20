@@ -2,7 +2,35 @@
 const SalesOrder = require("../models/SalesOrder");
 const PDFDocument = require("pdfkit");
 const axios = require("axios");
-
+// Helper function to sanitize text for PDF rendering
+// Helper function to sanitize text for PDF rendering
+const sanitizeText = (text) => {
+    if (!text) return "";
+    return text
+        // Remove all carriage returns and normalize line breaks
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        // Remove any remaining non-printable characters except spaces and line breaks
+        .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, '')
+        // Replace common French accented characters
+        .replace(/[àâä]/g, 'a')
+        .replace(/[éèêë]/g, 'e')
+        .replace(/[îï]/g, 'i')
+        .replace(/[ôö]/g, 'o')
+        .replace(/[ùûü]/g, 'u')
+        .replace(/ÿ/g, 'y')
+        .replace(/ç/g, 'c')
+        .replace(/[ÀÂÄ]/g, 'A')
+        .replace(/[ÉÈÊË]/g, 'E')
+        .replace(/[ÎÏ]/g, 'I')
+        .replace(/[ÔÖ]/g, 'O')
+        .replace(/[ÙÛÜ]/g, 'U')
+        .replace(/Ÿ/g, 'Y')
+        .replace(/Ç/g, 'C')
+        // Remove any other non-ASCII characters
+        .replace(/[^\x20-\x7E\n]/g, '')
+        .trim();
+};
 // Helper function to download image from URL
 const downloadImage = async (url) => {
     try {
@@ -102,12 +130,7 @@ const generateOrderPage = async (doc, order, logoBuffer, isFirstOrder = false) =
         doc.fontSize(16).font("Helvetica-Bold").fillColor("#000000");
         doc.text("Facture Proforma", rightColumnX, margin, { continued: false });
 
-        // FIX 1: Add customer name prominently
-        doc.fontSize(10).font("Helvetica-Bold").fillColor("#000000");
-        doc.text(order.CardName || "", rightColumnX - 180, margin + 25, {
-            width: 380,
-            continued: false
-        });
+
 
         let rightY = margin + 45;
 
@@ -178,35 +201,56 @@ const generateOrderPage = async (doc, order, logoBuffer, isFirstOrder = false) =
     };
 
     const drawAddresses = (startY) => {
+        // LEFT COLUMN - Billing Address with customer name on top
+        doc.fontSize(10).font("Helvetica-Bold").fillColor("#000000");
+        doc.text(order.CardName || "", margin, startY, {
+            width: (pageWidth / 2) - margin - 20,
+            continued: false
+        });
+
         doc.fontSize(8).font("Helvetica").fillColor("#666666");
-        doc.text("Addresse de facturation", margin, startY, { continued: false });
+        doc.text("Addresse de facturation", margin, startY + 15, { continued: false });
 
         doc.fontSize(9).font("Helvetica").fillColor("#000000");
-        doc.text("2 avenue emilie zola", margin, startY + 15, { continued: false });
-        doc.text("75015 PARIS", margin, startY + 27, { continued: false });
-        doc.text("FRANCE", margin, startY + 39, { continued: false });
+        doc.text("2 avenue emilie zola", margin, startY + 30, { continued: false });
+        doc.text("75015 PARIS", margin, startY + 42, { continued: false });
+        doc.text("FRANCE", margin, startY + 54, { continued: false });
 
-        // FIX 2: Removed duplicate "Delivery Address" label
+        // RIGHT COLUMN - Delivery Address with customer name on top
         const deliveryX = pageWidth / 2 + 20;
+
+        doc.fontSize(10).font("Helvetica-Bold").fillColor("#000000");
+        doc.text(order.CardName || "", deliveryX, startY, {
+            width: (pageWidth / 2) - margin - 20,
+            continued: false
+        });
+
         doc.fontSize(8).font("Helvetica").fillColor("#666666");
-        doc.text("Addresse de livraison", deliveryX, startY, { continued: false });
+        doc.text("Addresse de livraison", deliveryX, startY + 15, { continued: false });
 
         if (order.Address) {
-            const addressLines = order.Address.split("\n").filter(line => line.trim()).slice(0, 3);
-            let yOffset = startY + 15;
+            // Clean and split the address properly
+            const cleanAddress = sanitizeText(order.Address);
+            const addressLines = cleanAddress
+                .split('\n')
+                .map(line => line.trim())
+                .filter(line => line.length > 0)
+                .slice(0, 3);
+
+            let yOffset = startY + 30;
             doc.font("Helvetica").fontSize(9).fillColor("#000000");
             addressLines.forEach(line => {
-                doc.text(line.trim().substring(0, 50), deliveryX, yOffset, { continued: false });
+                doc.text(line.substring(0, 50), deliveryX, yOffset, { continued: false });
                 yOffset += 12;
             });
         } else {
             doc.font("Helvetica").fontSize(9);
-            doc.text("2 avenue emilie zola", deliveryX, startY + 15, { continued: false });
-            doc.text("75015 PARIS", deliveryX, startY + 27, { continued: false });
-            doc.text("FRANCE", deliveryX, startY + 39, { continued: false });
+            doc.text("2 avenue emilie zola", deliveryX, startY + 30, { continued: false });
+            doc.text("75015 PARIS", deliveryX, startY + 42, { continued: false });
+            doc.text("FRANCE", deliveryX, startY + 54, { continued: false });
         }
 
-        return startY + 60;
+        return startY + 75;
     };
 
     const drawTableHeader = (startY) => {
