@@ -129,31 +129,29 @@ exports.createInvoiceFromDeliveryNote = async (req, res) => {
       });
     }
 
-    // ✅ FIX: Determine the correct SAP BaseEntry for invoice
+    // ✅ CRITICAL FIX: Use the actual SAP DocEntry for base reference
     let sapBaseEntry;
     let isFromSAPOrder = false;
 
     // Check if DN has salesAgent to determine origin
     if (!deliveryNote.salesAgent) {
       isFromSAPOrder = true;
-      // Use DocEntry as the SAP reference
-      sapBaseEntry = deliveryNote.DocEntry;
-      console.log(`📦 DN from SAP order. Using DocEntry ${sapBaseEntry} as BaseEntry`);
+      // *** CRITICAL: Use SAPDocEntry if it exists, otherwise DocEntry ***
+      sapBaseEntry = deliveryNote.SAPDocEntry || deliveryNote.DocEntry;
+      console.log(`📦 DN ${docNum} from SAP. Using ${deliveryNote.SAPDocEntry ? 'SAPDocEntry' : 'DocEntry'} ${sapBaseEntry} as BaseEntry`);
     } else {
       // System-created DN - check if synced
       if (!deliveryNote.SyncedWithSAP || !deliveryNote.SAPDocEntry) {
-        return res.status(400).json({
-          success: false,
-          message: `Delivery note ${deliveryNote.DocNum} is not synced with SAP. Cannot create invoice.`,
-          data: {
-            deliveryNoteDocNum: deliveryNote.DocNum,
-            synced: deliveryNote.SyncedWithSAP,
-            sapDocEntry: deliveryNote.SAPDocEntry
-          }
+        results.failed.push({
+          docNum,
+          error: "Delivery note not synced with SAP",
+          synced: deliveryNote.SyncedWithSAP,
+          sapDocEntry: deliveryNote.SAPDocEntry
         });
+        continue;
       }
       sapBaseEntry = deliveryNote.SAPDocEntry;
-      console.log(`🆕 System-created DN. Using SAPDocEntry ${sapBaseEntry} as BaseEntry`);
+      console.log(`🆕 DN ${docNum} system-created. Using SAPDocEntry ${sapBaseEntry} as BaseEntry`);
     }
 
     // Check if invoice already exists
@@ -993,7 +991,7 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
             linesAfterReturns: invoiceLines.length,
             totalAfterReturns: invoiceTotal,
             syncedToSAP: true,
-            sapDeliveryNoteDocEntry: sapBaseEntry, 
+            sapDeliveryNoteDocEntry: sapBaseEntry,
           });
 
           console.log(`✅ Created invoice ${sapResponse.DocNum} for DN ${deliveryNote.DocNum}`);
