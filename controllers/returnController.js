@@ -23,13 +23,10 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
             });
         }
 
-        // Check if DN is synced with SAP
-        if (!deliveryNote.SyncedWithSAP || !deliveryNote.SAPDocEntry) {
-            return res.status(400).json({
-                success: false,
-                message: "Delivery note must be synced with SAP before creating return"
-            });
-        }
+
+        // ✅ CRITICAL FIX: Use the actual SAP DocEntry for base reference
+        const sapDNDocEntry = deliveryNote.SAPDocEntry || deliveryNote.DocEntry;
+        console.log(`Using SAP DN DocEntry: ${sapDNDocEntry} for return (DN DocNum: ${deliveryNote.DocNum})`);
 
         // Calculate totals
         let docTotal = 0;
@@ -55,21 +52,21 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
                 UnitPrice: line.Price,
                 LineNum: index,
 
-                // ✅ CRITICAL: Include base document references
-                // BaseType 15 = Delivery Note
+                // ✅ CRITICAL: Use SAPDocEntry instead of DocEntry
                 BaseType: 15,
-                BaseEntry: deliveryNote.SAPDocEntry, // SAP's DocEntry for the DN
+                BaseEntry: sapDNDocEntry, // *** FIXED: Use SAP's DocEntry ***
                 BaseLine: originalLine ? originalLine.LineNum : index
             };
         });
 
         console.log("Creating return with base DN references:", {
-            BaseEntry: deliveryNote.SAPDocEntry,
+            BaseEntry: sapDNDocEntry, // *** UPDATED LOG ***
             BaseType: 15,
             DNDocNum: deliveryNote.DocNum,
+            DNLocalDocEntry: deliveryNote.DocEntry,
+            DNSAPDocEntry: deliveryNote.SAPDocEntry,
             Lines: processedLines.length
         });
-
         // **STEP 1: Create in SAP first**
         try {
             const returnDataForSAP = {
@@ -84,9 +81,9 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
                     UnitPrice: line.UnitPrice,
                     LineNum: line.LineNum,
 
-                    // ✅ CRITICAL: Base document references for SAP
+                    // ✅ CRITICAL: Use the correct SAP DocEntry
                     BaseType: 15, // Delivery Note
-                    BaseEntry: deliveryNote.SAPDocEntry,
+                    BaseEntry: sapDNDocEntry, // *** FIXED ***
                     BaseLine: line.BaseLine
                 }))
             };
@@ -94,7 +91,6 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
             console.log("Return data for SAP:", JSON.stringify(returnDataForSAP, null, 2));
 
             const sapResponse = await createReturnInSAP(returnDataForSAP);
-
             if (!sapResponse || !sapResponse.DocEntry) {
                 throw new Error("Invalid response from SAP - no DocEntry received");
             }
@@ -119,9 +115,9 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
                 DocDate: new Date(),
                 DocDueDate: new Date(),
 
-                // ✅ Base document references
+                // ✅ Base document references - use SAP DocEntry
                 BaseType: 15, // Delivery Note
-                BaseEntry: deliveryNote.SAPDocEntry,
+                BaseEntry: sapDNDocEntry, // *** FIXED ***
                 OriginatingDocument: deliveryNote.DocNum,
 
                 Comments: returnDataForSAP.Comments,
@@ -134,9 +130,9 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
                     LineTotal: line.Quantity * line.UnitPrice,
                     VatGroup: returnLines[index].VatGroup,
 
-                    // ✅ Base references in local DB too
+                    // ✅ Base references in local DB too - use SAP DocEntry
                     BaseType: 15,
-                    BaseEntry: deliveryNote.SAPDocEntry,
+                    BaseEntry: sapDNDocEntry, // *** FIXED ***
                     BaseLine: line.BaseLine
                 })),
 
