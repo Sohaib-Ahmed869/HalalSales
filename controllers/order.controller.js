@@ -2121,6 +2121,7 @@ exports.updateOrderNotes = async (req, res) => {
   }
 };
 // Sync order statuses from SAP - Close orders that are closed in SAP and create missing ones
+// Sync order statuses from SAP - Close orders that are closed in SAP and create missing ones
 exports.syncOrderStatusesFromSAP = async (req, res) => {
   try {
     console.log("\n" + "=".repeat(60));
@@ -2242,11 +2243,17 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
     // Now find all orders in local DB that are marked as Open (after duplicate removal)
     const localOpenOrders = await SalesOrder.find({
       DocumentStatus: { $in: ["bost_Open", "O"] },
-    }).select("DocNum DocumentStatus CardCode CardName");
+    }).select("DocNum DocumentStatus CardCode CardName DocTotal VatSum DocumentLines U_Notes");
 
     console.log(`\nTotal open orders in local DB (after duplicate removal): ${localOpenOrders.length}`);
 
     const localOpenDocNums = localOpenOrders.map(order => order.DocNum);
+
+    // Create a map of SAP orders by DocNum for quick lookup
+    const sapOrdersMap = {};
+    openOrdersInSAP.forEach(order => {
+      sapOrdersMap[order.DocNum] = order;
+    });
 
     // Find orders that are open locally but NOT in SAP's open list
     const ordersToClose = localOpenOrders.filter(
@@ -2266,11 +2273,103 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
       totalOpenInLocalDB: localOpenOrders.length,
       ordersClosed: 0,
       ordersCreated: 0,
-      duplicatesRemoved: duplicatesRemoved, // Track but don't show on frontend
+      ordersUpdated: 0,
+      duplicatesRemoved: duplicatesRemoved,
       errors: [],
       closedOrders: [],
       createdOrders: [],
+      updatedOrders: [],
     };
+
+    // *** STEP 3: CHECK FOR UPDATES IN EXISTING OPEN ORDERS ***
+    console.log("\n🔄 Checking for updates in existing open orders...");
+
+    for (const localOrder of localOpenOrders) {
+      // Skip orders that will be closed
+      if (ordersToClose.some(order => order.DocNum === localOrder.DocNum)) {
+        continue;
+      }
+
+      const sapOrder = sapOrdersMap[localOrder.DocNum];
+
+      if (!sapOrder) {
+        continue;
+      }
+
+      try {
+        // Compare totals to detect changes
+        const localTotal = parseFloat(localOrder.DocTotal) || 0;
+        const sapTotal = parseFloat(sapOrder.DocTotal) || 0;
+        const localVat = parseFloat(localOrder.VatSum) || 0;
+        const sapVat = parseFloat(sapOrder.VatSum) || 0;
+
+        // Allow for small floating point differences (0.01)
+        const totalDifference = Math.abs(localTotal - sapTotal);
+        const vatDifference = Math.abs(localVat - sapVat);
+
+        const hasChanges = totalDifference > 0.01 || vatDifference > 0.01;
+
+        if (hasChanges) {
+          console.log(`📝 Order ${localOrder.DocNum} has been modified in SAP`);
+          console.log(`   Local Total: ${localTotal}, SAP Total: ${sapTotal}`);
+          console.log(`   Local VAT: ${localVat}, SAP VAT: ${sapVat}`);
+
+          // Update the order with SAP data
+          localOrder.DocTotal = sapOrder.DocTotal;
+          localOrder.VatSum = sapOrder.VatSum;
+          localOrder.DocCurrency = sapOrder.DocCurrency || localOrder.DocCurrency;
+          localOrder.DiscountPercent = sapOrder.DiscountPercent || localOrder.DiscountPercent;
+          localOrder.Address = sapOrder.Address || localOrder.Address;
+          localOrder.Address2 = sapOrder.Address2 || localOrder.Address2;
+          localOrder.DocDate = sapOrder.DocDate || localOrder.DocDate;
+          localOrder.DocDueDate = sapOrder.DocDueDate || localOrder.DocDueDate;
+          localOrder.StartDeliveryDate = sapOrder.StartDeliveryDate || localOrder.StartDeliveryDate;
+          localOrder.RequriedDate = sapOrder.RequriedDate || localOrder.RequriedDate;
+          localOrder.U_Notes = sapOrder.Comments || localOrder.U_Notes;
+
+          // Update document lines if they exist in SAP
+          if (sapOrder.DocumentLines && sapOrder.DocumentLines.length > 0) {
+            localOrder.DocumentLines = sapOrder.DocumentLines.map((line, index) => ({
+              LineNum: line.LineNum || index,
+              ItemCode: line.ItemCode,
+              ItemDescription: line.ItemDescription,
+              Quantity: line.Quantity,
+              Price: line.Price || line.UnitPrice,
+              PriceAfterVAT: line.PriceAfterVAT,
+              Currency: line.Currency || sapOrder.DocCurrency,
+              LineTotal: line.LineTotal,
+              VatGroup: line.VatGroup,
+              PriceList: line.PriceList || sapOrder.PriceList
+            }));
+          }
+
+          localOrder.UpdateDate = new Date();
+          localOrder.LocalStatus = "Synced";
+
+          await localOrder.save();
+
+          results.ordersUpdated++;
+          results.updatedOrders.push({
+            DocNum: localOrder.DocNum,
+            CardCode: localOrder.CardCode,
+            CardName: localOrder.CardName,
+            oldTotal: localTotal,
+            newTotal: sapTotal,
+            difference: totalDifference,
+          });
+
+          console.log(`✅ Order ${localOrder.DocNum} updated successfully`);
+        }
+
+      } catch (error) {
+        console.error(`❌ Error updating order ${localOrder.DocNum}:`, error.message);
+        results.errors.push({
+          DocNum: localOrder.DocNum,
+          action: "update",
+          error: error.message,
+        });
+      }
+    }
 
     // Close the orders that should be closed
     for (const order of ordersToClose) {
@@ -2391,18 +2490,18 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
     console.log(`Open orders in Local DB (before): ${results.totalOpenInLocalDB}`);
     console.log(`Orders closed: ${results.ordersClosed}`);
     console.log(`Orders created: ${results.ordersCreated}`);
+    console.log(`Orders updated: ${results.ordersUpdated}`);
     console.log(`Open orders in Local DB (after): ${finalLocalOpenCount}`);
     console.log(`Errors: ${results.errors.length}`);
     console.log("=".repeat(60) + "\n");
 
     res.status(200).json({
       success: true,
-      message: `Order status sync completed. ${results.ordersClosed} orders closed, ${results.ordersCreated} orders created.`,
+      message: `Order status sync completed. ${results.ordersClosed} closed, ${results.ordersCreated} created, ${results.ordersUpdated} updated.`,
       data: {
         ...results,
         finalLocalOpenCount,
         matched: finalLocalOpenCount === results.totalOpenInSAP,
-        // Don't expose duplicatesRemoved to frontend - it's handled silently
       },
     });
 
