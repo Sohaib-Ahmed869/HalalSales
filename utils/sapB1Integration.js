@@ -275,6 +275,8 @@ exports.formatOrderForSAP = async (order) => {
     DocDueDate: order.DocDueDate || today,
     Comments: order.Comments || "",
     U_Notes: order.U_Notes || "",
+    RequriedDate: order.RequriedDate || order.StartDeliveryDate || today,
+
 
     // CRITICAL FIX: Include price list at document level
     PriceList: order.PriceList ? parseInt(order.PriceList, 10) : 2,

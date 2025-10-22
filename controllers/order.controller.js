@@ -2120,8 +2120,7 @@ exports.updateOrderNotes = async (req, res) => {
     });
   }
 };
-// Sync order statuses from SAP - Close orders that are closed in SAP and create missing ones
-// Sync order statuses from SAP - Close orders that are closed in SAP and create missing ones
+
 exports.syncOrderStatusesFromSAP = async (req, res) => {
   try {
     console.log("\n" + "=".repeat(60));
@@ -2307,12 +2306,88 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
         const totalDifference = Math.abs(localTotal - sapTotal);
         const vatDifference = Math.abs(localVat - sapVat);
 
-        const hasChanges = totalDifference > 0.01 || vatDifference > 0.01;
+        let hasChanges = totalDifference > 0.01 || vatDifference > 0.01;
+        let changeDetails = [];
+
+        if (totalDifference > 0.01) {
+          changeDetails.push(`Total changed: ${localTotal} → ${sapTotal}`);
+        }
+        if (vatDifference > 0.01) {
+          changeDetails.push(`VAT changed: ${localVat} → ${sapVat}`);
+        }
+
+        // **CHECK FOR CHANGES IN DOCUMENT LINES**
+        if (sapOrder.DocumentLines && sapOrder.DocumentLines.length > 0) {
+          const localLines = localOrder.DocumentLines || [];
+          const sapLines = sapOrder.DocumentLines;
+
+          // Check if number of lines changed
+          if (localLines.length !== sapLines.length) {
+            hasChanges = true;
+            changeDetails.push(`Line count changed: ${localLines.length} → ${sapLines.length}`);
+          } else {
+            // Compare each line for changes
+            for (let i = 0; i < sapLines.length; i++) {
+              const sapLine = sapLines[i];
+
+              // Find matching local line by LineNum, or fall back to index
+              const localLine = localLines.find(l => l.LineNum === sapLine.LineNum) || localLines[i];
+
+              if (!localLine) {
+                hasChanges = true;
+                changeDetails.push(`New line added: ${sapLine.ItemCode}`);
+                continue;
+              }
+
+              // 1. Check ItemCode change (CRITICAL - product substitution)
+              if (localLine.ItemCode !== sapLine.ItemCode) {
+                hasChanges = true;
+                changeDetails.push(`Line ${sapLine.LineNum || i}: Item changed from ${localLine.ItemCode} to ${sapLine.ItemCode}`);
+              }
+
+              // 2. Check Quantity change
+              const localQty = parseFloat(localLine.Quantity) || 0;
+              const sapQty = parseFloat(sapLine.Quantity) || 0;
+              if (Math.abs(localQty - sapQty) > 0.001) {
+                hasChanges = true;
+                changeDetails.push(`Line ${sapLine.LineNum || i} (${sapLine.ItemCode}): Qty ${localQty} → ${sapQty}`);
+              }
+
+              // 3. Check Price change
+              const localPrice = parseFloat(localLine.Price) || 0;
+              const sapPrice = parseFloat(sapLine.Price || sapLine.UnitPrice) || 0;
+              if (Math.abs(localPrice - sapPrice) > 0.01) {
+                hasChanges = true;
+                changeDetails.push(`Line ${sapLine.LineNum || i} (${sapLine.ItemCode}): Price ${localPrice} → ${sapPrice}`);
+              }
+
+              // 4. Check LineTotal change (CRITICAL - catches calculation differences)
+              const localLineTotal = parseFloat(localLine.LineTotal) || 0;
+              const sapLineTotal = parseFloat(sapLine.LineTotal) || 0;
+              if (Math.abs(localLineTotal - sapLineTotal) > 0.01) {
+                hasChanges = true;
+                changeDetails.push(`Line ${sapLine.LineNum || i} (${sapLine.ItemCode}): Total ${localLineTotal} → ${sapLineTotal}`);
+              }
+
+              // 5. Check VatGroup change (affects tax calculations)
+              if (localLine.VatGroup !== sapLine.VatGroup) {
+                hasChanges = true;
+                changeDetails.push(`Line ${sapLine.LineNum || i} (${sapLine.ItemCode}): VAT ${localLine.VatGroup} → ${sapLine.VatGroup}`);
+              }
+
+              // 6. Check WarehouseCode change (affects inventory location)
+              if (localLine.WarehouseCode !== sapLine.WarehouseCode) {
+                hasChanges = true;
+                changeDetails.push(`Line ${sapLine.LineNum || i} (${sapLine.ItemCode}): Warehouse ${localLine.WarehouseCode} → ${sapLine.WarehouseCode}`);
+              }
+            }
+          }
+        }
 
         if (hasChanges) {
           console.log(`📝 Order ${localOrder.DocNum} has been modified in SAP`);
-          console.log(`   Local Total: ${localTotal}, SAP Total: ${sapTotal}`);
-          console.log(`   Local VAT: ${localVat}, SAP VAT: ${sapVat}`);
+          console.log(`   Changes detected:`);
+          changeDetails.forEach(detail => console.log(`   - ${detail}`));
 
           // Update the order with SAP data
           localOrder.DocTotal = sapOrder.DocTotal;
@@ -2339,7 +2414,8 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
               Currency: line.Currency || sapOrder.DocCurrency,
               LineTotal: line.LineTotal,
               VatGroup: line.VatGroup,
-              PriceList: line.PriceList || sapOrder.PriceList
+              PriceList: line.PriceList || sapOrder.PriceList,
+              WarehouseCode: line.WarehouseCode,
             }));
           }
 
@@ -2356,6 +2432,7 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
             oldTotal: localTotal,
             newTotal: sapTotal,
             difference: totalDifference,
+            changes: changeDetails,
           });
 
           console.log(`✅ Order ${localOrder.DocNum} updated successfully`);
@@ -2371,7 +2448,7 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
       }
     }
 
-    // Close the orders that should be closed
+    // *** STEP 4: CLOSE ORDERS ***
     for (const order of ordersToClose) {
       try {
         console.log(`Closing order DocNum: ${order.DocNum} (${order.CardCode})`);
@@ -2402,7 +2479,7 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
       }
     }
 
-    // Create missing orders from SAP
+    // *** STEP 5: CREATE MISSING ORDERS ***
     for (const docNum of missingOrderDocNums) {
       try {
         // Find the full order details from our SAP data
@@ -2446,7 +2523,8 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
             Currency: line.Currency || sapOrder.DocCurrency,
             LineTotal: line.LineTotal,
             VatGroup: line.VatGroup,
-            PriceList: line.PriceList || sapOrder.PriceList
+            PriceList: line.PriceList || sapOrder.PriceList,
+            WarehouseCode: line.WarehouseCode,
           })) || [],
           DocumentStatus: sapOrder.DocumentStatus || "bost_Open",
           Cancelled: sapOrder.Cancelled || "N",
