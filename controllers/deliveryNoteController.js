@@ -238,6 +238,7 @@ exports.createDeliveryNoteFromOrder = async (req, res) => {
             newDocNum = newDocEntry;
             console.log(`Using local Delivery Note DocNum: ${newDocNum}`);
         }
+        const frenchDate = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Paris" }));
 
         // ✅ Create delivery note with CORRECT base references
         const deliveryNote = new DeliveryNote({
@@ -259,8 +260,8 @@ exports.createDeliveryNoteFromOrder = async (req, res) => {
             PriceList: salesOrder.PriceList,
 
             // Dates
-            DocDate: new Date(),
-            DocDueDate: new Date(),
+            DocDate: frenchDate,  // Changed from salesOrder.DocDate
+            DocDueDate: frenchDate,  // Changed from salesOrder.DocDueDate
             TaxDate: new Date(),
             CreationDate: new Date(),
             UpdateDate: new Date(),
@@ -301,11 +302,9 @@ exports.createDeliveryNoteFromOrder = async (req, res) => {
             // Copy sales agent if exists
             salesAgent: salesOrder.salesAgent,
 
-            // Comments with metadata
-            Comments: isImportedFromSAP
-                ? `Delivery note for SAP order #${salesOrder.DocNum} (SAP DocEntry: ${sapBaseEntry})`
-                : `Delivery note for order #${salesOrder.DocNum}`,
-            U_Notes: salesOrder.U_Notes || "",
+            // FIXED: Carry over remarks/comments from sales order
+            U_Notes: salesOrder.U_Notes || salesOrder.Comments || "",
+            Comments: salesOrder.Comments || salesOrder.U_Notes || `Delivery note for order #${salesOrder.DocNum}`,
         });
 
         await deliveryNote.save();
@@ -374,7 +373,7 @@ exports.bulkCreateDeliveryNotesFromOrders = async (req, res) => {
                     continue;
                 }
 
-              
+
 
                 // ✅ FIX: Determine correct SAP BaseEntry
                 let sapBaseEntry;
@@ -411,6 +410,8 @@ exports.bulkCreateDeliveryNotesFromOrders = async (req, res) => {
                     salesOrder.U_Notes = (salesOrder.U_Notes || "") + "\n\n" + customNote;
                     await salesOrder.save();
                 }
+                const frenchDate = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Paris" }));
+
 
                 // ✅ Create with CORRECT base references
                 const deliveryNote = new DeliveryNote({
@@ -426,8 +427,8 @@ exports.bulkCreateDeliveryNotesFromOrders = async (req, res) => {
                     VatSum: salesOrder.VatSum,
                     DiscountPercent: salesOrder.DiscountPercent,
                     PriceList: salesOrder.PriceList,
-                    DocDate: new Date(),
-                    DocDueDate: new Date(),
+                    DocDate: frenchDate,  // Changed from salesOrder.DocDate
+                    DocDueDate: frenchDate,  // Changed from salesOrder.DocDueDate
                     TaxDate: new Date(),
                     CreationDate: new Date(),
                     UpdateDate: new Date(),
@@ -594,6 +595,7 @@ exports.createDeliveryNoteFromOrder = async (req, res) => {
             newDocNum = newDocEntry;
             console.log(`Using local Delivery Note DocNum: ${newDocNum}`);
         }
+        const frenchDate = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Paris" }));
 
         // ✅ Create delivery note with CORRECT base references
         const deliveryNote = new DeliveryNote({
@@ -615,8 +617,8 @@ exports.createDeliveryNoteFromOrder = async (req, res) => {
             PriceList: salesOrder.PriceList,
 
             // Dates
-            DocDate: new Date(),
-            DocDueDate: new Date(),
+            DocDate: frenchDate,  // Changed from salesOrder.DocDate
+            DocDueDate: frenchDate,  // Changed from salesOrder.DocDueDate
             TaxDate: new Date(),
             CreationDate: new Date(),
             UpdateDate: new Date(),
@@ -657,11 +659,9 @@ exports.createDeliveryNoteFromOrder = async (req, res) => {
             // Copy sales agent if exists
             salesAgent: salesOrder.salesAgent,
 
-            // Comments with metadata
-            Comments: isImportedFromSAP
-                ? `Delivery note for SAP order #${salesOrder.DocNum} (SAP DocEntry: ${sapBaseEntry})`
-                : `Delivery note for order #${salesOrder.DocNum}`,
-            U_Notes: salesOrder.U_Notes || "",
+            // FIXED: Carry over remarks/comments from sales order
+            U_Notes: salesOrder.U_Notes || salesOrder.Comments || "",
+            Comments: salesOrder.Comments || salesOrder.U_Notes || `Delivery note for order #${salesOrder.DocNum}`,
         });
 
         await deliveryNote.save();

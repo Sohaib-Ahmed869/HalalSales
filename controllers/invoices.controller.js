@@ -204,8 +204,8 @@ exports.createInvoiceFromDeliveryNote = async (req, res) => {
       VatSum: deliveryNote.VatSum,
 
       // Dates
-      DocDate: new Date(),
-      DocDueDate: new Date(),
+      DocDate: deliveryNote.DocDate,  // Changed from new Date()
+      DocDueDate: deliveryNote.DocDate,  // Changed from new Date()
       CreationDate: new Date(),
       UpdateDate: new Date(),
 
@@ -865,7 +865,8 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
             hasValidLines = true;
             const linePrice = line.Price || line.UnitPrice || 0;
             const lineTotal = netQty * linePrice;
-            const lineVat = lineTotal * 0.055;
+            const lineVat = lineTotal * (line.VatGroup === "C3" ? 0.05 : line.VatGroup === "C4" ? 0.20 : 0);
+
 
             invoiceTotal += lineTotal;
             invoiceVatSum += lineVat;
@@ -911,8 +912,8 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
           // Create invoice data for SAP
           const invoiceDataForSAP = {
             CardCode: deliveryNote.CardCode,
-            DocDate: new Date().toISOString().split('T')[0],
-            DocDueDate: new Date().toISOString().split('T')[0],
+            DocDate: deliveryNote.DocDate,  // Changed from new Date()
+            DocDueDate: deliveryNote.DocDate,  // Changed from new Date()
             DocCurrency: deliveryNote.DocCurrency || "EUR",
 
             DocumentLines: invoiceLines.map((line, index) => ({
@@ -960,8 +961,8 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
             DocTotal: invoiceTotal,
             DocCurrency: deliveryNote.DocCurrency,
             VatSum: invoiceVatSum,
-            DocDate: new Date(),
-            DocDueDate: new Date(),
+            DocDate: deliveryNote.DocDate,  // Changed from new Date()
+            DocDueDate: deliveryNote.DocDate,  // Changed from new Date()
             CreationDate: new Date(),
             UpdateDate: new Date(),
 

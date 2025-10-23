@@ -2361,6 +2361,14 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
                 changeDetails.push(`Line ${sapLine.LineNum || i} (${sapLine.ItemCode}): Price ${localPrice} → ${sapPrice}`);
               }
 
+              // Check if discount changed
+              const localDiscount = parseFloat(localLine.DiscountPercent) || 0;
+              const sapDiscount = parseFloat(sapLine.DiscountPercent) || 0;
+              if (Math.abs(localDiscount - sapDiscount) > 0.01) {
+                hasChanges = true;
+                changeDetails.push(`Line ${sapLine.LineNum || i}: Discount changed: ${localDiscount}% → ${sapDiscount}%`);
+              }
+
               // 4. Check LineTotal change (CRITICAL - catches calculation differences)
               const localLineTotal = parseFloat(localLine.LineTotal) || 0;
               const sapLineTotal = parseFloat(sapLine.LineTotal) || 0;
@@ -2403,20 +2411,32 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
           localOrder.U_Notes = sapOrder.Comments || localOrder.U_Notes;
 
           // Update document lines if they exist in SAP
+          // Update document lines if they exist in SAP
           if (sapOrder.DocumentLines && sapOrder.DocumentLines.length > 0) {
-            localOrder.DocumentLines = sapOrder.DocumentLines.map((line, index) => ({
-              LineNum: line.LineNum || index,
-              ItemCode: line.ItemCode,
-              ItemDescription: line.ItemDescription,
-              Quantity: line.Quantity,
-              Price: line.Price || line.UnitPrice,
-              PriceAfterVAT: line.PriceAfterVAT,
-              Currency: line.Currency || sapOrder.DocCurrency,
-              LineTotal: line.LineTotal,
-              VatGroup: line.VatGroup,
-              PriceList: line.PriceList || sapOrder.PriceList,
-              WarehouseCode: line.WarehouseCode,
-            }));
+            localOrder.DocumentLines = sapOrder.DocumentLines.map((line, index) => {
+              const originalPrice = line.Price || line.UnitPrice || 0;
+              const discountPercent = parseFloat(line.DiscountPercent) || 0;
+
+              // Calculate effective price after discount
+              // If discount is 100%, price becomes 0
+              const effectivePrice = discountPercent >= 100 ? 0 : originalPrice * (1 - discountPercent / 100);
+
+              return {
+                LineNum: line.LineNum || index,
+                ItemCode: line.ItemCode,
+                ItemDescription: line.ItemDescription,
+                Quantity: line.Quantity,
+                Price: effectivePrice,  // Store the effective price after discount
+                OriginalPrice: originalPrice,  // Store original price for reference
+                DiscountPercent: discountPercent,
+                PriceAfterVAT: line.PriceAfterVAT,
+                Currency: line.Currency || sapOrder.DocCurrency,
+                LineTotal: line.LineTotal,
+                VatGroup: line.VatGroup,
+                PriceList: line.PriceList || sapOrder.PriceList,
+                WarehouseCode: line.WarehouseCode,
+              };
+            });
           }
 
           localOrder.UpdateDate = new Date();
@@ -2513,19 +2533,30 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
           PriceList: sapOrder.PriceList,
           StartDeliveryDate: sapOrder.StartDeliveryDate || sapOrder.DocDate,
           RequriedDate: sapOrder.RequriedDate || sapOrder.DocDate,
-          DocumentLines: sapOrder.DocumentLines?.map((line, index) => ({
-            LineNum: line.LineNum || index,
-            ItemCode: line.ItemCode,
-            ItemDescription: line.ItemDescription,
-            Quantity: line.Quantity,
-            Price: line.Price || line.UnitPrice,
-            PriceAfterVAT: line.PriceAfterVAT,
-            Currency: line.Currency || sapOrder.DocCurrency,
-            LineTotal: line.LineTotal,
-            VatGroup: line.VatGroup,
-            PriceList: line.PriceList || sapOrder.PriceList,
-            WarehouseCode: line.WarehouseCode,
-          })) || [],
+          DocumentLines: sapOrder.DocumentLines?.map((line, index) => {
+            const originalPrice = line.Price || line.UnitPrice || 0;
+            const discountPercent = parseFloat(line.DiscountPercent) || 0;
+
+            // Calculate effective price after discount
+            // If discount is 100%, price becomes 0
+            const effectivePrice = discountPercent >= 100 ? 0 : originalPrice * (1 - discountPercent / 100);
+
+            return {
+              LineNum: line.LineNum || index,
+              ItemCode: line.ItemCode,
+              ItemDescription: line.ItemDescription,
+              Quantity: line.Quantity,
+              Price: effectivePrice,  // Store the effective price after discount
+              OriginalPrice: originalPrice,  // Store original price for reference
+              DiscountPercent: discountPercent,
+              PriceAfterVAT: line.PriceAfterVAT,
+              Currency: line.Currency || sapOrder.DocCurrency,
+              LineTotal: line.LineTotal,
+              VatGroup: line.VatGroup,
+              PriceList: line.PriceList || sapOrder.PriceList,
+              WarehouseCode: line.WarehouseCode,
+            };
+          }) || [],
           DocumentStatus: sapOrder.DocumentStatus || "bost_Open",
           Cancelled: sapOrder.Cancelled || "N",
           SyncedWithSAP: true,

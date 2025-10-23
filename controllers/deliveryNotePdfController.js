@@ -242,30 +242,29 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
 
     const drawTableHeader = (startY) => {
         doc.rect(margin - 15, startY, pageWidth - (2 * margin) + 15, 18).fill("#F5F5F5");
+        // FIXED: Moved columns left and added more space for currency
         const col1 = margin - 10;
-        const col2 = margin + 65;
-        const col3 = pageWidth - 255;
-        const col4 = pageWidth - 185;
-        const col5 = pageWidth - 125;
-        const col6 = pageWidth - 75;
+        const col2 = margin + 60;
+        const col3 = pageWidth - 285;  // Moved left by 30px
+        const col4 = pageWidth - 215;  // Moved left by 30px
+        const col5 = pageWidth - 145;  // Moved left by 20px
+        const col6 = pageWidth - 85;   // Moved left by 10px
 
         doc.fontSize(8).font("Helvetica").fillColor("#000000");
         doc.text("Article Code", col1, startY + 5, { continued: false });
         doc.text("Description", col2, startY + 5, { continued: false });
-        doc.text("Quantite", col3 + 20, startY + 5, { continued: false });
-        doc.text("Prix", col4 + 30, startY + 5, { continued: false });
-        doc.text("Total", col5 + 20, startY + 5, { continued: false });
-        doc.text("TVA", col6 + 10, startY + 5, { continued: false });
+        doc.text("Quantite", col3 + 15, startY + 5, { continued: false });
+        doc.text("Prix", col4 + 15, startY + 5, { continued: false });
+        doc.text("Total", col5 + 10, startY + 5, { continued: false });
+        doc.text("TVA", col6 + 5, startY + 5, { continued: false });
 
         doc.strokeColor("#2E5CB8").lineWidth(1.5);
         doc.moveTo(margin - 15, startY + 18).lineTo(pageWidth - margin, startY + 18).stroke();
         return startY + 25;
     };
-
-    const drawTotals = (totalExVAT, totalVAT, yPosition) => {
-        const totalsLabelX = pageWidth - 220;
-        const totalsValueX = pageWidth - 80;
-        const totalIncVAT = totalExVAT + totalVAT;
+    const drawTotals = (totalExVAT, totalVAT, yPosition, totalIncVAT) => {
+        const totalsLabelX = pageWidth - 240;  // FIXED: Moved left by 20px
+        const totalsValueX = pageWidth - 100;
         const lineSpacing = 18;
 
         doc.rect(totalsLabelX - 10, yPosition, 3, 12).fill("#FFD700");
@@ -309,16 +308,20 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
     currentY = drawTableHeader(currentY);
 
     const col1 = margin - 10;
-    const col2 = margin + 65;
-    const col3 = pageWidth - 255;
-    const col4 = pageWidth - 185;
-    const col5 = pageWidth - 125;
-    const col6 = pageWidth - 75;
+    const col2 = margin + 60;
+    const col3 = pageWidth - 285;
+    const col4 = pageWidth - 215;
+    const col5 = pageWidth - 145;
+    const col6 = pageWidth - 85;
 
     // FIX 3: Optimized spacing
-    const rowHeight = 15;
-    let totalExVAT = 0;
-    let totalVAT = 0;
+    const rowHeight = 12;
+    let totalIncVAT = deliveryNote.DocTotal;
+    let totalVAT = deliveryNote.VatSum ? deliveryNote.VatSum : deliveryNote.DocTotal - deliveryNote.DocumentLines.map(line => {
+        const lineVAT = line.Price * line.Quantity;
+        return lineVAT;
+    }).reduce((acc, curr) => acc + curr, 0);
+    let totalExVAT = deliveryNote.VatSum ? deliveryNote.DocTotal - deliveryNote.VatSum : deliveryNote.DocTotal - totalVAT;
     const totalsHeight = 110;
     const notesHeight = 15;
     const blueLineHeight = 20;
@@ -367,16 +370,16 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
             }
 
             const lineTotal = netQty * (line.Price || line.UnitPrice || 0);
-            const vatAmount = lineTotal * 0.055;
+            const vatAmount = lineTotal * (line.VATGroup === "C3" ? 0.05 : line.VATGroup === "C4" ? 0.20 : 0);
 
-            totalExVAT += lineTotal;
-            totalVAT += vatAmount;
 
-            doc.font("Helvetica").fontSize(8).fillColor("#000000");
+
+
+            doc.font("Helvetica").fontSize(7.5).fillColor("#000000");  // FIXED: Slightly smaller font for compactness
             doc.text(line.ItemCode || "", col1, currentY, { continued: false });
-            doc.text((line.ItemDescription || "").substring(0, 40), col2, currentY, { continued: false });
-            doc.text(netQty.toString(), col3 + 30, currentY, { continued: false });
-            doc.text(formatCurrency(line.Price || line.UnitPrice || 0, deliveryNote.DocCurrency), col4 + 20, currentY, { continued: false });
+            doc.text((line.ItemDescription || "").substring(0, 45), col2, currentY, { continued: false });  // FIXED: More chars
+            doc.text(netQty.toString(), col3 + 15, currentY, { continued: false });  // FIXED: Adjusted spacing
+            doc.text(formatCurrency(line.Price || line.UnitPrice || 0, deliveryNote.DocCurrency), col4 + 15, currentY, { continued: false });
             doc.text(formatCurrency(lineTotal, deliveryNote.DocCurrency), col5 + 10, currentY, { continued: false });
             doc.text(formatCurrency(vatAmount, deliveryNote.DocCurrency), col6 + 5, currentY, { continued: false });
             currentY += rowHeight;
@@ -410,7 +413,7 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
         });
     }
 
-    drawTotals(totalExVAT, totalVAT, currentY);
+    drawTotals(totalExVAT, totalVAT, currentY, totalIncVAT);
     drawFooter();
 };
 

@@ -113,7 +113,7 @@ const generateInvoicePage = async (doc, invoice, logoBuffer, isFirstInvoice = fa
         doc.fontSize(10).font("Helvetica-Bold").fillColor("#000000");
         doc.text("Halal Food Service", margin, margin + 70, { continued: false });
 
-        doc.font("Helvetica").fontSize(8);
+        doc.font("Helvetica").fontSize(7.5);
         doc.text("Batiment 3 et 4", margin, margin + 85, { continued: false });
         doc.text("32 rue raspail", margin, margin + 97, { continued: false });
         doc.text("93120 LA COURNEUVE", margin, margin + 109, { continued: false });
@@ -246,11 +246,11 @@ const generateInvoicePage = async (doc, invoice, logoBuffer, isFirstInvoice = fa
     const drawTableHeader = (startY) => {
         doc.rect(margin - 15, startY, pageWidth - (2 * margin) + 15, 18).fill("#F5F5F5");
         const col1 = margin - 10;
-        const col2 = margin + 65;
-        const col3 = pageWidth - 255;
-        const col4 = pageWidth - 185;
-        const col5 = pageWidth - 125;
-        const col6 = pageWidth - 75;
+        const col2 = margin + 60;      // Adjusted
+        const col3 = pageWidth - 285;  // Moved left
+        const col4 = pageWidth - 215;  // Moved left
+        const col5 = pageWidth - 145;  // Moved left
+        const col6 = pageWidth - 85;
 
         doc.fontSize(8).font("Helvetica").fillColor("#000000");
         doc.text("Article Code", col1, startY + 5, { continued: false });
@@ -278,10 +278,10 @@ const generateInvoicePage = async (doc, invoice, logoBuffer, isFirstInvoice = fa
 
     let remainingBalance = (invoice.DocTotal || 0) - totalCreditAmount - totalPaidAmount;
 
-    const drawTotals = (totalExVAT, totalVAT, totalCreditAmount, totalPaidAmount, remainingBalance, yPosition) => {
-        const totalsLabelX = pageWidth - 220;
-        const totalsValueX = pageWidth - 80;
-        const totalIncVAT = totalExVAT + totalVAT;
+    const drawTotals = (totalExVAT, totalVAT, totalCreditAmount, totalPaidAmount, remainingBalance, yPosition, totalIncVAT) => {
+        const totalsLabelX = pageWidth - 240;  // FIXED
+        const totalsValueX = pageWidth - 100;
+    
         const lineSpacing = 18;
 
         doc.rect(totalsLabelX - 10, yPosition, 3, 12).fill("#FFD700");
@@ -380,10 +380,14 @@ const generateInvoicePage = async (doc, invoice, logoBuffer, isFirstInvoice = fa
     const col6 = pageWidth - 75;
 
     // FIX 3: Optimized spacing (account for payment info in totals)
-    const rowHeight = 15;
-    let totalExVAT = 0;
-    let totalVAT = 0;
-
+    const rowHeight = 12;
+     let totalIncVAT = invoice.DocTotal;
+    let totalVAT = invoice.VatSum ? invoice.VatSum : invoice.DocTotal - invoice.DocumentLines.map(line => {
+        const lineVAT = line.Price * line.Quantity;
+        return lineVAT;
+    }).reduce((acc, curr) => acc + curr, 0);
+    let totalExVAT = invoice.VatSum ? invoice.DocTotal - invoice.VatSum : invoice.DocTotal - totalVAT;
+  
     // Dynamic totals height based on payment status
     let totalsHeight = 110; // Base height
     if (totalCreditAmount > 0) totalsHeight += 20;
@@ -409,12 +413,12 @@ const generateInvoicePage = async (doc, invoice, logoBuffer, isFirstInvoice = fa
             }
 
             const lineTotal = (line.Quantity || 0) * (line.Price || 0);
-            const vatAmount = lineTotal * 0.055;
+            const vatAmount = lineTotal * (line.VATGroup === "C3" ? 0.05 : line.VATGroup === "C4" ? 0.20 : 0);
 
             totalExVAT += lineTotal;
             totalVAT += vatAmount;
 
-            doc.font("Helvetica").fontSize(8).fillColor("#000000");
+            doc.font("Helvetica").fontSize(7.5).fillColor("#000000");
             doc.text(line.ItemCode || "", col1, currentY, { continued: false });
             doc.text((line.ItemDescription || "").substring(0, 40), col2, currentY, { continued: false });
             doc.text((line.Quantity || 0).toString(), col3 + 30, currentY, { continued: false });
@@ -444,8 +448,21 @@ const generateInvoicePage = async (doc, invoice, logoBuffer, isFirstInvoice = fa
 
     doc.fontSize(8).font("Helvetica").fillColor("#666666");
     doc.text("Notes:", margin, currentY, { continued: false });
-
-    currentY = drawTotals(totalExVAT, totalVAT, totalCreditAmount, totalPaidAmount, remainingBalance, currentY);
+    // FIXED: Display invoice notes
+    if (invoice.U_Notes) {
+        doc.fontSize(8).font("Helvetica").fillColor("#000000");
+        doc.text(invoice.U_Notes, margin, currentY + 12, {
+            width: pageWidth - margin - 280,
+            continued: false
+        });
+    } else if (invoice.Comments) {
+        doc.fontSize(8).font("Helvetica").fillColor("#000000");
+        doc.text(invoice.Comments, margin, currentY + 12, {
+            width: pageWidth - margin - 280,
+            continued: false
+        });
+    }
+    currentY = drawTotals(totalExVAT, totalVAT, totalCreditAmount, totalPaidAmount, remainingBalance, currentY, totalIncVAT);
 
     drawFooter();
 };
@@ -794,8 +811,7 @@ exports.generateBulkInvoicePDFs = async (req, res) => {
         for (let i = 0; i < invoices.length; i++) {
             // Original
             await generateInvoicePage(doc, invoices[i], logoBuffer, i === 0);
-            // Copy (immediately after)
-            await generateInvoicePage(doc, invoices[i], logoBuffer, false);
+
         }
 
         doc.end();
