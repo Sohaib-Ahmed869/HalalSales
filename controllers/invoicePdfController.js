@@ -415,8 +415,7 @@ const generateInvoicePage = async (doc, invoice, logoBuffer, isFirstInvoice = fa
             const lineTotal = (line.Quantity || 0) * (line.Price || 0);
             const vatAmount = lineTotal * (line.VATGroup === "C3" ? 0.05 : line.VATGroup === "C4" ? 0.20 : 0);
 
-            totalExVAT += lineTotal;
-            totalVAT += vatAmount;
+       
 
             doc.font("Helvetica").fontSize(7.5).fillColor("#000000");
             doc.text(line.ItemCode || "", col1, currentY, { continued: false });
