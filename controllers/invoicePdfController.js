@@ -414,7 +414,7 @@ const generateInvoicePage = async (doc, invoice, logoBuffer, isFirstInvoice = fa
             }
 
             const lineTotal = (line.Quantity || 0) * (line.Price || 0);
-            const vatAmount = lineTotal * (line.VATGroup === "C3" ? 0.05 : line.VATGroup === "C4" ? 0.20 : 0);
+            const vatAmount = lineTotal * (line.VATGroup === "C3" ? 0.055 : line.VATGroup === "C4" ? 0.20 : 0);
 
 
 

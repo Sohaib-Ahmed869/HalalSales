@@ -1003,7 +1003,7 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
             hasValidLines = true;
             const linePrice = line.Price || line.UnitPrice || 0;
             const lineTotal = netQty * linePrice;
-            const lineVat = lineTotal * (line.VatGroup === "C3" ? 0.05 : line.VatGroup === "C4" ? 0.20 : 0);
+            const lineVat = lineTotal * (line.VatGroup === "C3" ? 0.055 : line.VatGroup === "C4" ? 0.20 : 0);
             const priceAfterVAT = linePrice + (line.VatGroup === "C3" ? linePrice * 0.05 : line.VatGroup === "C4" ? linePrice * 0.20 : 0);
 
             invoiceTotal += priceAfterVAT * netQty;

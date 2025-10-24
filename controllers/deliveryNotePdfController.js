@@ -434,7 +434,7 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
             }
 
             const lineTotal = netQty * (line.Price || line.UnitPrice || 0);
-            const vatAmount = lineTotal * (line.VATGroup === "C3" ? 0.05 : line.VATGroup === "C4" ? 0.20 : 0);
+            const vatAmount = lineTotal * (line.VATGroup === "C3" ? 0.055 : line.VATGroup === "C4" ? 0.20 : 0);
 
 
 
