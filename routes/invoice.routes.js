@@ -5,7 +5,7 @@ const { protect, authorize } = require("../middleware/auth");
 
 const multer = require("multer");
 const upload = multer({ storage: multer.memoryStorage() });
-
+router.post('/update-totals-for-date', invoiceController.updateInvoiceTotalsForDate);
 // Get invoices by customer with pagination and filtering
 router.get("/customer", invoiceController.getInvoicesByCustomer);
 

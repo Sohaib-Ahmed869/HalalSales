@@ -51,6 +51,8 @@ const deliveryNotePdfRoutes = require('./routes/deliveryNotePdfRoutes');
 const invoicePdfRoutes = require("./routes/invoicePdfRoutes");
 const returnRoutes = require('./routes/returnRoutes');
 const creditNoteRoutes = require('./routes/creditNoteRoutes');
+const superExportRoutes = require('./routes/Sales.export.routes');
+const emailLogRoutes = require('./routes/emailLogRoutes');
 // const vendorEmailRoutes = require('./routes/vendorEmailRoutes');
 const config = require("./services/config");
 const desktimeJob = require("./jobs/desktimeJob");
@@ -82,14 +84,7 @@ const NODE_ENV = process.env.NODE_ENV || "development";
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(
-  cors({
-    origin: [
-      "http://localhost:5174",
-      "http://localhost:5173",
-      "http://halalfoodsales.s3-website.eu-north-1.amazonaws.com",
-      "https://sales.foodservices.live",
-    ],
-  })
+  cors("*")
 );
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
@@ -203,7 +198,9 @@ app.use("/api/delivery-note-pdf", deliveryNotePdfRoutes);
 app.use("/api/invoice-pdf", invoicePdfRoutes);
 app.use('/api/returns', returnRoutes);
 app.use('/api/credit-notes', creditNoteRoutes);
+app.use('/api/email-logs', emailLogRoutes);
 // app.use('/api/vendor-email', vendorEmailRoutes);
+app.use('/api/sales-export', superExportRoutes);
 // Health check route
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });

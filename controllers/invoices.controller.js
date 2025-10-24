@@ -241,10 +241,8 @@ exports.createInvoiceFromDeliveryNote = async (req, res) => {
       salesAgent: deliveryNote.salesAgent,
 
       // Comments with metadata
-      Comments: isFromSAPOrder
-        ? `Invoice for DN #${deliveryNote.DocNum} (from SAP order, DN Entry: ${sapBaseEntry})`
-        : `Invoice for delivery note #${deliveryNote.DocNum}`,
-      U_Notes: deliveryNote.U_Notes || "",
+      Comments: deliveryNote.Comments,
+      U_Notes: deliveryNote.Comments,
 
       // Custom tracking fields
       tag: "External Delivery",
@@ -733,7 +731,147 @@ exports.getPaymentsForInvoice = async (req, res) => {
 
 // controllers/invoiceController.js
 // Replace the bulkCreateInvoicesFromDeliveryNotes function
+exports.updateInvoiceTotalsForDate = async (req, res) => {
+  try {
+    console.log("\n" + "=".repeat(60));
+    console.log("UPDATING INVOICE TOTALS FOR SPECIFIC DATE");
+    console.log("=".repeat(60));
 
+    const targetDate = "2025-10-23";
+    const { loginToSAP } = require("../utils/sapB1Integration");
+    const axios = require("axios");
+    const SAP_CONFIG = {
+      serviceLayerUrl: process.env.SAP_SERVICE_LAYER_URL,
+      companyDB: process.env.COMPANY_DB,
+      username: process.env.USER_NAME,
+      password: process.env.PASSWORD,
+    };
+
+    // Login to SAP
+    const sessionId = await loginToSAP();
+    const headers = {
+      "Content-Type": "application/json",
+      Cookie: `B1SESSION=${sessionId}`,
+    };
+
+    // Find all invoices in local DB with DocDate = 2025-10-23
+    const localInvoices = await Invoice.find({
+      DocDate: {
+        $gte: new Date("2025-10-23T00:00:00.000Z"),
+        $lt: new Date("2025-10-24T00:00:00.000Z"),
+      },
+    }).select("DocNum DocEntry DocTotal CardCode CardName SAPDocEntry");
+
+    console.log(`Found ${localInvoices.length} invoices with DocDate ${targetDate}`);
+
+    if (localInvoices.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: `No invoices found with DocDate ${targetDate}`,
+        data: {
+          totalInvoices: 0,
+          updated: 0,
+          errors: [],
+        },
+      });
+    }
+
+    const results = {
+      totalInvoices: localInvoices.length,
+      updated: 0,
+      skipped: 0,
+      errors: [],
+      updatedInvoices: [],
+    };
+
+    // Process each invoice
+    for (const localInvoice of localInvoices) {
+      try {
+        // Fetch invoice from SAP using DocEntry or SAPDocEntry
+        const docEntryToFetch = localInvoice.SAPDocEntry || localInvoice.DocEntry;
+
+        console.log(`Fetching invoice DocNum ${localInvoice.DocNum} (DocEntry: ${docEntryToFetch}) from SAP...`);
+
+        const sapUrl = `${SAP_CONFIG.serviceLayerUrl}/Invoices(${docEntryToFetch})`;
+        const response = await axios.get(sapUrl, { headers });
+
+        const sapInvoice = response.data;
+
+        if (!sapInvoice) {
+          console.log(`⚠️ Invoice ${localInvoice.DocNum} not found in SAP`);
+          results.errors.push({
+            DocNum: localInvoice.DocNum,
+            error: "Not found in SAP",
+          });
+          continue;
+        }
+
+        // Compare DocTotal
+        const localTotal = parseFloat(localInvoice.DocTotal) || 0;
+        const sapTotal = parseFloat(sapInvoice.DocTotal) || 0;
+        const difference = Math.abs(localTotal - sapTotal);
+
+        // If totals are different (allowing 0.01 difference for floating point)
+        if (difference > 0.01) {
+          console.log(`📝 Updating invoice ${localInvoice.DocNum}`);
+          console.log(`   Old DocTotal: ${localTotal}`);
+          console.log(`   New DocTotal: ${sapTotal}`);
+          console.log(`   Difference: ${difference}`);
+
+          // Update ONLY DocTotal
+          localInvoice.DocTotal = sapTotal;
+          localInvoice.UpdateDate = new Date();
+
+          await localInvoice.save();
+
+          results.updated++;
+          results.updatedInvoices.push({
+            DocNum: localInvoice.DocNum,
+            CardCode: localInvoice.CardCode,
+            CardName: localInvoice.CardName,
+            oldTotal: localTotal,
+            newTotal: sapTotal,
+            difference: difference,
+          });
+
+          console.log(`✅ Invoice ${localInvoice.DocNum} updated successfully`);
+        } else {
+          console.log(`✓ Invoice ${localInvoice.DocNum} - DocTotal already matches (${localTotal})`);
+          results.skipped++;
+        }
+
+      } catch (error) {
+        console.error(`❌ Error processing invoice ${localInvoice.DocNum}:`, error.message);
+        results.errors.push({
+          DocNum: localInvoice.DocNum,
+          error: error.message,
+        });
+      }
+    }
+
+    console.log("\n" + "=".repeat(60));
+    console.log("INVOICE TOTAL UPDATE COMPLETED");
+    console.log(`Total invoices checked: ${results.totalInvoices}`);
+    console.log(`Invoices updated: ${results.updated}`);
+    console.log(`Invoices skipped (already matching): ${results.skipped}`);
+    console.log(`Errors: ${results.errors.length}`);
+    console.log("=".repeat(60) + "\n");
+
+    res.status(200).json({
+      success: true,
+      message: `Invoice total update completed. ${results.updated} invoices updated.`,
+      data: results,
+    });
+
+  } catch (error) {
+    console.error("Error in updateInvoiceTotalsForDate:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error updating invoice totals",
+      error: error.message,
+    });
+  }
+};
 // controllers/invoiceController.js
 exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
   try {
@@ -866,9 +1004,9 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
             const linePrice = line.Price || line.UnitPrice || 0;
             const lineTotal = netQty * linePrice;
             const lineVat = lineTotal * (line.VatGroup === "C3" ? 0.05 : line.VatGroup === "C4" ? 0.20 : 0);
+            const priceAfterVAT = linePrice + (line.VatGroup === "C3" ? linePrice * 0.05 : line.VatGroup === "C4" ? linePrice * 0.20 : 0);
 
-
-            invoiceTotal += lineTotal;
+            invoiceTotal += priceAfterVAT * netQty;
             invoiceVatSum += lineVat;
 
             invoiceLines.push({
@@ -877,7 +1015,6 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
               ItemDescription: line.ItemDescription,
               Quantity: netQty,
               Price: linePrice,
-              PriceAfterVAT: line.PriceAfterVAT,
               Currency: line.Currency || deliveryNote.DocCurrency,
               LineTotal: lineTotal,
               VatGroup: line.VatGroup,
@@ -921,6 +1058,7 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
               ItemDescription: line.ItemDescription,
               Quantity: line.Quantity,
               UnitPrice: line.Price,
+              PriceAfterVAT: line.PriceAfterVAT,
               LineNum: index,
 
               BaseType: 15, // Delivery Note
@@ -928,10 +1066,8 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
               BaseLine: line.BaseLine,
             })),
 
-            Comments: deliveryNote.hasReturns
-              ? `Invoice for delivery note #${deliveryNote.DocNum} (with returns deducted)`
-              : `Invoice for delivery note #${deliveryNote.DocNum}`,
-            U_Notes: deliveryNote.U_Notes || "",
+            Comments: deliveryNote.Comments || "",
+            U_Notes: deliveryNote.Comments || "",
             U_SourceDeliveryNote: deliveryNote.DocNum.toString(),
           };
 
@@ -2460,5 +2596,7 @@ exports.getInvoices = async (req, res) => {
     });
   }
 };
+
+
 
 module.exports = exports;

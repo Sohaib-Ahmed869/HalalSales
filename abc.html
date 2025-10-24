@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sales Export - Download Reports</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 40px;
+            max-width: 800px;
+            width: 100%;
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 32px;
+            text-align: center;
+        }
+
+        .subtitle {
+            color: #666;
+            text-align: center;
+            margin-bottom: 40px;
+            font-size: 14px;
+        }
+
+        .section {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 20px;
+        }
+
+        .section h2 {
+            color: #444;
+            font-size: 20px;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .section-icon {
+            font-size: 24px;
+        }
+
+        .filters {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        label {
+            font-size: 12px;
+            font-weight: 600;
+            color: #555;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        input[type="text"],
+        input[type="date"],
+        select {
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+            font-family: inherit;
+        }
+
+        input[type="text"]:focus,
+        input[type="date"]:focus,
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+
+        button {
+            flex: 1;
+            min-width: 200px;
+            padding: 15px 30px;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-secondary {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(245, 87, 108, 0.4);
+        }
+
+        .btn-clear {
+            background: #e0e0e0;
+            color: #666;
+            min-width: auto;
+            flex: 0;
+        }
+
+        .btn-clear:hover {
+            background: #d0d0d0;
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
+        .spinner {
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top: 3px solid white;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        .status-message {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 14px;
+            display: none;
+        }
+
+        .status-message.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+            display: block;
+        }
+
+        .status-message.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+            display: block;
+        }
+
+        .status-message.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+            display: block;
+        }
+
+        .token-section {
+            background: #fff3cd;
+            border: 2px solid #ffc107;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+
+        .token-section p {
+            margin-bottom: 10px;
+            color: #856404;
+            font-size: 14px;
+        }
+
+        .feature-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .feature-item {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            display: flex;
+            align-items: start;
+            gap: 10px;
+        }
+
+        .feature-icon {
+            font-size: 20px;
+            flex-shrink: 0;
+        }
+
+        .feature-text {
+            font-size: 13px;
+            color: #666;
+        }
+
+        @media (max-width: 600px) {
+            .container {
+                padding: 20px;
+            }
+
+            h1 {
+                font-size: 24px;
+            }
+
+            .button-group {
+                flex-direction: column;
+            }
+
+            button {
+                min-width: 100%;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>📊 Sales Export Center</h1>
+        <p class="subtitle">Download comprehensive sales reports in Excel format</p>
+
+        <!-- Token Input Section -->
+        <div class="token-section">
+            <p><strong>⚠️ Authentication Required</strong></p>
+            <div class="input-group">
+                <label for="authToken">JWT Token</label>
+                <input type="text" id="authToken" placeholder="Paste your authentication token here" autocomplete="off">
+            </div>
+            <p style="margin-top: 10px; font-size: 12px;">
+                💡 Get your token by logging in to your account. It will be stored in your browser.
+            </p>
+        </div>
+
+        <!-- Client Export Section -->
+        <div class="section">
+            <h2>
+                <span class="section-icon">👥</span>
+                Export All Clients
+            </h2>
+            <p style="color: #666; font-size: 14px; margin-bottom: 20px;">
+                Export comprehensive client data including sales metrics, agent assignments, and abandoned cart
+                information
+            </p>
+
+            <div class="filters">
+                <div class="input-group">
+                    <label for="startDate">Start Date</label>
+                    <input type="date" id="startDate">
+                </div>
+                <div class="input-group">
+                    <label for="endDate">End Date</label>
+                    <input type="date" id="endDate">
+                </div>
+                <div class="input-group">
+                    <label for="status">Customer Status</label>
+                    <select id="status">
+                        <option value="">All Statuses</option>
+                        <option value="active">Active</option>
+                        <option value="inactive">Inactive</option>
+                        <option value="lead">Lead</option>
+                        <option value="prospect">Prospect</option>
+                        <option value="pending">Pending</option>
+                    </select>
+                </div>
+                <div class="input-group">
+                    <label for="salesAgentId">Sales Agent ID</label>
+                    <input type="text" id="salesAgentId" placeholder="Optional">
+                </div>
+            </div>
+
+            <div class="feature-list">
+                <div class="feature-item">
+                    <span class="feature-icon">📋</span>
+                    <span class="feature-text">20 comprehensive columns including contact details and address</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">💰</span>
+                    <span class="feature-text">SAP turnover and invoice metrics</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">🛒</span>
+                    <span class="feature-text">Combined abandoned cart data from website & SAP</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">📈</span>
+                    <span class="feature-text">Quotation tracking and values</span>
+                </div>
+            </div>
+
+            <div class="button-group" style="margin-top: 20px;">
+                <button class="btn-primary" onclick="exportClients()">
+                    <span id="clientBtnText">📥 Download Client Report</span>
+                    <div id="clientSpinner" class="spinner" style="display: none;"></div>
+                </button>
+                <button class="btn-clear" onclick="clearFilters()">
+                    🔄 Clear Filters
+                </button>
+            </div>
+
+            <div id="clientStatus" class="status-message"></div>
+        </div>
+
+        <!-- Sales Insights Section -->
+        <div class="section">
+            <h2>
+                <span class="section-icon">📈</span>
+                Export Sales Insights
+            </h2>
+            <p style="color: #666; font-size: 14px; margin-bottom: 20px;">
+                Export detailed sales data across three sheets: Invoices, Quotations, and Abandoned Carts
+            </p>
+
+            <div class="filters">
+                <div class="input-group">
+                    <label for="insightStartDate">Start Date</label>
+                    <input type="date" id="insightStartDate">
+                </div>
+                <div class="input-group">
+                    <label for="insightEndDate">End Date</label>
+                    <input type="date" id="insightEndDate">
+                </div>
+                <div class="input-group">
+                    <label for="cardCode">Customer Code</label>
+                    <input type="text" id="cardCode" placeholder="Optional">
+                </div>
+            </div>
+
+            <div class="feature-list">
+                <div class="feature-item">
+                    <span class="feature-icon">📄</span>
+                    <span class="feature-text">Sheet 1: All invoices with payment tracking</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">📋</span>
+                    <span class="feature-text">Sheet 2: Open quotations and orders</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">🛒</span>
+                    <span class="feature-text">Sheet 3: Abandoned carts from website & SAP</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">🎨</span>
+                    <span class="feature-text">Color-coded sheets with professional formatting</span>
+                </div>
+            </div>
+
+            <div class="button-group" style="margin-top: 20px;">
+                <button class="btn-secondary" onclick="exportInsights()">
+                    <span id="insightBtnText">📥 Download Sales Insights</span>
+                    <div id="insightSpinner" class="spinner" style="display: none;"></div>
+                </button>
+                <button class="btn-clear" onclick="clearInsightFilters()">
+                    🔄 Clear Filters
+                </button>
+            </div>
+
+            <div id="insightStatus" class="status-message"></div>
+        </div>
+    </div>
+
+    <script>
+        // Load saved token from localStorage
+        window.addEventListener('DOMContentLoaded', () => {
+            const savedToken = localStorage.getItem('authToken');
+            if (savedToken) {
+                document.getElementById('authToken').value = savedToken;
+            }
+
+            // Set default date range (last 30 days)
+            const today = new Date();
+            const thirtyDaysAgo = new Date(today);
+            thirtyDaysAgo.setDate(today.getDate() - 30);
+
+            document.getElementById('startDate').valueAsDate = thirtyDaysAgo;
+            document.getElementById('endDate').valueAsDate = today;
+            document.getElementById('insightStartDate').valueAsDate = thirtyDaysAgo;
+            document.getElementById('insightEndDate').valueAsDate = today;
+        });
+
+        // Save token to localStorage when changed
+        document.getElementById('authToken').addEventListener('change', (e) => {
+            localStorage.setItem('authToken', e.target.value);
+        });
+
+        function getAuthToken() {
+            const token = document.getElementById('authToken').value.trim();
+            if (!token) {
+                showStatus('clientStatus', 'error', '❌ Please enter your authentication token');
+                return null;
+            }
+            return token;
+        }
+
+        function showStatus(elementId, type, message) {
+            const statusEl = document.getElementById(elementId);
+            statusEl.className = `status-message ${type}`;
+            statusEl.textContent = message;
+
+            if (type === 'success') {
+                setTimeout(() => {
+                    statusEl.style.display = 'none';
+                }, 5000);
+            }
+        }
+
+        function setLoading(btnTextId, spinnerId, isLoading) {
+            const btnText = document.getElementById(btnTextId);
+            const spinner = document.getElementById(spinnerId);
+            const buttons = document.querySelectorAll('button');
+
+            if (isLoading) {
+                btnText.style.display = 'none';
+                spinner.style.display = 'block';
+                buttons.forEach(btn => btn.disabled = true);
+            } else {
+                btnText.style.display = 'inline';
+                spinner.style.display = 'none';
+                buttons.forEach(btn => btn.disabled = false);
+            }
+        }
+
+        async function exportClients() {
+            const token = getAuthToken();
+            if (!token) return;
+
+            // Get filter values
+            const startDate = document.getElementById('startDate').value;
+            const endDate = document.getElementById('endDate').value;
+            const status = document.getElementById('status').value;
+            const salesAgentId = document.getElementById('salesAgentId').value.trim();
+
+            // Build query string
+            const params = new URLSearchParams();
+            if (startDate) params.append('startDate', startDate);
+            if (endDate) params.append('endDate', endDate);
+            if (status) params.append('status', status);
+            if (salesAgentId) params.append('salesAgentId', salesAgentId);
+
+            const url = `http://localhost:5000/api/sales-export/clients${params.toString() ? '?' + params.toString() : ''}`;
+
+            setLoading('clientBtnText', 'clientSpinner', true);
+            showStatus('clientStatus', 'info', '⏳ Generating your export... This may take a moment.');
+
+            try {
+                const response = await fetch(url, {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+
+                if (!response.ok) {
+                    if (response.status === 401) {
+                        throw new Error('Authentication failed. Please check your token.');
+                    }
+                    throw new Error(`Export failed: ${response.statusText}`);
+                }
+
+                // Get the blob
+                const blob = await response.blob();
+
+                // Create download link
+                const downloadUrl = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = downloadUrl;
+                a.download = `clients_export_${new Date().toISOString().split('T')[0]}.xlsx`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                window.URL.revokeObjectURL(downloadUrl);
+
+                showStatus('clientStatus', 'success', '✅ Client report downloaded successfully!');
+            } catch (error) {
+                console.error('Export error:', error);
+                showStatus('clientStatus', 'error', `❌ ${error.message}`);
+            } finally {
+                setLoading('clientBtnText', 'clientSpinner', false);
+            }
+        }
+
+        async function exportInsights() {
+            const token = getAuthToken();
+            if (!token) return;
+
+            // Get filter values
+            const startDate = document.getElementById('insightStartDate').value;
+            const endDate = document.getElementById('insightEndDate').value;
+            const cardCode = document.getElementById('cardCode').value.trim();
+
+            // Build query string
+            const params = new URLSearchParams();
+            if (startDate) params.append('startDate', startDate);
+            if (endDate) params.append('endDate', endDate);
+            if (cardCode) params.append('cardCode', cardCode);
+
+            const url = `http://localhost:5000/api/sales-export/insights${params.toString() ? '?' + params.toString() : ''}`;
+
+            setLoading('insightBtnText', 'insightSpinner', true);
+            showStatus('insightStatus', 'info', '⏳ Generating your sales insights... This may take a moment.');
+
+            try {
+                const response = await fetch(url, {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+
+                if (!response.ok) {
+                    if (response.status === 401) {
+                        throw new Error('Authentication failed. Please check your token.');
+                    }
+                    throw new Error(`Export failed: ${response.statusText}`);
+                }
+
+                // Get the blob
+                const blob = await response.blob();
+
+                // Create download link
+                const downloadUrl = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = downloadUrl;
+                a.download = `sales_insights_${new Date().toISOString().split('T')[0]}.xlsx`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                window.URL.revokeObjectURL(downloadUrl);
+
+                showStatus('insightStatus', 'success', '✅ Sales insights downloaded successfully!');
+            } catch (error) {
+                console.error('Export error:', error);
+                showStatus('insightStatus', 'error', `❌ ${error.message}`);
+            } finally {
+                setLoading('insightBtnText', 'insightSpinner', false);
+            }
+        }
+
+        function clearFilters() {
+            document.getElementById('startDate').value = '';
+            document.getElementById('endDate').value = '';
+            document.getElementById('status').value = '';
+            document.getElementById('salesAgentId').value = '';
+            showStatus('clientStatus', 'info', 'ℹ️ Filters cleared');
+        }
+
+        function clearInsightFilters() {
+            document.getElementById('insightStartDate').value = '';
+            document.getElementById('insightEndDate').value = '';
+            document.getElementById('cardCode').value = '';
+            showStatus('insightStatus', 'info', 'ℹ️ Filters cleared');
+        }
+    </script>
+</body>
+
+</html>

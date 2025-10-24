@@ -660,8 +660,8 @@ exports.createDeliveryNoteFromOrder = async (req, res) => {
             salesAgent: salesOrder.salesAgent,
 
             // FIXED: Carry over remarks/comments from sales order
-            U_Notes: salesOrder.U_Notes || salesOrder.Comments || "",
-            Comments: salesOrder.Comments || salesOrder.U_Notes || `Delivery note for order #${salesOrder.DocNum}`,
+            U_Notes: salesOrder.Comments || "",
+            Comments: salesOrder.Comments || "",
         });
 
         await deliveryNote.save();

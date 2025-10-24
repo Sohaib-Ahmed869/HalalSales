@@ -262,45 +262,109 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
         doc.moveTo(margin - 15, startY + 18).lineTo(pageWidth - margin, startY + 18).stroke();
         return startY + 25;
     };
-    const drawTotals = (totalExVAT, totalVAT, yPosition, totalIncVAT) => {
-        const totalsLabelX = pageWidth - 240;  // FIXED: Moved left by 20px
-        const totalsValueX = pageWidth - 100;
-        const lineSpacing = 18;
+    
 
-        doc.rect(totalsLabelX - 10, yPosition, 3, 12).fill("#FFD700");
-        doc.fontSize(9).font("Helvetica").fillColor("#000000");
-        doc.text("Total Avant Remise", totalsLabelX, yPosition, { continued: false });
+     const drawTotals = (totalExVAT, totalVAT, startY, totalIncVAT) => {
+        let totalsY = startY + 30;
+
+        // Calculate column widths - divide page into 3 sections
+        const sectionWidth = (pageWidth - (margin * 2)) / 3;
+        const livreurX = margin;
+        const clientX = margin + sectionWidth;
+        const totalsX = margin + (sectionWidth * 2);
+
+        // LEFT SECTION - Livreur (Delivery Person)
+        doc.fontSize(9).font("Helvetica-Bold").fillColor("#000000");
+        doc.text("Livreur", livreurX, totalsY, { continued: false });
+
+        doc.fontSize(7).font("Helvetica").fillColor("#000000");
+        doc.text("Nom:............................................", livreurX, totalsY + 15, { continued: false });
+        doc.text("Prenom:.....................................", livreurX, totalsY + 28, { continued: false });
+        doc.text("Paiment Montant:....................", livreurX, totalsY + 41, { continued: false });
+        doc.text("Mode de Paiment:...................", livreurX, totalsY + 54, { continued: false });
+
+        // MIDDLE SECTION - Client
+        doc.fontSize(9).font("Helvetica-Bold").fillColor("#000000");
+        doc.text("Client", clientX, totalsY, { continued: false });
+
+        doc.fontSize(7).font("Helvetica").fillColor("#000000");
+        doc.text("Signature:....................................", clientX, totalsY + 15, { continued: false });
+        doc.text("Nom:.............................................", clientX, totalsY + 28, { continued: false });
+        doc.text("Date:............. Time:..................", clientX, totalsY + 41, { continued: false });
+
+        // Add delivery note reference below client section
+        doc.fontSize(8).font("Helvetica-Bold").fillColor("#000000");
+        doc.text(`Delivery note for order`, clientX, totalsY + 65, { continued: false });
+        doc.text(`#${deliveryNote.OriginatingOrder || ''}`, clientX, totalsY + 77, { continued: false });
+
+        // RIGHT SECTION - Totals
+        // Draw orange bar next to totals
+        doc.rect(totalsX - 10, totalsY, 4, 85).fill("#FFD700");
+
+        let totalsRowY = totalsY;
+
+        // Total Before Discount
+        doc.fontSize(8).font("Helvetica").fillColor("#000000");
+        doc.text("Total Avant Remise", totalsX, totalsRowY, { continued: false });
         doc.font("Helvetica-Bold");
-        doc.text(formatCurrency(totalExVAT, deliveryNote.DocCurrency), totalsValueX, yPosition, { continued: false });
+        doc.text(totalExVAT.toFixed(2), totalsX + 100, totalsRowY, {
+            width: 80,
+            align: "right",
+            continued: false
+        });
 
-        doc.rect(totalsLabelX - 10, yPosition + lineSpacing, 3, 12).fill("#FFD700");
-        doc.fontSize(9).font("Helvetica").fillColor("#000000");
-        doc.text("Total Remise", totalsLabelX, yPosition + lineSpacing, { continued: false });
+        // Total Discount
+        totalsRowY += 13;
+        doc.font("Helvetica").fillColor("#000000");
+        doc.text("Total Remise", totalsX, totalsRowY, { continued: false });
         doc.font("Helvetica-Bold");
-        doc.text(formatCurrency(0, deliveryNote.DocCurrency), totalsValueX, yPosition + lineSpacing, { continued: false });
+        doc.text("0.00", totalsX + 100, totalsRowY, {
+            width: 80,
+            align: "right",
+            continued: false
+        });
 
-        doc.rect(totalsLabelX - 10, yPosition + lineSpacing * 2, 3, 12).fill("#FFD700");
-        doc.fontSize(9).font("Helvetica").fillColor("#000000");
-        doc.text("Total Apres Remise", totalsLabelX, yPosition + lineSpacing * 2, { continued: false });
+        // Total After Discount
+        totalsRowY += 13;
+        doc.font("Helvetica").fillColor("#000000");
+        doc.text("Total Apres Remise", totalsX, totalsRowY, { continued: false });
         doc.font("Helvetica-Bold");
-        doc.text(formatCurrency(totalExVAT, deliveryNote.DocCurrency), totalsValueX, yPosition + lineSpacing * 2, { continued: false });
+        doc.text(totalExVAT.toFixed(2), totalsX + 100, totalsRowY, {
+            width: 80,
+            align: "right",
+            continued: false
+        });
 
-        doc.rect(totalsLabelX - 10, yPosition + lineSpacing * 3, 3, 12).fill("#FFD700");
-        doc.fontSize(9).font("Helvetica").fillColor("#000000");
-        doc.text("TVA Totale", totalsLabelX, yPosition + lineSpacing * 3, { continued: false });
+        // VAT Total
+        totalsRowY += 13;
+        doc.font("Helvetica").fillColor("#000000");
+        doc.text("TVA Totale", totalsX, totalsRowY, { continued: false });
         doc.font("Helvetica-Bold");
-        doc.text(formatCurrency(totalVAT, deliveryNote.DocCurrency), totalsValueX, yPosition + lineSpacing * 3, { continued: false });
+        doc.text(totalVAT.toFixed(2), totalsX + 100, totalsRowY, {
+            width: 80,
+            align: "right",
+            continued: false
+        });
 
-        doc.rect(totalsLabelX - 10, yPosition + lineSpacing * 4, 3, 14).fill("#FFD700");
-        doc.fontSize(11).font("Helvetica-Bold").fillColor("#000000");
-        doc.text("Totale TTC", totalsLabelX, yPosition + lineSpacing * 4, { continued: false });
-        doc.text(formatCurrency(totalIncVAT, deliveryNote.DocCurrency), totalsValueX, yPosition + lineSpacing * 4, { continued: false });
+        // Draw line before final total
+        totalsRowY += 13;
+        doc.strokeColor("#2E5CB8").lineWidth(1);
+        doc.moveTo(totalsX, totalsRowY).lineTo(pageWidth - margin, totalsRowY).stroke();
 
-        doc.rect(totalsLabelX - 10, yPosition + lineSpacing * 5, 3, 12).fill("#FFD700");
-        doc.fontSize(9).font("Helvetica").fillColor("#000000");
-        doc.text(`Devise ${deliveryNote.DocCurrency || "EUR"}`, totalsLabelX, yPosition + lineSpacing * 5, { continued: false });
+        // Total TTC (Total Including VAT)
+        totalsRowY += 5;
+        doc.fontSize(10).font("Helvetica-Bold").fillColor("#000000");
+        doc.text("Totale TTC", totalsX, totalsRowY, { continued: false });
+        doc.text(totalIncVAT.toFixed(2), totalsX + 100, totalsRowY, {
+            width: 80,
+            align: "right",
+            continued: false
+        });
 
-        return yPosition + lineSpacing * 6;
+        // Currency
+        totalsRowY += 15;
+        doc.fontSize(8).font("Helvetica").fillColor("#000000");
+        doc.text("Devise EUR", totalsX, totalsRowY, { continued: false });
     };
 
     let currentY = drawHeader();

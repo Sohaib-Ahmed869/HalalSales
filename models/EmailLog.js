@@ -1,51 +1,142 @@
 // models/EmailLog.js
 const mongoose = require("mongoose");
 
-const EmailLogSchema = new mongoose.Schema({
-  user: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: "User",
-    required: true,
-  },
-  quotationDocEntry: {
-    type: Number,
-    required: true,
-  },
-  recipient: {
-    type: String,
-    required: true,
-  },
-  cc: {
-    type: String,
-  },
-  subject: {
-    type: String,
-  },
-  timestamp: {
-    type: Date,
-    default: Date.now,
-  },
-  type: {
-    type: String,
-    enum: ["quotation_email", "order_email", "invoice_email", "other"],
-    default: "other",
-  },
-  messageId: {
-    type: String,
-  },
-  status: {
-    type: String,
-    enum: ["sent", "delivered", "opened", "failed"],
-    default: "sent",
-  },
-  errorMessage: {
-    type: String,
-  },
-});
+const emailLogSchema = new mongoose.Schema(
+  {
+    // Email Details
+    to: {
+      type: [String],
+      required: true,
+    },
+    cc: {
+      type: [String],
+      default: [],
+    },
+    bcc: {
+      type: [String],
+      default: [],
+    },
+    subject: {
+      type: String,
+      required: true,
+    },
+    body: {
+      type: String,
+      required: true,
+    },
+    htmlBody: {
+      type: String,
+    },
 
-// Add an index for faster queries
-EmailLogSchema.index({ quotationDocEntry: 1, timestamp: -1 });
-EmailLogSchema.index({ user: 1, timestamp: -1 });
-EmailLogSchema.index({ recipient: 1, timestamp: -1 });
+    // Email Type & Context
+    emailType: {
+      type: String,
+      enum: [
+        "invoice",
+        "invoice_apology",
+        "credit_note",
+        "payment_confirmation",
+        "delivery_note",
+        "general",
+        "order_confirmation",
+        "other"
+      ],
+      default: "general",
+    },
+    relatedInvoice: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Invoices",
+    },
+    relatedCustomer: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Customer",
+    },
+    customerCardCode: {
+      type: String,
+    },
 
-module.exports = mongoose.model("EmailLog", EmailLogSchema);
+    // Attachments stored in S3
+    attachments: [
+      {
+        filename: {
+          type: String,
+          required: true,
+        },
+        originalName: {
+          type: String,
+          required: true,
+        },
+        contentType: {
+          type: String,
+          required: true,
+        },
+        size: {
+          type: Number,
+          required: true,
+        },
+        s3Key: {
+          type: String,
+          required: true,
+        },
+        s3Url: {
+          type: String,
+          required: true,
+        },
+      },
+    ],
+
+    // Status & Tracking
+    status: {
+      type: String,
+      enum: ["sent", "failed", "pending"],
+      default: "sent",
+    },
+    sentAt: {
+      type: Date,
+      default: Date.now,
+    },
+    error: {
+      type: String,
+    },
+
+    // Provider Details
+    provider: {
+      type: String,
+      default: "nodemailer",
+    },
+    messageId: {
+      type: String,
+    },
+
+    // User who triggered the email
+    sentBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    sentByName: {
+      type: String,
+    },
+
+    // Metadata
+    metadata: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {},
+    },
+  },
+  {
+    timestamps: true,
+  }
+);
+
+// Indexes for efficient queries
+emailLogSchema.index({ to: 1, sentAt: -1 });
+emailLogSchema.index({ relatedInvoice: 1 });
+emailLogSchema.index({ relatedCustomer: 1 });
+emailLogSchema.index({ customerCardCode: 1 });
+emailLogSchema.index({ emailType: 1, sentAt: -1 });
+emailLogSchema.index({ status: 1 });
+emailLogSchema.index({ createdAt: -1 });
+
+const EmailLog = mongoose.model("EmailLog", emailLogSchema);
+
+module.exports = EmailLog;

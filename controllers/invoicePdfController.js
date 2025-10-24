@@ -2,6 +2,7 @@
 const Invoice = require("../models/Invoice");
 const PDFDocument = require("pdfkit");
 const axios = require("axios");
+const Customer = require("../models/Customer");
 const { sendEmail } = require("../utils/emailService");
 // Helper function to sanitize text for PDF rendering
 // Helper function to sanitize text for PDF rendering
@@ -281,7 +282,7 @@ const generateInvoicePage = async (doc, invoice, logoBuffer, isFirstInvoice = fa
     const drawTotals = (totalExVAT, totalVAT, totalCreditAmount, totalPaidAmount, remainingBalance, yPosition, totalIncVAT) => {
         const totalsLabelX = pageWidth - 240;  // FIXED
         const totalsValueX = pageWidth - 100;
-    
+
         const lineSpacing = 18;
 
         doc.rect(totalsLabelX - 10, yPosition, 3, 12).fill("#FFD700");
@@ -381,13 +382,13 @@ const generateInvoicePage = async (doc, invoice, logoBuffer, isFirstInvoice = fa
 
     // FIX 3: Optimized spacing (account for payment info in totals)
     const rowHeight = 12;
-     let totalIncVAT = invoice.DocTotal;
+    let totalIncVAT = invoice.DocTotal;
     let totalVAT = invoice.VatSum ? invoice.VatSum : invoice.DocTotal - invoice.DocumentLines.map(line => {
         const lineVAT = line.Price * line.Quantity;
         return lineVAT;
     }).reduce((acc, curr) => acc + curr, 0);
     let totalExVAT = invoice.VatSum ? invoice.DocTotal - invoice.VatSum : invoice.DocTotal - totalVAT;
-  
+
     // Dynamic totals height based on payment status
     let totalsHeight = 110; // Base height
     if (totalCreditAmount > 0) totalsHeight += 20;
@@ -415,7 +416,7 @@ const generateInvoicePage = async (doc, invoice, logoBuffer, isFirstInvoice = fa
             const lineTotal = (line.Quantity || 0) * (line.Price || 0);
             const vatAmount = lineTotal * (line.VATGroup === "C3" ? 0.05 : line.VATGroup === "C4" ? 0.20 : 0);
 
-       
+
 
             doc.font("Helvetica").fontSize(7.5).fillColor("#000000");
             doc.text(line.ItemCode || "", col1, currentY, { continued: false });
@@ -991,7 +992,19 @@ Halal Food Service
             emailOptions.cc = ccEmail;
         }
 
-        await sendEmail(emailOptions);
+        await sendEmail({
+            ...emailOptions,
+            emailType: "invoice",
+            relatedInvoice: invoice._id,
+            customerCardCode: invoice.CardCode,
+            sentBy: req.user?._id,
+            sentByName: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
+            metadata: {
+                invoiceNum: invoice.DocNum,
+                docDate: invoice.DocDate,
+                docTotal: invoice.DocTotal,
+            },
+        });
 
         console.log(`Invoice ${invoice.DocNum} emailed successfully to ${recipientEmail}`);
 
@@ -1015,4 +1028,341 @@ Halal Food Service
     }
 };
 
+// Resend invoice with apology message
+exports.resendInvoiceWithApology = async (req, res) => {
+    try {
+        const { invoiceId, recipientEmail, ccEmail } = req.body;
+
+        if (!invoiceId || !recipientEmail) {
+            return res.status(400).json({
+                success: false,
+                message: "Invoice ID and recipient email are required"
+            });
+        }
+
+        console.log(`Resending invoice ${invoiceId} with apology to ${recipientEmail}`);
+
+        // Fetch invoice
+        const invoice = await Invoice.findById(invoiceId)
+            .populate("salesAgent", "firstName lastName email");
+
+        if (!invoice) {
+            return res.status(404).json({
+                success: false,
+                message: "Invoice not found"
+            });
+        }
+
+        // Download logo
+        const logoUrl = "https://imageshfs.s3.ap-southeast-2.amazonaws.com/image-removebg-preview+(1).png";
+        const logoBuffer = await downloadImage(logoUrl);
+
+        // Generate PDF in memory
+        const doc = new PDFDocument({
+            size: "A4",
+            margins: { top: 40, bottom: 40, left: 40, right: 40 },
+            bufferPages: true
+        });
+
+        // Collect PDF data in buffer
+        const chunks = [];
+        doc.on('data', (chunk) => chunks.push(chunk));
+
+        const pdfPromise = new Promise((resolve, reject) => {
+            doc.on('end', () => {
+                const pdfBuffer = Buffer.concat(chunks);
+                resolve(pdfBuffer);
+            });
+            doc.on('error', reject);
+        });
+
+        // Generate invoice page
+        await generateInvoicePage(doc, invoice, logoBuffer, true);
+        doc.end();
+
+        // Wait for PDF generation to complete
+        const pdfBuffer = await pdfPromise;
+
+        // Apology email message
+        const emailSubject = `Correction - Facture #${invoice.DocNum} - ${invoice.CardName}`;
+        const emailText = `Bonjour,
+
+Nous vous prions de bien vouloir nous excuser pour cette erreur. Nous utilisons un nouveau logiciel et il y avait une erreur dans le calcul de la TVA dans l'e-mail recu precedemment.
+
+Veuillez trouver ci-joint la facture correcte pour la livraison d'hier.
+
+Facture #${invoice.DocNum}
+Montant total: ${formatCurrency(invoice.DocTotal, invoice.DocCurrency)}
+Date: ${formatDate(invoice.DocDate)}
+Date d'echeance: ${formatDate(invoice.DocDueDate)}
+
+Nous vous remercions de votre comprehension.
+
+Cordialement,
+Halal Food Service`.trim();
+
+        // Send email with PDF attachment
+        const emailOptions = {
+            to: recipientEmail,
+            subject: emailSubject,
+            text: emailText,
+            attachments: [
+                {
+                    filename: `Facture-Corrected-${invoice.DocNum}.pdf`,
+                    content: pdfBuffer,
+                    contentType: "application/pdf"
+                }
+            ]
+        };
+
+        if (ccEmail) {
+            emailOptions.cc = ccEmail;
+        }
+
+        await sendEmail(emailOptions);
+
+        console.log(`Apology invoice ${invoice.DocNum} emailed successfully to ${recipientEmail}`);
+
+        res.status(200).json({
+            success: true,
+            message: `Apology email sent successfully to ${recipientEmail}`,
+            data: {
+                invoiceNum: invoice.DocNum,
+                recipient: recipientEmail,
+                cc: ccEmail
+            }
+        });
+
+    } catch (error) {
+        console.error("Error resending invoice with apology:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error resending invoice",
+            error: error.message
+        });
+    }
+};
+
+// Preview invoices for resending with apology
+// Preview invoices for resending with apology
+exports.previewResendInvoices = async (req, res) => {
+    try {
+        const { invoiceIds } = req.body;
+
+        if (!invoiceIds || !Array.isArray(invoiceIds) || invoiceIds.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Invoice IDs array is required"
+            });
+        }
+
+        // Fetch invoices
+        const invoices = await Invoice.find({ _id: { $in: invoiceIds } })
+            .populate("salesAgent", "firstName lastName email")
+            .lean();
+
+        // Fetch customer emails for each invoice by CardCode
+        const previewData = await Promise.all(
+            invoices.map(async (invoice) => {
+                let customerEmail = "";
+                let hasEmail = false;
+
+                try {
+                    // Fetch customer by CardCode to get email
+                    const customer = await Customer.findOne({ CardCode: invoice.CardCode }).lean();
+                    if (customer && customer.Email) {
+                        customerEmail = customer.Email;
+                        hasEmail = true;
+                    }
+                    // customerEmail = "sohaibahmedsipra@gmail.com";
+                    // hasEmail = true;
+                } catch (error) {
+                    console.error(`Error fetching customer email for ${invoice.CardCode}:`, error);
+                }
+
+                return {
+                    _id: invoice._id,
+                    DocNum: invoice.DocNum,
+                    CardCode: invoice.CardCode,
+                    CardName: invoice.CardName,
+                    CustomerEmail: customerEmail,
+                    DocDate: invoice.DocDate,
+                    DocTotal: invoice.DocTotal,
+                    DocCurrency: invoice.DocCurrency || "EUR",
+                    hasEmail
+                };
+            })
+        );
+
+        res.json({
+            success: true,
+            data: previewData,
+            summary: {
+                total: invoices.length,
+                withEmail: previewData.filter(inv => inv.hasEmail).length,
+                withoutEmail: previewData.filter(inv => !inv.hasEmail).length
+            }
+        });
+
+    } catch (error) {
+        console.error("Error previewing resend invoices:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error previewing invoices",
+            error: error.message
+        });
+    }
+};
+// Bulk resend invoices with apology
+// Bulk resend invoices with apology
+exports.bulkResendInvoicesWithApology = async (req, res) => {
+    try {
+        const { invoiceIds } = req.body;
+
+        if (!invoiceIds || !Array.isArray(invoiceIds) || invoiceIds.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Invoice IDs array is required"
+            });
+        }
+
+        // Fetch invoices
+        const invoices = await Invoice.find({ _id: { $in: invoiceIds } })
+            .populate("salesAgent", "firstName lastName email");
+
+        const results = {
+            successful: [],
+            failed: [],
+            skipped: []
+        };
+
+        // Download logo once
+        const logoUrl = "https://imageshfs.s3.ap-southeast-2.amazonaws.com/image-removebg-preview+(1).png";
+        const logoBuffer = await downloadImage(logoUrl);
+
+        // Process each invoice
+        for (const invoice of invoices) {
+            try {
+                // Fetch customer email by CardCode
+               // let customerEmail = "sohaibahmedsipra@gmail.com";
+                try {
+                    const customer = await Customer.findOne({ CardCode: invoice.CardCode }).lean();
+                    if (customer && customer.Email) {
+                        customerEmail = customer.Email;
+                    }
+                } catch (error) {
+                    console.error(`Error fetching customer email for ${invoice.CardCode}:`, error);
+                }
+
+                // Skip if no email
+                if (!customerEmail || !customerEmail.trim()) {
+                    results.skipped.push({
+                        invoiceNum: invoice.DocNum,
+                        cardCode: invoice.CardCode,
+                        reason: "No email address found for customer"
+                    });
+                    continue;
+                }
+
+                // Generate PDF
+                const doc = new PDFDocument({
+                    size: "A4",
+                    margins: { top: 40, bottom: 40, left: 40, right: 40 },
+                    bufferPages: true
+                });
+
+                const chunks = [];
+                doc.on('data', (chunk) => chunks.push(chunk));
+
+                const pdfPromise = new Promise((resolve, reject) => {
+                    doc.on('end', () => {
+                        const pdfBuffer = Buffer.concat(chunks);
+                        resolve(pdfBuffer);
+                    });
+                    doc.on('error', reject);
+                });
+
+                await generateInvoicePage(doc, invoice, logoBuffer, true);
+                doc.end();
+
+                const pdfBuffer = await pdfPromise;
+
+                // Prepare apology email
+                const emailSubject = `Correction - Facture #${invoice.DocNum} - ${invoice.CardName}`;
+                const emailText = `Bonjour,
+
+Nous vous prions de bien vouloir nous excuser pour cette erreur. Nous utilisons un nouveau logiciel et il y avait une erreur dans le calcul de la TVA dans l'e-mail recu precedemment.
+
+Veuillez trouver ci-joint la facture correcte pour la livraison d'hier.
+
+Facture #${invoice.DocNum}
+Montant total: ${formatCurrency(invoice.DocTotal, invoice.DocCurrency)}
+Date: ${formatDate(invoice.DocDate)}
+Date d'echeance: ${formatDate(invoice.DocDueDate)}
+
+Nous vous remercions de votre comprehension.
+
+Cordialement,
+Halal Food Service`.trim();
+
+                // Send email with logging
+                await sendEmail({
+                    to: customerEmail,
+                    subject: emailSubject,
+                    text: emailText,
+                    attachments: [
+                        {
+                            filename: `Facture-Corrected-${invoice.DocNum}.pdf`,
+                            content: pdfBuffer,
+                            contentType: "application/pdf"
+                        }
+                    ],
+                    emailType: "invoice_apology",
+                    relatedInvoice: invoice._id,
+                    customerCardCode: invoice.CardCode,
+                    sentBy: req.user?._id,
+                    sentByName: req.user ? `${req.user.firstName} ${req.user.lastName}` : "System",
+                    metadata: {
+                        invoiceNum: invoice.DocNum,
+                        docDate: invoice.DocDate,
+                        docTotal: invoice.DocTotal,
+                        resendReason: "TVA calculation correction",
+                    },
+                });
+
+                results.successful.push({
+                    invoiceNum: invoice.DocNum,
+                    cardCode: invoice.CardCode,
+                    recipient: customerEmail
+                });
+
+                console.log(`✓ Sent apology invoice ${invoice.DocNum} to ${customerEmail}`);
+
+            } catch (error) {
+                console.error(`Error processing invoice ${invoice.DocNum}:`, error);
+                results.failed.push({
+                    invoiceNum: invoice.DocNum,
+                    cardCode: invoice.CardCode,
+                    error: error.message
+                });
+            }
+        }
+
+        console.log(`Bulk resend completed: ${results.successful.length} successful, ${results.failed.length} failed, ${results.skipped.length} skipped`);
+
+        res.json({
+            success: true,
+            message: `Processed ${invoices.length} invoices`,
+            results
+        });
+
+    } catch (error) {
+        console.error("Error bulk resending invoices:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error bulk resending invoices",
+            error: error.message
+        });
+    }
+};
 module.exports = exports;
