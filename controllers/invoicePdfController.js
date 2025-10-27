@@ -387,8 +387,7 @@ const generateInvoicePage = async (doc, invoice, logoBuffer, isFirstInvoice = fa
         const lineVAT = line.Price * line.Quantity;
         return lineVAT;
     }).reduce((acc, curr) => acc + curr, 0);
-    let totalExVAT = invoice.VatSum ? invoice.DocTotal - invoice.VatSum : invoice.DocTotal - totalVAT;
-
+    let totalExVAT = totalIncVAT - totalVAT;
     // Dynamic totals height based on payment status
     let totalsHeight = 110; // Base height
     if (totalCreditAmount > 0) totalsHeight += 20;

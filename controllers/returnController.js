@@ -34,10 +34,14 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
 
         // ✅ CRITICAL FIX: Include base document references to link and close DN
         const processedLines = returnLines.map((line, index) => {
-            const lineTotal = line.Quantity * line.Price;
-            const lineTax = lineTotal * 0.055;
+            const lineTotal = line.Price > 0 ? line.Quantity * line.Price : 0;
+            const lineTax = lineTotal > 0
+                ? (line.VatGroup === 'C3' ? lineTotal * 0.055 :
+                    line.VatGroup === 'C4' ? lineTotal * 0.20 : 0)
+                : 0;
 
             docTotal += lineTotal;
+            docTotal += lineTax;
             vatSum += lineTax;
 
             // Find the original DN line to get BaseLine
@@ -55,7 +59,7 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
                 // ✅ CRITICAL: Use SAPDocEntry instead of DocEntry
                 BaseType: 15,
                 BaseEntry: sapDNDocEntry, // *** FIXED: Use SAP's DocEntry ***
-                BaseLine: originalLine ? originalLine.LineNum : index
+                BaseLine: line.BaseLine
             };
         });
 
@@ -69,6 +73,7 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
         });
         // **STEP 1: Create in SAP first**
         try {
+            console.log(processedLines);
             const returnDataForSAP = {
                 CardCode: deliveryNote.CardCode,
                 DocDate: new Date(),
@@ -100,6 +105,8 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
                 DocNum: sapResponse.DocNum
             });
 
+
+
             // **STEP 2: Save to local DB with SAP-assigned DocEntry/DocNum**
             const returnDoc = new Return({
                 DocEntry: sapResponse.DocEntry,
@@ -126,8 +133,8 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
                     ItemCode: line.ItemCode,
                     ItemDescription: line.ItemDescription,
                     Quantity: line.Quantity,
-                    Price: line.UnitPrice,
-                    LineTotal: line.Quantity * line.UnitPrice,
+                    Price: line.UnitPrice ? line.UnitPrice : 0,
+                    LineTotal: line.Quantity * (line.UnitPrice ? line.UnitPrice : 0),
                     VatGroup: returnLines[index].VatGroup,
 
                     // ✅ Base references in local DB too - use SAP DocEntry
@@ -141,6 +148,49 @@ exports.createReturnFromDeliveryNote = async (req, res) => {
                 LocalStatus: "Synced",
                 salesAgent: deliveryNote.salesAgent
             });
+
+            console.log("Saving return document locally:", {
+                DocEntry: sapResponse.DocEntry,
+                DocNum: sapResponse.DocNum,
+                SAPDocEntry: sapResponse.DocEntry,
+                DocType: "dDocument_Items",
+                CardCode: deliveryNote.CardCode,
+                CardName: deliveryNote.CardName,
+                Address: deliveryNote.Address,
+                DocTotal: docTotal,
+                DocCurrency: deliveryNote.DocCurrency || "EUR",
+                VatSum: vatSum,
+                DocDate: new Date(),
+                DocDueDate: new Date(),
+
+                // ✅ Base document references - use SAP DocEntry
+                BaseType: 15, // Delivery Note
+                BaseEntry: sapDNDocEntry, // *** FIXED ***
+                OriginatingDocument: deliveryNote.DocNum,
+
+                Comments: returnDataForSAP.Comments,
+                DocumentLines: processedLines.map((line, index) => ({
+                    LineNum: index,
+                    ItemCode: line.ItemCode,
+                    ItemDescription: line.ItemDescription,
+                    Quantity: line.Quantity,
+                    Price: line.UnitPrice ? line.UnitPrice : 0,
+                    LineTotal: line.Quantity * (line.UnitPrice ? line.UnitPrice : 0),
+                    VatGroup: returnLines[index].VatGroup,
+
+                    // ✅ Base references in local DB too - use SAP DocEntry
+                    BaseType: 15,
+                    BaseEntry: sapDNDocEntry, // *** FIXED ***
+                    BaseLine: line.BaseLine
+                })),
+
+                DocumentStatus: "bost_Close",
+                SyncedWithSAP: true,
+                LocalStatus: "Synced",
+                salesAgent: deliveryNote.salesAgent
+            });
+
+            console.log("Return document saved locally:", returnDoc);
 
             await returnDoc.save();
 

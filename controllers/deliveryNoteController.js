@@ -1333,7 +1333,7 @@ exports.syncDeliveryNoteStatusesFromSAP = async (req, res) => {
                 dn.DocumentStatus = "bost_Open";
                 dn.UpdateDate = new Date();
                 dn.LocalStatus = "Synced";
-                dn.U_Notes = (dn.U_Notes || "") + ` [Auto-opened via status sync on ${new Date().toISOString()}]`;
+                dn.U_Notes = (dn.Remarks) || (dn.Comments) || "";
 
                 await dn.save();
 
@@ -1407,7 +1407,7 @@ exports.syncDeliveryNoteStatusesFromSAP = async (req, res) => {
                         ItemCode: line.ItemCode,
                         ItemDescription: line.ItemDescription,
                         Quantity: line.Quantity,
-                        Price: line.Price || line.UnitPrice,
+                        Price: line.DiscountPercent ? line.Price * (1 - line.DiscountPercent / 100) : line.Price,
                         UnitPrice: line.Price || line.UnitPrice,
                         PriceAfterVAT: line.PriceAfterVAT,
                         Currency: line.Currency || sapDN.DocCurrency,

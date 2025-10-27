@@ -81,6 +81,35 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
     const footerHeight = 80;
     const maxContentY = pageHeight - footerHeight - 30;
 
+    const Return = require("../models/Return");
+    let returnedQty = {};
+    let returnedSubtotal = 0;
+    let returnedVat = 0;
+
+    if (deliveryNote.hasReturns && deliveryNote.returnDocEntries && deliveryNote.returnDocEntries.length > 0) {
+        const returns = await Return.find({
+            DocEntry: { $in: deliveryNote.returnDocEntries }
+        });
+        returns.forEach(returnDoc => {
+            if (returnDoc.DocumentLines && Array.isArray(returnDoc.DocumentLines)) {
+                returnDoc.DocumentLines.forEach(line => {
+                    const key = line.ItemCode;
+                    returnedQty[key] = (returnedQty[key] || 0) + line.Quantity;
+                    const lineTotal = (line.Price || 0) * line.Quantity;
+                    const lineVat = lineTotal * (line.VatGroup === "C3" ? 0.055 : line.VatGroup === "C4" ? 0.20 : 0);
+                    returnedSubtotal += lineTotal;
+                    returnedVat += lineVat;
+                });
+            }
+        });
+        console.log(`📦 Calculated returned quantities for DN ${deliveryNote.DocNum}:`, returnedQty);
+    }
+
+    console.log("Amount of returns to deduct:", {
+        returnedSubtotal,
+        returnedVat
+    });
+
     const drawFooter = () => {
         const footerY = pageHeight - 80;
         doc.strokeColor("#CCCCCC").lineWidth(0.5).dash(2, 2);
@@ -262,10 +291,16 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
         doc.moveTo(margin - 15, startY + 18).lineTo(pageWidth - margin, startY + 18).stroke();
         return startY + 25;
     };
-    
 
-     const drawTotals = (totalExVAT, totalVAT, startY, totalIncVAT) => {
-        let totalsY = startY + 30;
+
+    const drawTotals = (totalExVAT, totalVAT, startY, totalIncVAT, returnedSubtotal = 0, returnedVat = 0) => {
+        const availableSpace = pageHeight - footerHeight - 160; // 160 for the sections height
+        let totalsY = Math.max(startY + 30, availableSpace);
+
+        // subtract returned amounts if any
+        totalExVAT -= returnedSubtotal;
+        totalVAT -= returnedVat;
+        totalIncVAT -= (returnedSubtotal + returnedVat);
 
         // Calculate column widths - divide page into 3 sections
         const sectionWidth = (pageWidth - (margin * 2)) / 3;
@@ -277,7 +312,7 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
         doc.fontSize(9).font("Helvetica-Bold").fillColor("#000000");
         doc.text("Livreur", livreurX, totalsY, { continued: false });
 
-        doc.fontSize(7).font("Helvetica").fillColor("#000000");
+        doc.fontSize(10).font("Helvetica").fillColor("#000000");
         doc.text("Nom:............................................", livreurX, totalsY + 15, { continued: false });
         doc.text("Prenom:.....................................", livreurX, totalsY + 28, { continued: false });
         doc.text("Paiment Montant:....................", livreurX, totalsY + 41, { continued: false });
@@ -287,7 +322,7 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
         doc.fontSize(9).font("Helvetica-Bold").fillColor("#000000");
         doc.text("Client", clientX, totalsY, { continued: false });
 
-        doc.fontSize(7).font("Helvetica").fillColor("#000000");
+        doc.fontSize(10).font("Helvetica").fillColor("#000000");
         doc.text("Signature:....................................", clientX, totalsY + 15, { continued: false });
         doc.text("Nom:.............................................", clientX, totalsY + 28, { continued: false });
         doc.text("Date:............. Time:..................", clientX, totalsY + 41, { continued: false });
@@ -477,7 +512,18 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
         });
     }
 
-    drawTotals(totalExVAT, totalVAT, currentY, totalIncVAT);
+    const sectionsHeight = 110; // Height needed for Livreur, Client, and Totals
+    const availableSpace = pageHeight - footerHeight - 160;
+    const targetY = Math.max(currentY + 30, availableSpace);
+
+    if (targetY + sectionsHeight > maxContentY) {
+        drawFooter();
+        doc.addPage();
+        currentY = availableSpace; // Start at bottom of new page
+    }
+
+
+    drawTotals(totalExVAT, totalVAT, currentY, totalIncVAT, returnedSubtotal, returnedVat);
     drawFooter();
 };
 

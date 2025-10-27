@@ -2,7 +2,16 @@ const Customer = require("../models/Customer");
 const Invoice = require("../models/Invoice");
 const SalesOrder = require("../models/SalesOrder");
 const Cart = require("../models/Cart");
+const Quotation = require("../models/Quotation");
+const Item = require("../models/item");
+const User = require("../models/User");
 const ExcelJS = require("exceljs");
+const mongoose = require("mongoose");
+const { createObjectCsvStringifier } = require("csv-writer");
+const fs = require("fs");
+const path = require("path");
+const archiver = require("archiver");
+
 
 // Configuration
 const BATCH_SIZE = 1000; // Process 1000 records at a time
@@ -669,4 +678,693 @@ exports.exportSalesInsights = async (req, res) => {
     }
 };
 
+/**
+ * Export comprehensive SKU-level data for advanced analytics
+ * Includes: invoices, quotations, abandoned carts, products, and customers
+ */
+exports.exportSKUAnalyticsData = async (req, res) => {
+    const tempFiles = [];
+    let permanentZipPath = null;
+    
+    try {
+        const { startDate, endDate, salesAgentId, cardCode } = req.query;
+
+        // Build date filter
+        const dateFilter = {};
+        if (startDate && endDate) {
+            dateFilter.$gte = new Date(startDate);
+            dateFilter.$lte = new Date(endDate);
+        } else if (startDate) {
+            dateFilter.$gte = new Date(startDate);
+        } else if (endDate) {
+            dateFilter.$lte = new Date(endDate);
+        }
+
+        console.log("\n🚀 Starting ULTRA-OPTIMIZED SKU Analytics Export");
+        console.log("=" .repeat(60));
+        console.log("Filters:", {
+            dateRange: startDate && endDate ? `${startDate} to ${endDate}` : "All dates",
+            salesAgentId: salesAgentId || "All agents",
+            cardCode: cardCode || "All customers"
+        });
+        console.log("=" .repeat(60) + "\n");
+
+        const BATCH_SIZE = 500; // Process 500 docs at a time for optimal memory
+        const tempDir = path.join(__dirname, "..", "temp");
+        const exportsDir = path.join(__dirname, "..", "exports"); // Permanent storage
+        
+        // Ensure both directories exist
+        if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir, { recursive: true });
+            console.log("✓ Created temp directory");
+        }
+        if (!fs.existsSync(exportsDir)) {
+            fs.mkdirSync(exportsDir, { recursive: true });
+            console.log("✓ Created exports directory");
+        }
+
+        const timestamp = Date.now();
+
+        // Force garbage collection helper
+        const forceGC = () => {
+            if (global.gc) {
+                global.gc();
+            }
+        };
+
+        /**
+         * STREAM DATA DIRECTLY TO CSV FILE
+         * This never loads all data in memory - pure streaming
+         */
+        async function streamToCSV(model, pipeline, fileName, columns) {
+            const filePath = path.join(tempDir, fileName);
+            tempFiles.push(filePath);
+            
+            const writeStream = fs.createWriteStream(filePath, { flags: 'w', encoding: 'utf8' });
+            
+            // Write CSV header
+            const header = columns.map(col => col.title).join(',') + '\n';
+            writeStream.write(header);
+            
+            const cursor = model.aggregate(pipeline).cursor({ batchSize: BATCH_SIZE });
+            
+            let totalRows = 0;
+            let batch = [];
+            let batchCount = 0;
+            
+            console.log(`\n📝 Processing ${fileName}...`);
+            const startTime = Date.now();
+            
+            for await (const doc of cursor) {
+                // Build CSV row
+                const row = columns.map(col => {
+                    let value = doc[col.id];
+                    
+                    // Handle null/undefined
+                    if (value === null || value === undefined) {
+                        value = '';
+                    }
+                    
+                    // Escape CSV special characters
+                    if (typeof value === 'string') {
+                        if (value.includes(',') || value.includes('"') || value.includes('\n')) {
+                            value = '"' + value.replace(/"/g, '""') + '"';
+                        }
+                    }
+                    
+                    return value;
+                }).join(',');
+                
+                batch.push(row + '\n');
+                totalRows++;
+                
+                // Write batch to file and clear memory
+                if (batch.length >= BATCH_SIZE) {
+                    writeStream.write(batch.join(''));
+                    batch = []; // Clear batch
+                    batchCount++;
+                    
+                    // Log progress every 10 batches (5000 rows)
+                    if (batchCount % 10 === 0) {
+                        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                        const rowsPerSec = Math.round(totalRows / (Date.now() - startTime) * 1000);
+                        console.log(`   ⚡ ${totalRows.toLocaleString()} rows | ${elapsed}s | ${rowsPerSec.toLocaleString()}/sec`);
+                        
+                        // Force garbage collection every 10 batches
+                        forceGC();
+                    }
+                }
+            }
+            
+            // Write remaining batch
+            if (batch.length > 0) {
+                writeStream.write(batch.join(''));
+                batch = [];
+            }
+            
+            writeStream.end();
+            
+            // Wait for stream to finish
+            await new Promise((resolve, reject) => {
+                writeStream.on('finish', resolve);
+                writeStream.on('error', reject);
+            });
+            
+            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+            const fileSizeMB = (fs.statSync(filePath).size / 1024 / 1024).toFixed(2);
+            console.log(`   ✅ Completed: ${totalRows.toLocaleString()} rows | ${elapsed}s | ${fileSizeMB} MB`);
+            
+            forceGC(); // Clean up after completing file
+            
+            return totalRows;
+        }
+
+        const exportStats = {};
+
+        // ============================================================
+        // 1. INVOICES
+        // ============================================================
+        console.log("\n" + "=".repeat(60));
+        console.log("📊 DATASET 1/5: INVOICES");
+        console.log("=".repeat(60));
+        exportStats.invoices = await streamToCSV(
+            mongoose.model("Invoices"),
+            [
+                {
+                    $match: {
+                        ...(Object.keys(dateFilter).length > 0 && { DocDate: dateFilter }),
+                        ...(cardCode && { CardCode: cardCode })
+                    }
+                },
+                {
+                    $lookup: {
+                        from: "items",
+                        localField: "DocumentLines.ItemCode",
+                        foreignField: "ItemCode",
+                        as: "itemDetails"
+                    }
+                },
+                { $unwind: { path: "$DocumentLines", preserveNullAndEmptyArrays: false } },
+                {
+                    $addFields: {
+                        itemInfo: {
+                            $arrayElemAt: [
+                                {
+                                    $filter: {
+                                        input: "$itemDetails",
+                                        as: "item",
+                                        cond: { $eq: ["$$item.ItemCode", "$DocumentLines.ItemCode"] }
+                                    }
+                                },
+                                0
+                            ]
+                        }
+                    }
+                },
+                {
+                    $project: {
+                        InvoiceID: "$DocEntry",
+                        InvoiceNum: "$DocNum",
+                        InvoiceDate: { $dateToString: { format: "%Y-%m-%d", date: "$DocDate" } },
+                        CustomerID: "$CardCode",
+                        CustomerName: "$CardName",
+                        SKU: "$DocumentLines.ItemCode",
+                        ItemDescription: "$DocumentLines.ItemDescription",
+                        Quantity: "$DocumentLines.Quantity",
+                        UnitPrice: "$DocumentLines.Price",
+                        LineTotal: "$DocumentLines.LineTotal",
+                        GrossProfit: "$DocumentLines.GrossProfit",
+                        GrossProfitPercent: {
+                            $cond: [
+                                { $gt: ["$DocumentLines.LineTotal", 0] },
+                                { $multiply: [{ $divide: ["$DocumentLines.GrossProfit", "$DocumentLines.LineTotal"] }, 100] },
+                                0
+                            ]
+                        },
+                        WarehouseCode: "$DocumentLines.WarehouseCode",
+                        Category: "$itemInfo.ItemsGroupCode",
+                        Brand: "$itemInfo.U_BRAND",
+                        SubCategory: "$itemInfo.U_Subcategory"
+                    }
+                }
+            ],
+            `invoices_${timestamp}.csv`,
+            [
+                { id: 'InvoiceID', title: 'Invoice ID' },
+                { id: 'InvoiceNum', title: 'Invoice Num' },
+                { id: 'InvoiceDate', title: 'Date' },
+                { id: 'CustomerID', title: 'Customer ID' },
+                { id: 'CustomerName', title: 'Customer Name' },
+                { id: 'SKU', title: 'SKU' },
+                { id: 'ItemDescription', title: 'Description' },
+                { id: 'Quantity', title: 'Quantity' },
+                { id: 'UnitPrice', title: 'Unit Price' },
+                { id: 'LineTotal', title: 'Line Total' },
+                { id: 'GrossProfit', title: 'Gross Profit' },
+                { id: 'GrossProfitPercent', title: 'GP %' },
+                { id: 'WarehouseCode', title: 'Warehouse' },
+                { id: 'Category', title: 'Category' },
+                { id: 'Brand', title: 'Brand' },
+                { id: 'SubCategory', title: 'SubCategory' }
+            ]
+        );
+
+        // ============================================================
+        // 2. QUOTATIONS
+        // ============================================================
+        console.log("\n" + "=".repeat(60));
+        console.log("📊 DATASET 2/5: QUOTATIONS");
+        console.log("=".repeat(60));
+        exportStats.quotations = await streamToCSV(
+            mongoose.model("Quotation"),
+            [
+                {
+                    $match: {
+                        ...(Object.keys(dateFilter).length > 0 && { DocDate: dateFilter }),
+                        ...(cardCode && { CardCode: cardCode }),
+                        ...(salesAgentId && { salesAgent: salesAgentId })
+                    }
+                },
+                {
+                    $lookup: {
+                        from: "items",
+                        localField: "DocumentLines.ItemCode",
+                        foreignField: "ItemCode",
+                        as: "itemDetails"
+                    }
+                },
+                { $unwind: { path: "$DocumentLines", preserveNullAndEmptyArrays: false } },
+                {
+                    $addFields: {
+                        itemInfo: {
+                            $arrayElemAt: [
+                                {
+                                    $filter: {
+                                        input: "$itemDetails",
+                                        as: "item",
+                                        cond: { $eq: ["$$item.ItemCode", "$DocumentLines.ItemCode"] }
+                                    }
+                                },
+                                0
+                            ]
+                        }
+                    }
+                },
+                {
+                    $project: {
+                        QuotationID: "$DocEntry",
+                        QuotationNum: "$DocNum",
+                        QuotationDate: { $dateToString: { format: "%Y-%m-%d", date: "$DocDate" } },
+                        CustomerID: "$CardCode",
+                        CustomerName: "$CardName",
+                        SKU: "$DocumentLines.ItemCode",
+                        ItemDescription: "$DocumentLines.ItemDescription",
+                        Quantity: "$DocumentLines.Quantity",
+                        UnitPrice: "$DocumentLines.Price",
+                        LineTotal: "$DocumentLines.LineTotal",
+                        Status: "$DocumentStatus",
+                        ConvertedToOrder: {
+                            $cond: [
+                                { $or: [{ $eq: ["$DocumentStatus", "bost_Close"] }, { $gt: ["$orderDocEntry", 0] }] },
+                                "Yes",
+                                "No"
+                            ]
+                        },
+                        Category: "$itemInfo.ItemsGroupCode",
+                        Brand: "$itemInfo.U_BRAND"
+                    }
+                }
+            ],
+            `quotations_${timestamp}.csv`,
+            [
+                { id: 'QuotationID', title: 'Quotation ID' },
+                { id: 'QuotationNum', title: 'Quotation Num' },
+                { id: 'QuotationDate', title: 'Date' },
+                { id: 'CustomerID', title: 'Customer ID' },
+                { id: 'CustomerName', title: 'Customer Name' },
+                { id: 'SKU', title: 'SKU' },
+                { id: 'ItemDescription', title: 'Description' },
+                { id: 'Quantity', title: 'Quantity' },
+                { id: 'UnitPrice', title: 'Unit Price' },
+                { id: 'LineTotal', title: 'Line Total' },
+                { id: 'Status', title: 'Status' },
+                { id: 'ConvertedToOrder', title: 'Converted' },
+                { id: 'Category', title: 'Category' },
+                { id: 'Brand', title: 'Brand' }
+            ]
+        );
+
+        // ============================================================
+        // 3. SALES ORDERS
+        // ============================================================
+        console.log("\n" + "=".repeat(60));
+        console.log("📊 DATASET 3/5: SALES ORDERS");
+        console.log("=".repeat(60));
+        exportStats.salesOrders = await streamToCSV(
+            mongoose.model("SalesOrder"),
+            [
+                {
+                    $match: {
+                        ...(Object.keys(dateFilter).length > 0 && { DocDate: dateFilter }),
+                        ...(cardCode && { CardCode: cardCode }),
+                        ...(salesAgentId && { salesAgent: salesAgentId })
+                    }
+                },
+                { $unwind: { path: "$DocumentLines", preserveNullAndEmptyArrays: false } },
+                {
+                    $project: {
+                        OrderID: "$DocEntry",
+                        OrderNum: "$DocNum",
+                        OrderDate: { $dateToString: { format: "%Y-%m-%d", date: "$DocDate" } },
+                        CustomerID: "$CardCode",
+                        CustomerName: "$CardName",
+                        SKU: "$DocumentLines.ItemCode",
+                        ItemDescription: "$DocumentLines.ItemDescription",
+                        Quantity: "$DocumentLines.Quantity",
+                        UnitPrice: "$DocumentLines.Price",
+                        LineTotal: "$DocumentLines.LineTotal",
+                        Status: "$DocumentStatus",
+                        ConvertedToInvoice: {
+                            $cond: [{ $gt: ["$invoiceDocEntry", 0] }, "Yes", "No"]
+                        }
+                    }
+                }
+            ],
+            `sales_orders_${timestamp}.csv`,
+            [
+                { id: 'OrderID', title: 'Order ID' },
+                { id: 'OrderNum', title: 'Order Num' },
+                { id: 'OrderDate', title: 'Date' },
+                { id: 'CustomerID', title: 'Customer ID' },
+                { id: 'CustomerName', title: 'Customer Name' },
+                { id: 'SKU', title: 'SKU' },
+                { id: 'ItemDescription', title: 'Description' },
+                { id: 'Quantity', title: 'Quantity' },
+                { id: 'UnitPrice', title: 'Unit Price' },
+                { id: 'LineTotal', title: 'Line Total' },
+                { id: 'Status', title: 'Status' },
+                { id: 'ConvertedToInvoice', title: 'Invoiced' }
+            ]
+        );
+
+        // ============================================================
+        // 4. PRODUCTS
+        // ============================================================
+        console.log("\n" + "=".repeat(60));
+        console.log("📊 DATASET 4/5: PRODUCTS");
+        console.log("=".repeat(60));
+        exportStats.products = await streamToCSV(
+            mongoose.model("Item"),
+            [
+                {
+                    $project: {
+                        SKU: "$ItemCode",
+                        ItemName: "$ItemName",
+                        Category: "$ItemsGroupCode",
+                        Brand: "$U_BRAND",
+                        SubCategory: "$U_Subcategory",
+                        UnitOfMeasure: "$SalesUnit",
+                        AverageCost: "$AvgStdPrice",
+                        CurrentInventory: "$OnHand",
+                        IsActive: { $cond: [{ $eq: ["$Valid", "tYES"] }, "Yes", "No"] }
+                    }
+                }
+            ],
+            `products_${timestamp}.csv`,
+            [
+                { id: 'SKU', title: 'SKU' },
+                { id: 'ItemName', title: 'Item Name' },
+                { id: 'Category', title: 'Category' },
+                { id: 'Brand', title: 'Brand' },
+                { id: 'SubCategory', title: 'SubCategory' },
+                { id: 'UnitOfMeasure', title: 'UOM' },
+                { id: 'AverageCost', title: 'Avg Cost' },
+                { id: 'CurrentInventory', title: 'Inventory' },
+                { id: 'IsActive', title: 'Active' }
+            ]
+        );
+
+        // ============================================================
+        // 5. CUSTOMERS
+        // ============================================================
+        console.log("\n" + "=".repeat(60));
+        console.log("📊 DATASET 5/5: CUSTOMERS");
+        console.log("=".repeat(60));
+        exportStats.customers = await streamToCSV(
+            mongoose.model("Customer"),
+            [
+                {
+                    $match: {
+                        ...(cardCode && { CardCode: cardCode })
+                    }
+                },
+                {
+                    $lookup: {
+                        from: "users",
+                        localField: "assignedTo",
+                        foreignField: "_id",
+                        as: "agentInfo"
+                    }
+                },
+                {
+                    $unwind: {
+                        path: "$agentInfo",
+                        preserveNullAndEmptyArrays: true
+                    }
+                },
+                {
+                    $project: {
+                        CustomerID: "$CardCode",
+                        CustomerName: "$CardName",
+                        Email: "$Email",
+                        Phone: "$Phone",
+                        City: "$City",
+                        Country: "$Country",
+                        CustomerType: "$customerType",
+                        AssignedRep: {
+                            $concat: [
+                                { $ifNull: ["$agentInfo.firstName", ""] },
+                                " ",
+                                { $ifNull: ["$agentInfo.lastName", ""] }
+                            ]
+                        },
+                        CreditLimit: "$CreditLimit",
+                        OutstandingBalance: "$outstandingBalance"
+                    }
+                }
+            ],
+            `customers_${timestamp}.csv`,
+            [
+                { id: 'CustomerID', title: 'Customer ID' },
+                { id: 'CustomerName', title: 'Customer Name' },
+                { id: 'Email', title: 'Email' },
+                { id: 'Phone', title: 'Phone' },
+                { id: 'City', title: 'City' },
+                { id: 'Country', title: 'Country' },
+                { id: 'CustomerType', title: 'Type' },
+                { id: 'AssignedRep', title: 'Assigned Rep' },
+                { id: 'CreditLimit', title: 'Credit Limit' },
+                { id: 'OutstandingBalance', title: 'Outstanding' }
+            ]
+        );
+
+        // ============================================================
+        // CREATE ZIP FILE WITH ALL CSVs
+        // ============================================================
+        console.log("\n" + "=".repeat(60));
+        console.log("📦 CREATING ZIP ARCHIVE");
+        console.log("=".repeat(60));
+        
+        const zipFileName = `SKU_Analytics_Export_${new Date().toISOString().split('T')[0]}_${timestamp}.zip`;
+        const zipFilePath = path.join(tempDir, zipFileName);
+        
+        const output = fs.createWriteStream(zipFilePath);
+        const archive = archiver('zip', { zlib: { level: 9 } }); // Maximum compression
+        
+        output.on('close', () => {
+            console.log(`   ✅ ZIP created: ${(archive.pointer() / 1024 / 1024).toFixed(2)} MB`);
+        });
+        
+        archive.on('error', (err) => {
+            throw err;
+        });
+        
+        archive.pipe(output);
+        
+        // Add all CSV files to ZIP
+        console.log("   📎 Adding CSV files to archive...");
+        tempFiles.forEach(filePath => {
+            const fileName = path.basename(filePath);
+            archive.file(filePath, { name: fileName });
+            console.log(`      • ${fileName}`);
+        });
+        
+        // Add README with metadata
+        const totalRecords = Object.values(exportStats).reduce((a, b) => a + b, 0);
+        const readme = `SKU Analytics Export
+${"=".repeat(60)}
+
+Export Date: ${new Date().toISOString()}
+Date Range: ${startDate || 'All historical'} to ${endDate || 'Current date'}
+Filters Applied:
+  - Sales Agent: ${salesAgentId || 'All agents'}
+  - Customer: ${cardCode || 'All customers'}
+
+${"=".repeat(60)}
+FILES INCLUDED
+${"=".repeat(60)}
+
+1. invoices_${timestamp}.csv
+   ${exportStats.invoices.toLocaleString()} invoice line items
+
+2. quotations_${timestamp}.csv
+   ${exportStats.quotations.toLocaleString()} quotation line items
+
+3. sales_orders_${timestamp}.csv
+   ${exportStats.salesOrders.toLocaleString()} sales order line items
+
+4. products_${timestamp}.csv
+   ${exportStats.products.toLocaleString()} products
+
+5. customers_${timestamp}.csv
+   ${exportStats.customers.toLocaleString()} customers
+
+${"=".repeat(60)}
+TOTAL: ${totalRecords.toLocaleString()} records exported
+${"=".repeat(60)}
+
+${"=".repeat(60)}
+HOW TO USE THESE FILES
+${"=".repeat(60)}
+
+Option 1: Microsoft Excel
+  1. Open Excel
+  2. Go to File > Open
+  3. Select the CSV file you want to analyze
+  4. Excel will automatically parse the CSV
+
+Option 2: Excel Power Query (for files over 1M rows)
+  1. Open Excel
+  2. Go to Data > Get Data > From File > From Text/CSV
+  3. Select your CSV file
+  4. Click "Load" or "Transform Data" for advanced options
+
+Option 3: Power BI (Recommended for large datasets)
+  1. Open Power BI Desktop
+  2. Get Data > Text/CSV
+  3. Load all CSV files into your data model
+  4. Create relationships and build dashboards
+
+Option 4: Python/Pandas
+  import pandas as pd
+  df = pd.read_csv('invoices_${timestamp}.csv')
+
+Option 5: Database Import
+  - Import CSVs into SQL Server, PostgreSQL, or MySQL
+  - Use for advanced SQL analytics
+
+${"=".repeat(60)}
+RECOMMENDED ANALYSES
+${"=".repeat(60)}
+
+✓ Per-SKU Performance Analysis
+  - Sales volume by product
+  - Gross profit margins
+  - Best/worst performing items
+
+✓ Customer Segmentation
+  - Top customers by revenue
+  - Purchase frequency analysis
+  - Customer lifetime value
+
+✓ Lost SKU Detection
+  - Products that stopped selling
+  - Customer churn by product line
+
+✓ Conversion Funnel
+  - Quote → Order conversion rates
+  - Order → Invoice conversion rates
+
+✓ Market Basket Analysis
+  - Frequently bought together items
+  - Cross-sell opportunities
+
+${"=".repeat(60)}
+SUPPORT
+${"=".repeat(60)}
+
+For questions or issues with this export, contact your system administrator.
+
+Generated by: HalalSales Analytics System
+Export ID: ${timestamp}
+`;
+        
+        archive.append(readme, { name: 'README.txt' });
+        console.log(`      • README.txt`);
+        
+        await archive.finalize();
+        
+        await new Promise((resolve, reject) => {
+            output.on('close', resolve);
+            output.on('error', reject);
+        });
+
+        // ============================================================
+        // SAVE PERMANENT COPY
+        // ============================================================
+        console.log("\n" + "=".repeat(60));
+        console.log("💾 SAVING PERMANENT COPY");
+        console.log("=".repeat(60));
+        
+        permanentZipPath = path.join(exportsDir, zipFileName);
+        fs.copyFileSync(zipFilePath, permanentZipPath);
+        
+        console.log(`   ✅ Saved to: ${permanentZipPath}`);
+        console.log(`   📊 File size: ${(fs.statSync(permanentZipPath).size / 1024 / 1024).toFixed(2)} MB`);
+
+        // ============================================================
+        // SEND ZIP FILE FOR DOWNLOAD
+        // ============================================================
+        console.log("\n" + "=".repeat(60));
+        console.log("📤 SENDING FILE TO CLIENT");
+        console.log("=".repeat(60));
+        
+        res.download(zipFilePath, zipFileName, (err) => {
+            if (err) {
+                console.error("❌ Error sending file:", err);
+            } else {
+                console.log("   ✅ File sent successfully");
+            }
+            
+            // Clean up TEMP files only (keep permanent copy)
+            setTimeout(() => {
+                console.log("\n🧹 Cleaning up temporary files...");
+                tempFiles.forEach(filePath => {
+                    if (fs.existsSync(filePath)) {
+                        fs.unlinkSync(filePath);
+                    }
+                });
+                if (fs.existsSync(zipFilePath)) {
+                    fs.unlinkSync(zipFilePath);
+                }
+                console.log("   ✅ Temp files deleted");
+                console.log(`   ℹ️  Permanent copy still available at:\n      ${permanentZipPath}`);
+            }, 5000);
+        });
+
+        // ============================================================
+        // FINAL SUMMARY
+        // ============================================================
+        console.log("\n" + "=".repeat(60));
+        console.log("📊 EXPORT SUMMARY");
+        console.log("=".repeat(60));
+        console.log(`✓ Invoices:      ${exportStats.invoices.toLocaleString().padStart(12)} rows`);
+        console.log(`✓ Quotations:    ${exportStats.quotations.toLocaleString().padStart(12)} rows`);
+        console.log(`✓ Sales Orders:  ${exportStats.salesOrders.toLocaleString().padStart(12)} rows`);
+        console.log(`✓ Products:      ${exportStats.products.toLocaleString().padStart(12)} rows`);
+        console.log(`✓ Customers:     ${exportStats.customers.toLocaleString().padStart(12)} rows`);
+        console.log("-".repeat(60));
+        console.log(`TOTAL:           ${totalRecords.toLocaleString().padStart(12)} records`);
+        console.log("=".repeat(60));
+        console.log(`\n📁 Permanent file: ${permanentZipPath}`);
+        console.log("=".repeat(60) + "\n");
+
+    } catch (error) {
+        console.error("\n❌ ERROR:", error.message);
+        console.error("Stack trace:", error.stack);
+        
+        // Clean up temp files on error
+        tempFiles.forEach(filePath => {
+            if (fs.existsSync(filePath)) {
+                fs.unlinkSync(filePath);
+            }
+        });
+        
+        res.status(500).json({
+            success: false,
+            message: "Failed to export SKU analytics data",
+            error: error.message
+        });
+    }
+};
 module.exports = exports;

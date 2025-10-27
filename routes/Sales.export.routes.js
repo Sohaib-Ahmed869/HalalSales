@@ -23,4 +23,16 @@ router.get(
     salesExportController.exportSalesInsights
 );
 
+/**
+ * @route   GET /api/sales-export/sku-analytics
+ * @desc    Export comprehensive line-level data for SKU analysis, lost SKU detection, 
+ *          conversion analytics, and upsell recommendations
+ * @access  Private
+ * @query   ?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&includeHistorical=true&minOrderValue=0
+ */
+router.get(
+    "/sku-analytics",
+    salesExportController.exportSKUAnalyticsData
+);
+
 module.exports = router;

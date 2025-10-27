@@ -27,8 +27,10 @@
             border-radius: 20px;
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
             padding: 40px;
-            max-width: 800px;
+            max-width: 1200px;
             width: 100%;
+            max-height: 90vh;
+            overflow-y: auto;
         }
 
         h1 {
@@ -88,6 +90,7 @@
 
         input[type="text"],
         input[type="date"],
+        input[type="number"],
         select {
             padding: 12px;
             border: 2px solid #e0e0e0;
@@ -99,6 +102,7 @@
 
         input[type="text"]:focus,
         input[type="date"]:focus,
+        input[type="number"]:focus,
         select:focus {
             outline: none;
             border-color: #667eea;
@@ -144,6 +148,16 @@
         .btn-secondary:hover {
             transform: translateY(-2px);
             box-shadow: 0 10px 25px rgba(245, 87, 108, 0.4);
+        }
+
+        .btn-success {
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            color: white;
+        }
+
+        .btn-success:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(56, 239, 125, 0.4);
         }
 
         .btn-clear {
@@ -233,71 +247,113 @@
         }
 
         .feature-item {
-            background: white;
-            padding: 15px;
-            border-radius: 8px;
             display: flex;
-            align-items: start;
+            align-items: center;
             gap: 10px;
+            padding: 12px;
+            background: white;
+            border-radius: 8px;
+            border: 1px solid #e0e0e0;
         }
 
         .feature-icon {
-            font-size: 20px;
-            flex-shrink: 0;
+            font-size: 24px;
         }
 
         .feature-text {
             font-size: 13px;
-            color: #666;
+            color: #555;
+            flex: 1;
         }
 
-        @media (max-width: 600px) {
-            .container {
-                padding: 20px;
-            }
+        .highlight-box {
+            background: #e3f2fd;
+            border-left: 4px solid #2196f3;
+            padding: 15px;
+            margin-top: 15px;
+            border-radius: 4px;
+        }
 
-            h1 {
-                font-size: 24px;
-            }
+        .highlight-box h3 {
+            color: #1976d2;
+            font-size: 16px;
+            margin-bottom: 8px;
+        }
 
-            .button-group {
-                flex-direction: column;
-            }
+        .highlight-box ul {
+            margin-left: 20px;
+            color: #555;
+        }
 
-            button {
-                min-width: 100%;
-            }
+        .highlight-box li {
+            margin-bottom: 5px;
+            font-size: 13px;
+        }
+
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px;
+            background: white;
+            border-radius: 8px;
+            border: 2px solid #e0e0e0;
+        }
+
+        .checkbox-group input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+
+        .checkbox-group label {
+            text-transform: none;
+            font-weight: normal;
+            cursor: pointer;
+            margin: 0;
+        }
+
+        /* Scrollbar styling */
+        .container::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .container::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+
+        .container::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 10px;
+        }
+
+        .container::-webkit-scrollbar-thumb:hover {
+            background: #555;
         }
     </style>
 </head>
 
 <body>
     <div class="container">
-        <h1>📊 Sales Export Center</h1>
-        <p class="subtitle">Download comprehensive sales reports in Excel format</p>
+        <h1>📊 Sales Export Dashboard</h1>
+        <p class="subtitle">Download comprehensive sales reports with advanced filtering</p>
 
-        <!-- Token Input Section -->
+        <!-- Token Section -->
         <div class="token-section">
-            <p><strong>⚠️ Authentication Required</strong></p>
+            <p><strong>🔐 Authentication Required</strong></p>
             <div class="input-group">
-                <label for="authToken">JWT Token</label>
-                <input type="text" id="authToken" placeholder="Paste your authentication token here" autocomplete="off">
+                <label for="authToken">Your Auth Token</label>
+                <input type="text" id="authToken" placeholder="Paste your authentication token here">
             </div>
-            <p style="margin-top: 10px; font-size: 12px;">
-                💡 Get your token by logging in to your account. It will be stored in your browser.
-            </p>
         </div>
 
-        <!-- Client Export Section -->
+        <!-- Section 1: Clients Export -->
         <div class="section">
             <h2>
                 <span class="section-icon">👥</span>
-                Export All Clients
+                Client Database Export
             </h2>
-            <p style="color: #666; font-size: 14px; margin-bottom: 20px;">
-                Export comprehensive client data including sales metrics, agent assignments, and abandoned cart
-                information
-            </p>
 
             <div class="filters">
                 <div class="input-group">
@@ -309,14 +365,13 @@
                     <input type="date" id="endDate">
                 </div>
                 <div class="input-group">
-                    <label for="status">Customer Status</label>
+                    <label for="status">Status</label>
                     <select id="status">
                         <option value="">All Statuses</option>
                         <option value="active">Active</option>
                         <option value="inactive">Inactive</option>
                         <option value="lead">Lead</option>
                         <option value="prospect">Prospect</option>
-                        <option value="pending">Pending</option>
                     </select>
                 </div>
                 <div class="input-group">
@@ -327,20 +382,20 @@
 
             <div class="feature-list">
                 <div class="feature-item">
-                    <span class="feature-icon">📋</span>
-                    <span class="feature-text">20 comprehensive columns including contact details and address</span>
+                    <span class="feature-icon">📧</span>
+                    <span class="feature-text">Complete contact information</span>
                 </div>
                 <div class="feature-item">
                     <span class="feature-icon">💰</span>
-                    <span class="feature-text">SAP turnover and invoice metrics</span>
+                    <span class="feature-text">Total sales & outstanding balance</span>
                 </div>
                 <div class="feature-item">
-                    <span class="feature-icon">🛒</span>
-                    <span class="feature-text">Combined abandoned cart data from website & SAP</span>
+                    <span class="feature-icon">📅</span>
+                    <span class="feature-text">Last purchase date & frequency</span>
                 </div>
                 <div class="feature-item">
-                    <span class="feature-icon">📈</span>
-                    <span class="feature-text">Quotation tracking and values</span>
+                    <span class="feature-icon">👤</span>
+                    <span class="feature-text">Assigned sales agent</span>
                 </div>
             </div>
 
@@ -357,15 +412,12 @@
             <div id="clientStatus" class="status-message"></div>
         </div>
 
-        <!-- Sales Insights Section -->
+        <!-- Section 2: Sales Insights -->
         <div class="section">
             <h2>
                 <span class="section-icon">📈</span>
-                Export Sales Insights
+                Sales Insights Export
             </h2>
-            <p style="color: #666; font-size: 14px; margin-bottom: 20px;">
-                Export detailed sales data across three sheets: Invoices, Quotations, and Abandoned Carts
-            </p>
 
             <div class="filters">
                 <div class="input-group">
@@ -413,9 +465,110 @@
 
             <div id="insightStatus" class="status-message"></div>
         </div>
+
+        <!-- Section 3: SKU Analytics (NEW) -->
+        <div class="section">
+            <h2>
+                <span class="section-icon">🎯</span>
+                SKU Analytics Export (Advanced)
+            </h2>
+
+            <div class="highlight-box">
+                <h3>📊 What You Get:</h3>
+                <ul>
+                    <li><strong>Per-SKU Performance:</strong> Sales, quantity, margin, velocity by SKU/brand/category
+                    </li>
+                    <li><strong>Lost-SKU Detection:</strong> Customers who stopped buying specific SKUs with recovery
+                        potential</li>
+                    <li><strong>Conversion Analytics:</strong> Quote→Order & Cart→Order conversion rates</li>
+                    <li><strong>Upsell Engine:</strong> Market-basket rules and next-best-offer recommendations</li>
+                    <li><strong>7 Complete Datasets:</strong> Invoices, Quotations, Carts, Products, Customers, Credit
+                        Notes, Sales Orders</li>
+                </ul>
+            </div>
+
+            <div class="filters">
+                <div class="input-group">
+                    <label for="skuStartDate">Start Date</label>
+                    <input type="date" id="skuStartDate">
+                </div>
+                <div class="input-group">
+                    <label for="skuEndDate">End Date</label>
+                    <input type="date" id="skuEndDate">
+                </div>
+                <div class="input-group">
+                    <label for="skuMinOrderValue">Min Order Value (EUR)</label>
+                    <input type="number" id="skuMinOrderValue" placeholder="0" min="0" step="0.01">
+                </div>
+                <div class="input-group">
+                    <label for="skuSalesAgentId">Sales Agent ID</label>
+                    <input type="text" id="skuSalesAgentId" placeholder="Optional">
+                </div>
+                <div class="input-group">
+                    <label for="skuCardCode">Customer Code</label>
+                    <input type="text" id="skuCardCode" placeholder="Optional">
+                </div>
+                <div class="input-group">
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="includeHistorical" checked>
+                        <label for="includeHistorical">Include All Historical Data (24+ months)</label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="feature-list">
+                <div class="feature-item">
+                    <span class="feature-icon">📦</span>
+                    <span class="feature-text">Invoice lines with sales agent & payment status</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">💬</span>
+                    <span class="feature-text">Quotation lines with conversion tracking</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">🛍️</span>
+                    <span class="feature-text">Abandoned cart items with recovery data</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">🏷️</span>
+                    <span class="feature-text">Product master data with pricing & stock</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">👥</span>
+                    <span class="feature-text">Customer master with regional info</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">↩️</span>
+                    <span class="feature-text">Credit notes for return analysis</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">📋</span>
+                    <span class="feature-text">Sales orders for fulfillment tracking</span>
+                </div>
+                <div class="feature-item">
+                    <span class="feature-icon">🎯</span>
+                    <span class="feature-text">Ready for Morocco analytics pipeline</span>
+                </div>
+            </div>
+
+            <div class="button-group" style="margin-top: 20px;">
+                <button class="btn-success" onclick="exportSKUAnalytics()">
+                    <span id="skuBtnText">🚀 Download SKU Analytics (JSON)</span>
+                    <div id="skuSpinner" class="spinner" style="display: none;"></div>
+                </button>
+                <button class="btn-clear" onclick="clearSKUFilters()">
+                    🔄 Clear Filters
+                </button>
+            </div>
+
+            <div id="skuStatus" class="status-message"></div>
+        </div>
     </div>
 
     <script>
+        // API Base URL - Change this to your production URL
+        const API_BASE_URL = 'http://localhost:5000/api/sales-export';
+
         // Load saved token from localStorage
         window.addEventListener('DOMContentLoaded', () => {
             const savedToken = localStorage.getItem('authToken');
@@ -432,6 +585,8 @@
             document.getElementById('endDate').valueAsDate = today;
             document.getElementById('insightStartDate').valueAsDate = thirtyDaysAgo;
             document.getElementById('insightEndDate').valueAsDate = today;
+            document.getElementById('skuStartDate').valueAsDate = thirtyDaysAgo;
+            document.getElementById('skuEndDate').valueAsDate = today;
         });
 
         // Save token to localStorage when changed
@@ -442,7 +597,7 @@
         function getAuthToken() {
             const token = document.getElementById('authToken').value.trim();
             if (!token) {
-                showStatus('clientStatus', 'error', '❌ Please enter your authentication token');
+                alert('❌ Please enter your authentication token');
                 return null;
             }
             return token;
@@ -480,20 +635,18 @@
             const token = getAuthToken();
             if (!token) return;
 
-            // Get filter values
             const startDate = document.getElementById('startDate').value;
             const endDate = document.getElementById('endDate').value;
             const status = document.getElementById('status').value;
             const salesAgentId = document.getElementById('salesAgentId').value.trim();
 
-            // Build query string
             const params = new URLSearchParams();
             if (startDate) params.append('startDate', startDate);
             if (endDate) params.append('endDate', endDate);
             if (status) params.append('status', status);
             if (salesAgentId) params.append('salesAgentId', salesAgentId);
 
-            const url = `http://localhost:5000/api/sales-export/clients${params.toString() ? '?' + params.toString() : ''}`;
+            const url = `${API_BASE_URL}/clients${params.toString() ? '?' + params.toString() : ''}`;
 
             setLoading('clientBtnText', 'clientSpinner', true);
             showStatus('clientStatus', 'info', '⏳ Generating your export... This may take a moment.');
@@ -513,10 +666,7 @@
                     throw new Error(`Export failed: ${response.statusText}`);
                 }
 
-                // Get the blob
                 const blob = await response.blob();
-
-                // Create download link
                 const downloadUrl = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = downloadUrl;
@@ -539,18 +689,16 @@
             const token = getAuthToken();
             if (!token) return;
 
-            // Get filter values
             const startDate = document.getElementById('insightStartDate').value;
             const endDate = document.getElementById('insightEndDate').value;
             const cardCode = document.getElementById('cardCode').value.trim();
 
-            // Build query string
             const params = new URLSearchParams();
             if (startDate) params.append('startDate', startDate);
             if (endDate) params.append('endDate', endDate);
             if (cardCode) params.append('cardCode', cardCode);
 
-            const url = `http://localhost:5000/api/sales-export/insights${params.toString() ? '?' + params.toString() : ''}`;
+            const url = `${API_BASE_URL}/insights${params.toString() ? '?' + params.toString() : ''}`;
 
             setLoading('insightBtnText', 'insightSpinner', true);
             showStatus('insightStatus', 'info', '⏳ Generating your sales insights... This may take a moment.');
@@ -570,10 +718,7 @@
                     throw new Error(`Export failed: ${response.statusText}`);
                 }
 
-                // Get the blob
                 const blob = await response.blob();
-
-                // Create download link
                 const downloadUrl = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = downloadUrl;
@@ -592,6 +737,69 @@
             }
         }
 
+        async function exportSKUAnalytics() {
+            const token = getAuthToken();
+            if (!token) return;
+
+            const startDate = document.getElementById('skuStartDate').value;
+            const endDate = document.getElementById('skuEndDate').value;
+            const minOrderValue = document.getElementById('skuMinOrderValue').value;
+            const salesAgentId = document.getElementById('skuSalesAgentId').value.trim();
+            const cardCode = document.getElementById('skuCardCode').value.trim();
+            const includeHistorical = document.getElementById('includeHistorical').checked;
+
+            const params = new URLSearchParams();
+            if (startDate) params.append('startDate', startDate);
+            if (endDate) params.append('endDate', endDate);
+            if (minOrderValue) params.append('minOrderValue', minOrderValue);
+            if (salesAgentId) params.append('salesAgentId', salesAgentId);
+            if (cardCode) params.append('cardCode', cardCode);
+            params.append('includeHistorical', includeHistorical);
+
+            const url = `${API_BASE_URL}/sku-analytics${params.toString() ? '?' + params.toString() : ''}`;
+
+            setLoading('skuBtnText', 'skuSpinner', true);
+            showStatus('skuStatus', 'info', '⏳ Generating comprehensive SKU analytics... This may take several moments for large datasets.');
+
+            try {
+                const response = await fetch(url, {
+                    method: 'GET',
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                });
+
+                if (!response.ok) {
+                    if (response.status === 401) {
+                        throw new Error('Authentication failed. Please check your token.');
+                    }
+                    throw new Error(`Export failed: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+
+                // Download as JSON file
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                const downloadUrl = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = downloadUrl;
+                a.download = `sku_analytics_${new Date().toISOString().split('T')[0]}.json`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                window.URL.revokeObjectURL(downloadUrl);
+
+                const counts = data.data.metadata.recordCounts;
+                showStatus('skuStatus', 'success',
+                    `✅ SKU Analytics downloaded! Records: ${counts.invoiceLines} invoices, ${counts.quotationLines} quotes, ${counts.abandonedCartLines} carts, ${counts.products} products, ${counts.customers} customers`);
+            } catch (error) {
+                console.error('Export error:', error);
+                showStatus('skuStatus', 'error', `❌ ${error.message}`);
+            } finally {
+                setLoading('skuBtnText', 'skuSpinner', false);
+            }
+        }
+
         function clearFilters() {
             document.getElementById('startDate').value = '';
             document.getElementById('endDate').value = '';
@@ -605,6 +813,16 @@
             document.getElementById('insightEndDate').value = '';
             document.getElementById('cardCode').value = '';
             showStatus('insightStatus', 'info', 'ℹ️ Filters cleared');
+        }
+
+        function clearSKUFilters() {
+            document.getElementById('skuStartDate').value = '';
+            document.getElementById('skuEndDate').value = '';
+            document.getElementById('skuMinOrderValue').value = '';
+            document.getElementById('skuSalesAgentId').value = '';
+            document.getElementById('skuCardCode').value = '';
+            document.getElementById('includeHistorical').checked = true;
+            showStatus('skuStatus', 'info', 'ℹ️ Filters cleared');
         }
     </script>
 </body>

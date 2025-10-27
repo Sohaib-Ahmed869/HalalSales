@@ -1,5 +1,6 @@
 const Invoice = require("../models/Invoice");
 const DeliveryNote = require("../models/DeliveryNote");
+const Return = require("../models/Return");
 const Customer = require('../models/Customer');
 const {
   createInvoiceInSAP,
@@ -991,23 +992,29 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
         // Process document lines - subtract returned quantities
         const invoiceLines = [];
         let hasValidLines = false;
-        let invoiceTotal = 0;
-        let invoiceVatSum = 0;
-
+        let invoiceSubtotal = 0;  // ✅ CHANGED: Calculate from scratch
+        let invoiceVatSum = 0;    // ✅ CHANGED: Calculate from scratch
+        let invoiceTotal = 0;     // ✅ CHANGED: Calculate from scratch
         deliveryNote.DocumentLines.forEach((line, index) => {
           const deliveredQty = line.Quantity || 0;
           const returnedQty = returnedQuantities[line.ItemCode] || 0;
+
           const netQty = deliveredQty - returnedQty;
 
           if (netQty > 0) {
             hasValidLines = true;
             const linePrice = line.Price || line.UnitPrice || 0;
             const lineTotal = netQty * linePrice;
-            const lineVat = lineTotal * (line.VatGroup === "C3" ? 0.055 : line.VatGroup === "C4" ? 0.20 : 0);
-            const priceAfterVAT = linePrice + (line.VatGroup === "C3" ? linePrice * 0.05 : line.VatGroup === "C4" ? linePrice * 0.20 : 0);
-
-            invoiceTotal += priceAfterVAT * netQty;
-            invoiceVatSum += lineVat;
+            const lineVat = lineTotal * (
+              line.VatGroup === "C3" ? 0.055 :
+                line.VatGroup === "C4" ? 0.20 :
+                  0
+            );
+            const priceAfterVAT = lineTotal + (
+              line.VatGroup === "C3" ? lineTotal * 0.055 :
+                line.VatGroup === "C4" ? lineTotal * 0.20 :
+                  0
+            );
 
             invoiceLines.push({
               LineNum: invoiceLines.length,
@@ -1015,8 +1022,10 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
               ItemDescription: line.ItemDescription,
               Quantity: netQty,
               Price: linePrice,
+              PriceAfterVAT: priceAfterVAT,  // ✅ ADDED
               Currency: line.Currency || deliveryNote.DocCurrency,
               LineTotal: lineTotal,
+              VatSum: lineVat,  // ✅ ADDED
               VatGroup: line.VatGroup,
 
               // ✅ Base references to delivery note
@@ -1024,10 +1033,47 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
               BaseEntry: deliveryNote.SAPDocEntry,
               BaseLine: line.LineNum,
             });
+
+            // Accumulate totals
+            invoiceSubtotal += lineTotal;
+            invoiceVatSum += lineVat;
           } else if (netQty < 0) {
             console.warn(`⚠️ Item ${line.ItemCode} has more returns (${returnedQty}) than delivered (${deliveredQty})`);
           }
         });
+
+        // ✅ FIXED: Properly calculate return deductions
+        if (returnedQuantities && Object.keys(returnedQuantities).length > 0) {
+          let returnSubtotal = 0;
+          let returnVat = 0;
+
+          Object.keys(returnedQuantities).forEach(itemCode => {
+            const line = deliveryNote.DocumentLines.find(l => l.ItemCode === itemCode);
+            if (line) {
+              const returnedQty = returnedQuantities[itemCode];
+              const linePrice = line.Price || line.UnitPrice || 0;
+
+              // Calculate base amount without VAT
+              const returnLineSubtotal = returnedQty * linePrice;
+
+              // Calculate VAT on returned amount
+              const returnLineVat = returnLineSubtotal * (
+                line.VatGroup === "C3" ? 0.055 :
+                  line.VatGroup === "C4" ? 0.20 :
+                    0
+              );
+
+              returnSubtotal += returnLineSubtotal;
+              returnVat += returnLineVat;
+            }
+          });
+
+          console.log(`📉 Deducting returns - Subtotal: ${returnSubtotal.toFixed(2)}, VAT: ${returnVat.toFixed(2)}, Total: ${(returnSubtotal + returnVat).toFixed(2)}`);
+
+          // Deduct from invoice totals
+          invoiceTotal = invoiceSubtotal + invoiceVatSum;
+          invoiceVatSum = invoiceVatSum - returnVat;
+        }
 
         if (!hasValidLines) {
           results.failed.push({
@@ -1058,6 +1104,7 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
               ItemDescription: line.ItemDescription,
               Quantity: line.Quantity,
               UnitPrice: line.Price,
+              TaxCode: line.VatGroup,
               PriceAfterVAT: line.PriceAfterVAT,
               LineNum: index,
 
@@ -1094,9 +1141,9 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
             CardName: deliveryNote.CardName,
             Address: deliveryNote.Address,
             Address2: deliveryNote.Address2,
-            DocTotal: invoiceTotal,
+            DocTotal: invoiceLines.reduce((sum, line) => sum + (line.LineTotal + (line.VatSum || 0)), 0),
             DocCurrency: deliveryNote.DocCurrency,
-            VatSum: invoiceVatSum,
+            VatSum: invoiceLines.reduce((sum, line) => sum + (line.VatSum || 0), 0),
             DocDate: deliveryNote.DocDate,  // Changed from new Date()
             DocDueDate: deliveryNote.DocDate,  // Changed from new Date()
             CreationDate: new Date(),
