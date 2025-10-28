@@ -4,7 +4,7 @@ const Schema = mongoose.Schema;
 const UserSchema = new Schema({
   role: {
     type: String,
-    enum: ["admin", "sales_agent", "sales_manager", "data-tech_sales_agent", "data-tech_admin"],
+    enum: ["admin", "sales_agent", "sales_manager", "data-tech_sales_agent", "data-tech_admin", "logistics"],
     required: true,
   },
   password: {
@@ -138,7 +138,8 @@ const UserSchema = new Schema({
     // Required only for sales agents
     validate: {
       validator: function (v) {
-        return this.role !== "sales_agent" || v !== undefined;
+        // Logistics users don't need a manager
+        return this.role === "logistics" || this.role !== "sales_agent" || v !== undefined;
       },
       message: "Sales agents must have a manager assigned",
     },

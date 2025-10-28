@@ -3,6 +3,10 @@ const Customer = require("../models/Customer");
 const Invoice = require("../models/Invoice");
 const Payment = require("../models/payment");
 const PaymentLink = require("../models/paymentLinks");
+const SalesOrder = require("../models/SalesOrder");
+const Quotation = require("../models/Quotation");
+const CallData = require("../models/CallData");
+const Deal = require("../models/Deal");
 const mongoose = require("mongoose");
 
 const calculatePaymentTotal = (payment) => {
@@ -22,10 +26,10 @@ const calculatePaymentTotal = (payment) => {
     ) || 0) +
     // Handle DocTotal as fallback
     (!payment.CashSum &&
-    !payment.TransferSum &&
-    !payment.CheckSum &&
-    (!payment.PaymentCreditCards || payment.PaymentCreditCards.length === 0) &&
-    (!payment.PaymentChecks || payment.PaymentChecks.length === 0)
+      !payment.TransferSum &&
+      !payment.CheckSum &&
+      (!payment.PaymentCreditCards || payment.PaymentCreditCards.length === 0) &&
+      (!payment.PaymentChecks || payment.PaymentChecks.length === 0)
       ? payment.DocTotal || 0
       : 0)
   );
@@ -98,7 +102,7 @@ const weeklyDataFormatter = {
         ((currentDate - new Date(year, 0, 1)) / 86400000 +
           new Date(year, 0, 1).getDay() +
           1) /
-          7
+        7
       );
 
       // Create week key
@@ -179,7 +183,7 @@ const calculateActivityByTimePeriod = (
           ((dateObj - new Date(year, 0, 1)) / 86400000 +
             new Date(year, 0, 1).getDay() +
             1) /
-            7
+          7
         );
 
         // Format as YYYY-Www for sorting and display consistency
@@ -519,9 +523,9 @@ exports.getCustomerJourney = async (req, res) => {
       relationshipDuration:
         firstInteraction && lastInteraction
           ? Math.ceil(
-              (new Date(lastInteraction) - new Date(firstInteraction)) /
-                (1000 * 60 * 60 * 24)
-            )
+            (new Date(lastInteraction) - new Date(firstInteraction)) /
+            (1000 * 60 * 60 * 24)
+          )
           : 0,
       firstInteractionDate: firstInteraction,
       lastInteractionDate: lastInteraction,
@@ -570,7 +574,7 @@ const calculateAveragePaymentTime = (invoices, paymentLinks) => {
   const paymentTimes = paymentLinks.map((link) => {
     return Math.floor(
       (new Date(link.paymentDate) - new Date(link.invoiceDate)) /
-        (1000 * 60 * 60 * 24)
+      (1000 * 60 * 60 * 24)
     );
   });
 
@@ -833,7 +837,7 @@ const identifyPurchasePatterns = (invoices) => {
   if (daysBetweenInvoices.length > 0) {
     averageFrequency = Math.round(
       daysBetweenInvoices.reduce((sum, days) => sum + days, 0) /
-        daysBetweenInvoices.length
+      daysBetweenInvoices.length
     );
   }
 
@@ -1023,16 +1027,16 @@ exports.getCustomerJourneySummary = async (req, res) => {
     const paymentData =
       cardCodes.length > 0
         ? await Payment.aggregate([
-            { $match: { CardCode: { $in: cardCodes } } },
-            {
-              $group: {
-                _id: "$CardCode",
-                paymentCount: { $sum: 1 },
-                firstPayment: { $min: "$DocDate" },
-                lastPayment: { $max: "$DocDate" },
-              },
+          { $match: { CardCode: { $in: cardCodes } } },
+          {
+            $group: {
+              _id: "$CardCode",
+              paymentCount: { $sum: 1 },
+              firstPayment: { $min: "$DocDate" },
+              lastPayment: { $max: "$DocDate" },
             },
-          ])
+          },
+        ])
         : [];
 
     // Convert payment data to a map for easier access
@@ -1050,9 +1054,9 @@ exports.getCustomerJourneySummary = async (req, res) => {
         customer.daysSinceLastInvoice,
         payments.lastPayment
           ? Math.floor(
-              (new Date() - new Date(payments.lastPayment)) /
-                (1000 * 60 * 60 * 24)
-            )
+            (new Date() - new Date(payments.lastPayment)) /
+            (1000 * 60 * 60 * 24)
+          )
           : Infinity
       );
 
@@ -1220,15 +1224,15 @@ exports.getCustomerInteractionTimeline = async (req, res) => {
             payment.CashSum > 0
               ? "Cash"
               : payment.TransferSum > 0
-              ? "Bank Transfer"
-              : (payment.PaymentCreditCards &&
+                ? "Bank Transfer"
+                : (payment.PaymentCreditCards &&
                   payment.PaymentCreditCards.length > 0) ||
-                payment.CreditSum > 0
-              ? "Credit Card"
-              : (payment.PaymentChecks && payment.PaymentChecks.length > 0) ||
-                payment.CheckSum > 0
-              ? "Check"
-              : "Unknown",
+                  payment.CreditSum > 0
+                  ? "Credit Card"
+                  : (payment.PaymentChecks && payment.PaymentChecks.length > 0) ||
+                    payment.CheckSum > 0
+                    ? "Check"
+                    : "Unknown",
           relatedInvoices:
             payment.PaymentInvoices?.map((pi) => ({
               invoiceNumber: pi.DocEntry,
@@ -1251,7 +1255,7 @@ exports.getCustomerInteractionTimeline = async (req, res) => {
           invoiceDate: link.invoiceDate,
           daysToPayment: Math.floor(
             (new Date(link.paymentDate) - new Date(link.invoiceDate)) /
-              (1000 * 60 * 60 * 24)
+            (1000 * 60 * 60 * 24)
           ),
         },
       })),
@@ -1264,7 +1268,7 @@ exports.getCustomerInteractionTimeline = async (req, res) => {
     for (let i = 1; i < timeline.length; i++) {
       const daysBetween = Math.floor(
         (new Date(timeline[i].date) - new Date(timeline[i - 1].date)) /
-          (1000 * 60 * 60 * 24)
+        (1000 * 60 * 60 * 24)
       );
       if (daysBetween > 0) {
         interactionDays.push(daysBetween);
@@ -1274,9 +1278,9 @@ exports.getCustomerInteractionTimeline = async (req, res) => {
     const averageInteractionFrequency =
       interactionDays.length > 0
         ? Math.round(
-            interactionDays.reduce((sum, days) => sum + days, 0) /
-              interactionDays.length
-          )
+          interactionDays.reduce((sum, days) => sum + days, 0) /
+          interactionDays.length
+        )
         : null;
 
     return res.status(200).json({
@@ -1559,9 +1563,9 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
         count: item.count,
         percentage: results[0].overallStats[0]
           ? (
-              (item.count / results[0].overallStats[0].totalCustomers) *
-              100
-            ).toFixed(2)
+            (item.count / results[0].overallStats[0].totalCustomers) *
+            100
+          ).toFixed(2)
           : 0,
         totalRevenue: item.totalRevenue,
         averageOrderValue: item.averageOrderValue,
@@ -1574,9 +1578,9 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
           count: item.count,
           percentage: results[0].overallStats[0]
             ? (
-                (item.count / results[0].overallStats[0].totalCustomers) *
-                100
-              ).toFixed(2)
+              (item.count / results[0].overallStats[0].totalCustomers) *
+              100
+            ).toFixed(2)
             : 0,
           totalRevenue: item.totalRevenue,
           totalOutstanding: item.totalOutstanding,
@@ -1599,9 +1603,9 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
           count: item.count,
           percentage: results[0].overallStats[0]
             ? (
-                (item.count / results[0].overallStats[0].totalCustomers) *
-                100
-              ).toFixed(2)
+              (item.count / results[0].overallStats[0].totalCustomers) *
+              100
+            ).toFixed(2)
             : 0,
           totalRevenue: item.totalRevenue,
           averageRevenue: item.averageRevenue,
@@ -1623,9 +1627,9 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
           count: item.count,
           percentage: results[0].overallStats[0]
             ? (
-                (item.count / results[0].overallStats[0].totalCustomers) *
-                100
-              ).toFixed(2)
+              (item.count / results[0].overallStats[0].totalCustomers) *
+              100
+            ).toFixed(2)
             : 0,
           totalRevenue: item.totalRevenue,
           averageRevenue: item.averageRevenue,
@@ -1778,4 +1782,505 @@ exports.getInvoicesBySegment = async (req, res) => {
     });
   }
 };
+
+/**
+ * Get comprehensive AI summary for a specific customer
+ */
+exports.getCustomerAISummary = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { startDate, endDate } = req.query;
+
+    // Build date filter
+    const dateFilter = {};
+    if (startDate && endDate) {
+      dateFilter.DocDate = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate)
+      };
+    } else if (startDate) {
+      dateFilter.DocDate = { $gte: new Date(startDate) };
+    } else if (endDate) {
+      dateFilter.DocDate = { $lte: new Date(endDate) };
+    }
+
+    // Fetch all data in parallel from MongoDB models
+    const [customer, salesOrders, quotations, invoices, payments, calls, deals] = await Promise.all([
+      // Customer Details
+      Customer.findOne({ CardCode: customerId }).lean(),
+
+      // Sales Orders
+      SalesOrder.find({ CardCode: customerId, ...dateFilter })
+        .sort({ DocDate: -1 })
+        .lean(),
+
+      // Quotations
+      Quotation.find({ CardCode: customerId, ...dateFilter })
+        .sort({ DocDate: -1 })
+        .lean(),
+
+      // Invoices
+      Invoice.find({ CardCode: customerId, ...dateFilter })
+        .sort({ DocDate: -1 })
+        .lean(),
+
+      // Payments
+      Payment.find({ CardCode: customerId, ...dateFilter })
+        .sort({ DocDate: -1 })
+        .lean(),
+
+      // Calls
+      CallData.find({ CardCode: customerId })
+        .sort({ startTime: -1 })
+        .lean(),
+
+      // Deals
+      Deal.find({ CardCode: customerId })
+        .sort({ createdAt: -1 })
+        .lean()
+    ]);
+
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Customer not found'
+      });
+    }
+
+    // Calculate product statistics from sales orders
+    const productStats = calculateProductStats(salesOrders);
+
+    // Build comprehensive summary
+    const summary = {
+      customer: {
+        code: customer.CardCode,
+        name: customer.CardName,
+        email: customer.Email,
+        phone: customer.Phone,
+        status: customer.status,
+        assignedTo: customer.assignedTo
+      },
+
+      sales: {
+        total: salesOrders.length,
+        totalValue: salesOrders.reduce((sum, o) => sum + (o.DocTotal || 0), 0),
+        averageValue: salesOrders.length > 0
+          ? salesOrders.reduce((sum, o) => sum + (o.DocTotal || 0), 0) / salesOrders.length
+          : 0,
+        completed: salesOrders.filter(o => o.DocumentStatus === 'bost_Close').length,
+        pending: salesOrders.filter(o => o.DocumentStatus === 'bost_Open').length,
+        cancelled: salesOrders.filter(o => o.DocumentStatus === 'bost_Cancel').length,
+        lastOrderDate: salesOrders[0]?.DocDate || null,
+        recentOrders: salesOrders.slice(0, 5).map(o => ({
+          docNum: o.DocNum,
+          date: o.DocDate,
+          total: o.DocTotal,
+          status: o.DocumentStatus
+        }))
+      },
+
+      quotations: {
+        total: quotations.length,
+        totalValue: quotations.reduce((sum, q) => sum + (q.DocTotal || 0), 0),
+        converted: quotations.filter(q => q.DocumentStatus === 'bost_Close').length,
+        pending: quotations.filter(q => q.DocumentStatus === 'bost_Open').length,
+        conversionRate: quotations.length > 0
+          ? ((quotations.filter(q => q.DocumentStatus === 'bost_Close').length / quotations.length) * 100).toFixed(1)
+          : 0,
+        recent: quotations.slice(0, 5).map(q => ({
+          docNum: q.DocNum,
+          date: q.DocDate,
+          total: q.DocTotal,
+          status: q.DocumentStatus
+        }))
+      },
+
+      invoices: {
+        total: invoices.length,
+        totalValue: invoices.reduce((sum, i) => sum + (i.DocTotal || 0), 0),
+        paid: invoices.filter(i => i.DocumentStatus === 'bost_Close').length,
+        unpaid: invoices.filter(i => i.DocumentStatus === 'bost_Open').length,
+        totalPaid: invoices.reduce((sum, i) => sum + (i.PaidToDate || 0), 0),
+        totalUnpaid: invoices.reduce((sum, i) => sum + ((i.DocTotal || 0) - (i.PaidToDate || 0)), 0),
+        overdue: invoices.filter(i =>
+          i.DocumentStatus === 'bost_Open' &&
+          i.DocDueDate &&
+          new Date(i.DocDueDate) < new Date()
+        ).length,
+        averagePaymentTime: calculateAveragePaymentTime2(invoices, payments),
+        recent: invoices.slice(0, 5).map(i => ({
+          docNum: i.DocNum,
+          date: i.DocDate,
+          dueDate: i.DocDueDate,
+          total: i.DocTotal,
+          paid: i.PaidToDate,
+          status: i.DocumentStatus
+        }))
+      },
+
+      calls: {
+        total: calls.length,
+        totalDuration: calls.reduce((sum, c) => sum + (c.duration || 0), 0),
+        averageDuration: calls.length > 0
+          ? calls.reduce((sum, c) => sum + (c.duration || 0), 0) / calls.length
+          : 0,
+        incoming: calls.filter(c => c.direction === 'inbound').length,
+        outgoing: calls.filter(c => c.direction === 'outbound').length,
+        lastCallDate: calls[0]?.startTime || null,
+        recent: calls.slice(0, 5).map(c => ({
+          id: c._id,
+          date: c.startTime,
+          duration: c.duration,
+          direction: c.direction,
+          status: c.callStatus
+        }))
+      },
+
+      deals: {
+        total: deals.length,
+        totalValue: deals.reduce((sum, d) => sum + (d.amount || 0), 0),
+        won: deals.filter(d => d.status === 'won').length,
+        lost: deals.filter(d => d.status === 'lost').length,
+        active: deals.filter(d => d.status === 'active' || d.status === 'in_progress').length,
+        recent: deals.slice(0, 5).map(d => ({
+          id: d._id,
+          title: d.title,
+          amount: d.amount,
+          status: d.status,
+          stage: d.stage
+        }))
+      },
+
+      products: {
+        total: productStats.length,
+        top10: productStats.slice(0, 10).map(p => ({
+          code: p.ItemCode,
+          name: p.ItemName,
+          quantity: p.totalQuantity,
+          revenue: p.totalRevenue,
+          orderCount: p.orderCount,
+          lastPurchased: p.lastPurchaseDate
+        })),
+        favorite: productStats[0] || null
+      },
+
+      engagement: {
+        score: calculateEngagementScore(salesOrders, calls, quotations),
+        status: determineCustomerStatus(salesOrders, calls, invoices),
+        riskLevel: calculateRiskLevel(invoices, salesOrders, calls),
+        lastInteraction: getLastInteractionDate(salesOrders, calls, quotations, invoices),
+        lifetimeValue: invoices.reduce((sum, i) => sum + (i.PaidToDate || 0), 0),
+        daysSinceLastOrder: salesOrders[0]
+          ? Math.floor((new Date() - new Date(salesOrders[0].DocDate)) / (1000 * 60 * 60 * 24))
+          : null
+      },
+
+      aiSummary: generateAISummaryText({
+        customer,
+        salesOrders,
+        quotations,
+        invoices,
+        calls,
+        deals,
+        products: productStats
+      }),
+
+      insights: generateQuickInsights({
+        salesOrders,
+        quotations,
+        invoices,
+        calls,
+        deals,
+        products: productStats
+      })
+    };
+
+    res.json({
+      success: true,
+      data: summary
+    });
+
+  } catch (error) {
+    console.error('Error generating customer AI summary:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error generating customer summary',
+      error: error.message
+    });
+  }
+};
+
+// Helper Functions
+
+function calculateProductStats(salesOrders) {
+  const productMap = {};
+
+  salesOrders.forEach(order => {
+    if (order.DocumentLines) {
+      order.DocumentLines.forEach(line => {
+        if (!productMap[line.ItemCode]) {
+          productMap[line.ItemCode] = {
+            ItemCode: line.ItemCode,
+            ItemName: line.ItemDescription || line.ItemName,
+            totalQuantity: 0,
+            totalRevenue: 0,
+            orderCount: 0,
+            lastPurchaseDate: order.DocDate
+          };
+        }
+
+        productMap[line.ItemCode].totalQuantity += line.Quantity || 0;
+        productMap[line.ItemCode].totalRevenue += line.LineTotal || 0;
+        productMap[line.ItemCode].orderCount += 1;
+
+        if (new Date(order.DocDate) > new Date(productMap[line.ItemCode].lastPurchaseDate)) {
+          productMap[line.ItemCode].lastPurchaseDate = order.DocDate;
+        }
+      });
+    }
+  });
+
+  return Object.values(productMap).sort((a, b) => b.totalRevenue - a.totalRevenue);
+}
+
+function calculateAveragePaymentTime2(invoices, payments) {
+  const paidInvoices = invoices.filter(inv =>
+    inv.DocumentStatus === 'bost_Close' && inv.DocDate && inv.DocDueDate
+  );
+
+  if (paidInvoices.length === 0) return null;
+
+  const paymentTimes = paidInvoices.map(inv => {
+    const dueDate = new Date(inv.DocDueDate);
+    const paidDate = new Date(inv.UpdateDate || inv.DocDate);
+    return Math.floor((paidDate - dueDate) / (1000 * 60 * 60 * 24));
+  });
+
+  const avgDays = paymentTimes.reduce((sum, days) => sum + days, 0) / paymentTimes.length;
+  return Math.round(avgDays);
+}
+
+function calculateEngagementScore(orders, calls, quotations) {
+  let score = 0;
+  const now = new Date();
+  const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+
+  // Recent orders (40 points max)
+  const recentOrders = orders.filter(o => new Date(o.DocDate) >= ninetyDaysAgo).length;
+  score += Math.min(recentOrders * 10, 40);
+
+  // Recent calls (30 points max)
+  const recentCalls = calls.filter(c => new Date(c.startTime) >= ninetyDaysAgo).length;
+  score += Math.min(recentCalls * 6, 30);
+
+  // Recent quotations (30 points max)
+  const recentQuotations = quotations.filter(q => new Date(q.DocDate) >= ninetyDaysAgo).length;
+  score += Math.min(recentQuotations * 10, 30);
+
+  return Math.min(score, 100);
+}
+
+function determineCustomerStatus(orders, calls, invoices) {
+  const lastOrderDate = orders[0] ? new Date(orders[0].DocDate) : null;
+  const lastCallDate = calls[0] ? new Date(calls[0].startTime) : null;
+
+  const lastInteraction = [lastOrderDate, lastCallDate]
+    .filter(d => d)
+    .sort((a, b) => b - a)[0];
+
+  if (!lastInteraction) return 'Inactive';
+
+  const daysSince = Math.floor((new Date() - lastInteraction) / (1000 * 60 * 60 * 24));
+
+  const overdueInvoices = invoices.filter(i =>
+    i.DocumentStatus === 'bost_Open' &&
+    i.DocDueDate &&
+    new Date(i.DocDueDate) < new Date()
+  ).length;
+
+  if (overdueInvoices > 0) return 'At Risk';
+  if (daysSince < 30) return 'Active';
+  if (daysSince < 90) return 'Moderate';
+  if (daysSince < 180) return 'Low Activity';
+  return 'Inactive';
+}
+
+function calculateRiskLevel(invoices, orders, calls) {
+  let riskScore = 0;
+
+  // Overdue invoices
+  const overdueInvoices = invoices.filter(i =>
+    i.DocumentStatus === 'bost_Open' &&
+    i.DocDueDate &&
+    new Date(i.DocDueDate) < new Date()
+  );
+  riskScore += overdueInvoices.length * 20;
+
+  // No recent orders
+  const daysSinceLastOrder = orders[0]
+    ? Math.floor((new Date() - new Date(orders[0].DocDate)) / (1000 * 60 * 60 * 24))
+    : 365;
+  if (daysSinceLastOrder > 90) riskScore += 30;
+
+  // No recent calls
+  const daysSinceLastCall = calls[0]
+    ? Math.floor((new Date() - new Date(calls[0].startTime)) / (1000 * 60 * 60 * 24))
+    : 365;
+  if (daysSinceLastCall > 90) riskScore += 20;
+
+  if (riskScore >= 50) return 'High';
+  if (riskScore >= 30) return 'Medium';
+  return 'Low';
+}
+
+function getLastInteractionDate(orders, calls, quotations, invoices) {
+  const dates = [
+    ...orders.map(o => new Date(o.DocDate)),
+    ...calls.map(c => new Date(c.startTime)),
+    ...quotations.map(q => new Date(q.DocDate)),
+    ...invoices.map(i => new Date(i.DocDate))
+  ].filter(d => !isNaN(d));
+
+  return dates.length > 0 ? new Date(Math.max(...dates)) : null;
+}
+
+function generateAISummaryText(data) {
+  const { customer, salesOrders, quotations, invoices, calls, deals, products } = data;
+
+  let text = `${customer.CardName} `;
+
+  // Revenue classification
+  const totalRevenue = invoices.reduce((sum, i) => sum + (i.DocTotal || 0), 0);
+  if (totalRevenue > 100000) text += 'is a high-value customer ';
+  else if (totalRevenue > 50000) text += 'is a mid-tier customer ';
+  else if (totalRevenue > 0) text += 'is an emerging customer ';
+  else text += 'is a new customer ';
+
+  // Order activity
+  if (salesOrders.length > 0) {
+    text += `with ${salesOrders.length} order${salesOrders.length > 1 ? 's' : ''} totaling €${totalRevenue.toFixed(2)}. `;
+
+    const daysSinceOrder = Math.floor((new Date() - new Date(salesOrders[0].DocDate)) / (1000 * 60 * 60 * 24));
+    if (daysSinceOrder < 30) text += 'Recently active. ';
+    else if (daysSinceOrder < 90) text += `Last order ${daysSinceOrder} days ago. `;
+    else text += `⚠️ Inactive for ${daysSinceOrder} days - needs attention. `;
+  } else {
+    text += 'with no order history yet. ';
+  }
+
+  // Quotation performance
+  if (quotations.length > 0) {
+    const converted = quotations.filter(q => q.DocumentStatus === 'bost_Close').length;
+    const rate = ((converted / quotations.length) * 100).toFixed(0);
+    text += `${rate}% quotation conversion rate (${converted}/${quotations.length}). `;
+  }
+
+  // Payment behavior
+  const overdue = invoices.filter(i =>
+    i.DocumentStatus === 'bost_Open' &&
+    i.DocDueDate &&
+    new Date(i.DocDueDate) < new Date()
+  ).length;
+
+  if (overdue > 0) {
+    text += `⚠️ ${overdue} overdue invoice${overdue > 1 ? 's' : ''}. `;
+  } else if (invoices.length > 0) {
+    text += 'Good payment history. ';
+  }
+
+  // Product preferences
+  if (products.length > 0) {
+    text += `Most purchased: ${products[0].ItemName} (${products[0].totalQuantity} units). `;
+  }
+
+  // Deals
+  if (deals.length > 0) {
+    const activeDeals = deals.filter(d => d.status === 'active' || d.status === 'in_progress').length;
+    if (activeDeals > 0) {
+      text += `${activeDeals} active deal${activeDeals > 1 ? 's' : ''} in pipeline. `;
+    }
+  }
+
+  // Call engagement
+  if (calls.length > 0) {
+    text += `${calls.length} recorded interaction${calls.length > 1 ? 's' : ''}.`;
+  }
+
+  return text;
+}
+
+function generateQuickInsights(data) {
+  const insights = [];
+  const { salesOrders, quotations, invoices, calls, deals, products } = data;
+
+  // Sales trend
+  if (salesOrders.length >= 4) {
+    const recent = salesOrders.slice(0, Math.ceil(salesOrders.length / 2));
+    const older = salesOrders.slice(Math.ceil(salesOrders.length / 2));
+    const recentAvg = recent.reduce((sum, o) => sum + (o.DocTotal || 0), 0) / recent.length;
+    const olderAvg = older.reduce((sum, o) => sum + (o.DocTotal || 0), 0) / older.length;
+
+    if (recentAvg > olderAvg * 1.2) {
+      insights.push({ type: 'positive', text: '📈 Order values increasing' });
+    } else if (recentAvg < olderAvg * 0.8) {
+      insights.push({ type: 'warning', text: '📉 Order values decreasing' });
+    }
+  }
+
+  // Overdue invoices
+  const overdue = invoices.filter(i =>
+    i.DocumentStatus === 'bost_Open' &&
+    i.DocDueDate &&
+    new Date(i.DocDueDate) < new Date()
+  );
+  if (overdue.length > 0) {
+    const totalOverdue = overdue.reduce((sum, i) => sum + ((i.DocTotal || 0) - (i.PaidToDate || 0)), 0);
+    insights.push({
+      type: 'alert',
+      text: `⚠️ ${overdue.length} overdue invoice${overdue.length > 1 ? 's' : ''} (€${totalOverdue.toFixed(2)})`
+    });
+  }
+
+  // Inactivity warning
+  if (salesOrders.length > 0) {
+    const daysSince = Math.floor((new Date() - new Date(salesOrders[0].DocDate)) / (1000 * 60 * 60 * 24));
+    if (daysSince > 90) {
+      insights.push({ type: 'alert', text: '🔔 No orders in 90+ days - reach out!' });
+    }
+  }
+
+  // High conversion
+  if (quotations.length >= 3) {
+    const converted = quotations.filter(q => q.DocumentStatus === 'bost_Close').length;
+    const rate = converted / quotations.length;
+    if (rate > 0.7) {
+      insights.push({ type: 'positive', text: '✅ Excellent quotation conversion (>70%)' });
+    } else if (rate < 0.3) {
+      insights.push({ type: 'warning', text: '⚠️ Low quotation conversion (<30%)' });
+    }
+  }
+
+  // Active deals
+  const activeDeals = deals.filter(d => d.status === 'active' || d.status === 'in_progress');
+  if (activeDeals.length > 0) {
+    const totalValue = activeDeals.reduce((sum, d) => sum + (d.amount || 0), 0);
+    insights.push({
+      type: 'positive',
+      text: `💼 ${activeDeals.length} active deal${activeDeals.length > 1 ? 's' : ''} (€${totalValue.toFixed(2)})`
+    });
+  }
+
+  // Product concentration
+  if (products.length > 0 && products[0].totalRevenue > 0) {
+    const topProductRatio = products[0].totalRevenue / products.reduce((sum, p) => sum + p.totalRevenue, 0);
+    if (topProductRatio > 0.5) {
+      insights.push({
+        type: 'warning',
+        text: `📦 ${(topProductRatio * 100).toFixed(0)}% revenue from one product`
+      });
+    }
+  }
+
+  return insights;
+}
 module.exports = exports;

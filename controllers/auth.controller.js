@@ -157,7 +157,7 @@ exports.register = async (req, res) => {
 
     // Admin can create sales_manager and sales_agent
     if (currentUserRole === "admin") {
-      if (role !== "sales_manager" && role !== "sales_agent") {
+      if (role !== "sales_manager" && role !== "sales_agent" && role !== "data-tech_admin" && role !== "data-tech_sales_agent" && role !== "logistics") {
         return res.status(403).json({
           message: "Admin can only create sales manager or sales agent",
         });

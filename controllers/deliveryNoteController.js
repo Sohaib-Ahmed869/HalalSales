@@ -1249,10 +1249,12 @@ exports.syncDeliveryNoteStatusesFromSAP = async (req, res) => {
             closedInLocal: initialClosedCount,
             dnsClosed: 0,
             dnsOpened: 0,
+            dnsUpdated: 0,
             dnsCreated: 0,
             errors: [],
             closedDNs: [],
             openedDNs: [],
+            updatedDNs: [],
             createdDNs: [],
         };
 
@@ -1356,6 +1358,203 @@ exports.syncDeliveryNoteStatusesFromSAP = async (req, res) => {
             }
         }
 
+        // *** 3. CHECK FOR UPDATES IN EXISTING OPEN DELIVERY NOTES ***
+        console.log("\n🔄 Checking for updates in existing open delivery notes...");
+
+        // Get all local open DNs that are also in SAP (not the ones being closed or created)
+        const localOpenDNsToCheck = localOpenDNs.filter(dn => sapOpenDocNums.includes(dn.DocNum));
+
+        console.log(`Checking ${localOpenDNsToCheck.length} open delivery notes for updates...`);
+
+        for (const localDN of localOpenDNsToCheck) {
+            const sapDN = openDNsInSAP.find(dn => dn.DocNum === localDN.DocNum);
+
+            if (!sapDN) {
+                continue;
+            }
+
+            try {
+                // Compare totals to detect changes
+                const localTotal = parseFloat(localDN.DocTotal) || 0;
+                const sapTotal = parseFloat(sapDN.DocTotal) || 0;
+                const localVat = parseFloat(localDN.VatSum) || 0;
+                const sapVat = parseFloat(sapDN.VatSum) || 0;
+
+                // Allow for small floating point differences (0.01)
+                const totalDifference = Math.abs(localTotal - sapTotal);
+                const vatDifference = Math.abs(localVat - sapVat);
+
+                let hasChanges = totalDifference > 0.01 || vatDifference > 0.01;
+                let changeDetails = [];
+
+                if (totalDifference > 0.01) {
+                    changeDetails.push(`Total changed: ${localTotal} → ${sapTotal}`);
+                }
+                if (vatDifference > 0.01) {
+                    changeDetails.push(`VAT changed: ${localVat} → ${sapVat}`);
+                }
+
+                // **CHECK FOR CHANGES IN DOCUMENT LINES**
+                if (sapDN.DocumentLines && sapDN.DocumentLines.length > 0) {
+                    const localLines = localDN.DocumentLines || [];
+                    const sapLines = sapDN.DocumentLines;
+
+                    // Check if number of lines changed
+                    if (localLines.length !== sapLines.length) {
+                        hasChanges = true;
+                        changeDetails.push(`Line count changed: ${localLines.length} → ${sapLines.length}`);
+                    } else {
+                        // Compare each line for changes
+                        for (let i = 0; i < sapLines.length; i++) {
+                            const sapLine = sapLines[i];
+
+                            // Find matching local line by LineNum, or fall back to index
+                            const localLine = localLines.find(l => l.LineNum === sapLine.LineNum) || localLines[i];
+
+                            if (!localLine) {
+                                hasChanges = true;
+                                changeDetails.push(`New line added: ${sapLine.ItemCode}`);
+                                continue;
+                            }
+
+                            // 1. Check ItemCode change (CRITICAL - product substitution)
+                            if (localLine.ItemCode !== sapLine.ItemCode) {
+                                hasChanges = true;
+                                changeDetails.push(`Line ${sapLine.LineNum || i}: Item changed from ${localLine.ItemCode} to ${sapLine.ItemCode}`);
+                            }
+
+                            // 2. Check Quantity change
+                            const localQty = parseFloat(localLine.Quantity) || 0;
+                            const sapQty = parseFloat(sapLine.Quantity) || 0;
+                            if (Math.abs(localQty - sapQty) > 0.001) {
+                                hasChanges = true;
+                                changeDetails.push(`Line ${sapLine.LineNum || i} (${sapLine.ItemCode}): Qty ${localQty} → ${sapQty}`);
+                            }
+
+                            // 3. Check Price change
+                            const localPrice = parseFloat(localLine.Price) || 0;
+                            const sapPrice = parseFloat(sapLine.Price || sapLine.UnitPrice) || 0;
+                            if (Math.abs(localPrice - sapPrice) > 0.01) {
+                                hasChanges = true;
+                                changeDetails.push(`Line ${sapLine.LineNum || i} (${sapLine.ItemCode}): Price ${localPrice} → ${sapPrice}`);
+                            }
+
+                            // Check if discount changed
+                            const localDiscount = parseFloat(localLine.DiscountPercent) || 0;
+                            const sapDiscount = parseFloat(sapLine.DiscountPercent) || 0;
+                            if (Math.abs(localDiscount - sapDiscount) > 0.01) {
+                                hasChanges = true;
+                                changeDetails.push(`Line ${sapLine.LineNum || i}: Discount changed: ${localDiscount}% → ${sapDiscount}%`);
+                            }
+
+                            // 4. Check LineTotal change (CRITICAL - catches calculation differences)
+                            const localLineTotal = parseFloat(localLine.LineTotal) || 0;
+                            const sapLineTotal = parseFloat(sapLine.LineTotal) || 0;
+                            if (Math.abs(localLineTotal - sapLineTotal) > 0.01) {
+                                hasChanges = true;
+                                changeDetails.push(`Line ${sapLine.LineNum || i} (${sapLine.ItemCode}): Total ${localLineTotal} → ${sapLineTotal}`);
+                            }
+
+                            // 5. Check VatGroup change (affects tax calculations)
+                            if (localLine.VatGroup !== sapLine.VatGroup) {
+                                hasChanges = true;
+                                changeDetails.push(`Line ${sapLine.LineNum || i} (${sapLine.ItemCode}): VAT ${localLine.VatGroup} → ${sapLine.VatGroup}`);
+                            }
+
+                            // 6. Check WarehouseCode change (affects inventory location)
+                            if (localLine.WarehouseCode !== sapLine.WarehouseCode) {
+                                hasChanges = true;
+                                changeDetails.push(`Line ${sapLine.LineNum || i} (${sapLine.ItemCode}): Warehouse ${localLine.WarehouseCode} → ${sapLine.WarehouseCode}`);
+                            }
+                        }
+                    }
+                }
+
+                if (hasChanges) {
+                    console.log(`📝 Delivery Note ${localDN.DocNum} has been modified in SAP`);
+                    console.log(`   Changes detected:`);
+                    changeDetails.forEach(detail => console.log(`   - ${detail}`));
+
+                    // Update the delivery note with SAP data
+                    localDN.DocTotal = sapDN.DocTotal;
+                    localDN.VatSum = sapDN.VatSum;
+                    localDN.DocCurrency = sapDN.DocCurrency || localDN.DocCurrency;
+                    localDN.DiscountPercent = sapDN.DiscountPercent || localDN.DiscountPercent;
+                    localDN.Address = sapDN.Address || localDN.Address;
+                    localDN.Address2 = sapDN.Address2 || localDN.Address2;
+                    localDN.DocDate = sapDN.DocDate || localDN.DocDate;
+                    localDN.DocDueDate = sapDN.DocDueDate || localDN.DocDueDate;
+                    localDN.TaxDate = sapDN.TaxDate || localDN.TaxDate;
+
+                    // Update document lines if they exist in SAP
+                    if (sapDN.DocumentLines && sapDN.DocumentLines.length > 0) {
+                        localDN.DocumentLines = sapDN.DocumentLines.map((line, index) => {
+                            const originalPrice = line.Price || line.UnitPrice || 0;
+                            const discountPercent = parseFloat(line.DiscountPercent) || 0;
+
+                            // Calculate effective price after discount
+                            // If discount is 100%, price becomes 0
+                            const effectivePrice = discountPercent >= 100 ? 0 : originalPrice * (1 - discountPercent / 100);
+
+                            return {
+                                LineNum: line.LineNum || index,
+                                ItemCode: line.ItemCode,
+                                ItemDescription: line.ItemDescription,
+                                Quantity: line.Quantity,
+                                Price: effectivePrice,  // Store the effective price after discount
+                                OriginalPrice: effectivePrice,  // Store original price for reference
+                                DiscountPercent: discountPercent,
+                                UnitPrice: effectivePrice,
+                                PriceAfterVAT: line.PriceAfterVAT,
+                                Currency: line.Currency || sapDN.DocCurrency,
+                                LineTotal: line.LineTotal,
+                                VatGroup: line.VatGroup,
+                                PriceList: line.PriceList || sapDN.PriceList,
+                                WarehouseCode: line.WarehouseCode,
+
+                                // Base references for lines
+                                BaseType: line.BaseType,
+                                BaseEntry: line.BaseEntry,
+                                BaseLine: line.BaseLine,
+
+                                ShipDate: line.ShipDate,
+                                ActualDeliveryDate: line.ActualDeliveryDate,
+                            };
+                        });
+                    }
+
+                    localDN.UpdateDate = new Date();
+                    localDN.LocalStatus = "Synced";
+                    localDN.U_Notes = (localDN.U_Notes || "") + ` [Auto-updated via status sync on ${new Date().toISOString()}]`;
+
+                    await localDN.save();
+
+                    results.dnsUpdated++;
+                    results.updatedDNs.push({
+                        DocNum: localDN.DocNum,
+                        CardCode: localDN.CardCode,
+                        CardName: localDN.CardName,
+                        oldTotal: localTotal,
+                        newTotal: sapTotal,
+                        difference: totalDifference,
+                        changes: changeDetails,
+                    });
+
+                    console.log(`✅ Delivery Note ${localDN.DocNum} updated successfully`);
+                }
+
+            } catch (error) {
+                console.error(`❌ Error updating delivery note ${localDN.DocNum}:`, error.message);
+                results.errors.push({
+                    DocNum: localDN.DocNum,
+                    action: "update",
+                    error: error.message,
+                });
+            }
+        }
+
+        // *** 4. CREATE DNs that are in SAP's open list but NOT locally ***
+
         // *** 3. CREATE DNs that are in SAP's open list but NOT locally ***
         const missingDNDocNums = sapOpenDocNums.filter(docNum => !allLocalDocNums.includes(docNum));
 
@@ -1402,27 +1601,38 @@ exports.syncDeliveryNoteStatusesFromSAP = async (req, res) => {
                     OriginatingOrder: sapDN.U_SourceOrderNum || null,
 
                     // Document lines with base references
-                    DocumentLines: sapDN.DocumentLines?.map((line, index) => ({
-                        LineNum: line.LineNum || index,
-                        ItemCode: line.ItemCode,
-                        ItemDescription: line.ItemDescription,
-                        Quantity: line.Quantity,
-                        Price: line.DiscountPercent ? line.Price * (1 - line.DiscountPercent / 100) : line.Price,
-                        UnitPrice: line.Price || line.UnitPrice,
-                        PriceAfterVAT: line.PriceAfterVAT,
-                        Currency: line.Currency || sapDN.DocCurrency,
-                        LineTotal: line.LineTotal,
-                        VatGroup: line.VatGroup,
-                        PriceList: line.PriceList || sapDN.PriceList,
+                    DocumentLines: sapDN.DocumentLines?.map((line, index) => {
+                        const originalPrice = line.Price || line.UnitPrice || 0;
+                        const discountPercent = parseFloat(line.DiscountPercent) || 0;
 
-                        // Base references for lines
-                        BaseType: line.BaseType,
-                        BaseEntry: line.BaseEntry,
-                        BaseLine: line.BaseLine,
+                        // Calculate effective price after discount
+                        // If discount is 100%, price becomes 0
+                        const effectivePrice = discountPercent >= 100 ? 0 : originalPrice * (1 - discountPercent / 100);
 
-                        ShipDate: line.ShipDate,
-                        ActualDeliveryDate: line.ActualDeliveryDate,
-                    })) || [],
+                        return {
+                            LineNum: line.LineNum || index,
+                            ItemCode: line.ItemCode,
+                            ItemDescription: line.ItemDescription,
+                            Quantity: line.Quantity,
+                            Price: effectivePrice,  // Store the effective price after discount
+                            OriginalPrice: originalPrice,  // Store original price for reference
+                            DiscountPercent: discountPercent,
+                            UnitPrice: originalPrice,
+                            PriceAfterVAT: line.PriceAfterVAT,
+                            Currency: line.Currency || sapDN.DocCurrency,
+                            LineTotal: line.LineTotal,
+                            VatGroup: line.VatGroup,
+                            PriceList: line.PriceList || sapDN.PriceList,
+
+                            // Base references for lines
+                            BaseType: line.BaseType,
+                            BaseEntry: line.BaseEntry,
+                            BaseLine: line.BaseLine,
+
+                            ShipDate: line.ShipDate,
+                            ActualDeliveryDate: line.ActualDeliveryDate,
+                        };
+                    }) || [],
 
                     DocumentStatus: "bost_Open",
                     Cancelled: sapDN.Cancelled || "N",

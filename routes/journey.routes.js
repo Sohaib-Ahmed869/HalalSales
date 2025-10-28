@@ -44,4 +44,6 @@ router.get(
   customerJourneyController.getCustomerInteractionTimeline
 );
 
+router.get('/:customerId/ai-summary', customerJourneyController.getCustomerAISummary);
+
 module.exports = router;
