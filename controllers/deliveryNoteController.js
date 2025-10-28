@@ -1525,8 +1525,7 @@ exports.syncDeliveryNoteStatusesFromSAP = async (req, res) => {
 
                     localDN.UpdateDate = new Date();
                     localDN.LocalStatus = "Synced";
-                    localDN.U_Notes = (localDN.U_Notes || "") + ` [Auto-updated via status sync on ${new Date().toISOString()}]`;
-
+                    localDN.U_Notes = sapDN.Comments || sapDN.Remarks || "";
                     await localDN.save();
 
                     results.dnsUpdated++;
