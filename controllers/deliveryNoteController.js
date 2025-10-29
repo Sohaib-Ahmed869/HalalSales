@@ -303,8 +303,8 @@ exports.createDeliveryNoteFromOrder = async (req, res) => {
             salesAgent: salesOrder.salesAgent,
 
             // FIXED: Carry over remarks/comments from sales order
-            U_Notes: salesOrder.U_Notes || salesOrder.Comments || "",
-            Comments: salesOrder.Comments || salesOrder.U_Notes || `Delivery note for order #${salesOrder.DocNum}`,
+            Comments: salesOrder.Comments || "",
+            U_Notes: salesOrder.Comments || "",
         });
 
         await deliveryNote.save();
@@ -400,11 +400,11 @@ exports.bulkCreateDeliveryNotesFromOrders = async (req, res) => {
                 const newDocEntry = currentMaxDocEntry;
 
                 const customNote = orderNotes[docEntry] || "";
-                const deliveryNoteComments = customNote
-                    ? `Delivery note for order #${salesOrder.DocNum}\n\n${customNote}`
-                    : isImportedFromSAP
-                        ? `Delivery note for SAP order #${salesOrder.DocNum} (SAP DocEntry: ${sapBaseEntry})`
-                        : `Delivery note for order #${salesOrder.DocNum}`;
+                // Use sales order comments, append custom note if provided
+                const deliveryNoteComments = salesOrder.Comments || "";
+                const deliveryNoteUNotes = customNote
+                    ? (salesOrder.Comments || "") + (salesOrder.Comments && customNote ? "\n\n" : "") + customNote
+                    : (salesOrder.Comments || "");
 
                 if (customNote && salesOrder.salesAgent) {
                     salesOrder.U_Notes = (salesOrder.U_Notes || "") + "\n\n" + customNote;
@@ -465,7 +465,7 @@ exports.bulkCreateDeliveryNotesFromOrders = async (req, res) => {
                     LocalStatus: "Created",
                     salesAgent: salesOrder.salesAgent,
                     Comments: deliveryNoteComments,
-                    U_Notes: customNote || salesOrder.U_Notes || "",
+                    U_Notes: deliveryNoteUNotes,
                 });
 
                 await deliveryNote.save();

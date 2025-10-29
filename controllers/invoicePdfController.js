@@ -447,14 +447,8 @@ const generateInvoicePage = async (doc, invoice, logoBuffer, isFirstInvoice = fa
 
     doc.fontSize(8).font("Helvetica").fillColor("#666666");
     doc.text("Notes:", margin, currentY, { continued: false });
-    // FIXED: Display invoice notes
-    if (invoice.U_Notes) {
-        doc.fontSize(8).font("Helvetica").fillColor("#000000");
-        doc.text(invoice.U_Notes, margin, currentY + 12, {
-            width: pageWidth - margin - 280,
-            continued: false
-        });
-    } else if (invoice.Comments) {
+    // Display Comments field only
+    if (invoice.Comments) {
         doc.fontSize(8).font("Helvetica").fillColor("#000000");
         doc.text(invoice.Comments, margin, currentY + 12, {
             width: pageWidth - margin - 280,
@@ -1243,7 +1237,7 @@ exports.bulkResendInvoicesWithApology = async (req, res) => {
         for (const invoice of invoices) {
             try {
                 // Fetch customer email by CardCode
-               // let customerEmail = "sohaibahmedsipra@gmail.com";
+                // let customerEmail = "sohaibahmedsipra@gmail.com";
                 try {
                     const customer = await Customer.findOne({ CardCode: invoice.CardCode }).lean();
                     if (customer && customer.Email) {

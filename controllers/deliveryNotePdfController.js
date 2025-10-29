@@ -504,9 +504,9 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
 
     doc.fontSize(8).font("Helvetica").fillColor("#666666");
     doc.text("Notes:", margin, currentY, { continued: false });
-    if (deliveryNote.U_Notes) {
-        doc.fontSize(8).font("Helvetica").fillColor("#000000");
-        doc.text(deliveryNote.U_Notes, margin, currentY + 12, {
+if (deliveryNote.Comments) {
+    doc.fontSize(8).font("Helvetica").fillColor("#000000");
+    doc.text(deliveryNote.Comments, margin, currentY + 12, {
             width: pageWidth - margin - 280,
             continued: false
         });
