@@ -1297,8 +1297,7 @@ exports.syncDeliveryNoteStatusesFromSAP = async (req, res) => {
                 dn.DocumentStatus = "bost_Close";
                 dn.UpdateDate = new Date();
                 dn.LocalStatus = "Synced";
-                dn.U_Notes = (dn.U_Notes || "") + ` [Auto-closed via status sync on ${new Date().toISOString()}]`;
-
+                dn.U_Notes = (dn.Comments) || (dn.Remarks) || "";
                 await dn.save();
 
                 results.dnsClosed++;
@@ -1641,7 +1640,7 @@ exports.syncDeliveryNoteStatusesFromSAP = async (req, res) => {
                     ImportDate: new Date(),
                     ImportSource: "Status_Sync",
                     Comments: sapDN.Comments || "",
-                    U_Notes: "Imported via Status Sync from SAP B1 - Missing Open Delivery Note",
+                    U_Notes: (sapDN.Comments) || (sapDN.Remarks) || "",
                 });
 
                 await newDN.save();

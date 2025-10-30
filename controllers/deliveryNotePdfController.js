@@ -70,7 +70,7 @@ const formatDate = (date) => {
 };
 
 // Generate single delivery note (can span multiple pages)
-const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDeliveryNote = false) => {
+const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, customer, isFirstDeliveryNote = false) => {
     if (!isFirstDeliveryNote) {
         doc.addPage();
     }
@@ -227,10 +227,41 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
         doc.fontSize(8).font("Helvetica").fillColor("#666666");
         doc.text("Addresse de facturation", margin, startY + 15, { continued: false });
 
-        doc.fontSize(9).font("Helvetica").fillColor("#000000");
-        doc.text("2 avenue emilie zola", margin, startY + 30, { continued: false });
-        doc.text("75015 PARIS", margin, startY + 42, { continued: false });
-        doc.text("FRANCE", margin, startY + 54, { continued: false });
+        // Get billing address from customer
+        let billingAddress = null;
+        if (customer && customer.addresses && customer.addresses.length > 0) {
+            billingAddress = customer.addresses.find(addr =>
+                addr.addressType === "bo_BillTo" && addr.isDefault
+            ) || customer.addresses.find(addr => addr.addressType === "bo_BillTo");
+        }
+
+        if (billingAddress) {
+            let yOffset = startY + 30;
+            doc.fontSize(9).font("Helvetica").fillColor("#000000");
+
+            if (billingAddress.street) {
+                doc.text(sanitizeText(billingAddress.street).substring(0, 50), margin, yOffset, { continued: false });
+                yOffset += 12;
+            }
+
+            const cityLine = [billingAddress.zipCode, billingAddress.city]
+                .filter(Boolean)
+                .join(" ");
+            if (cityLine) {
+                doc.text(sanitizeText(cityLine).substring(0, 50), margin, yOffset, { continued: false });
+                yOffset += 12;
+            }
+
+            if (billingAddress.country) {
+                doc.text(sanitizeText(billingAddress.country).substring(0, 50), margin, yOffset, { continued: false });
+            }
+        } else {
+            // Fallback to default
+            doc.font("Helvetica").fontSize(9);
+            doc.text("2 avenue emilie zola", margin, startY + 30, { continued: false });
+            doc.text("75015 PARIS", margin, startY + 42, { continued: false });
+            doc.text("FRANCE", margin, startY + 54, { continued: false });
+        }
 
         // RIGHT COLUMN - Delivery Address with customer name on top
         const deliveryX = pageWidth / 2 + 20;
@@ -244,8 +275,38 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
         doc.fontSize(8).font("Helvetica").fillColor("#666666");
         doc.text("Addresse de livraison", deliveryX, startY + 15, { continued: false });
 
-        if (deliveryNote.Address) {
-            // Clean and split the address properly
+        // Get shipTo address from customer
+        let shipToAddress = null;
+        if (customer && customer.addresses && customer.addresses.length > 0) {
+            console.log(customer.addresses);
+            shipToAddress = customer.addresses.find(addr =>
+                addr.addressType === "bo_ShipTo" && addr.isDefault
+            ) || customer.addresses.find(addr => addr.addressType === "bo_ShipTo");
+        }
+
+        let yOffset = startY + 30;
+        doc.fontSize(9).font("Helvetica").fillColor("#000000");
+
+        if (shipToAddress) {
+            if (shipToAddress.street) {
+                doc.text(sanitizeText(shipToAddress.street).substring(0, 50), deliveryX, yOffset, { continued: false });
+                yOffset += 12;
+            }
+
+            const cityLine = [shipToAddress.zipCode, shipToAddress.city]
+                .filter(Boolean)
+                .join(" ");
+            if (cityLine) {
+                doc.text(sanitizeText(cityLine).substring(0, 50), deliveryX, yOffset, { continued: false });
+                yOffset += 12;
+            }
+
+            if (shipToAddress.country) {
+                doc.text(sanitizeText(shipToAddress.country).substring(0, 50), deliveryX, yOffset, { continued: false });
+                yOffset += 12;
+            }
+        } else if (deliveryNote.Address) {
+            // Fallback to delivery note address
             const cleanAddress = sanitizeText(deliveryNote.Address);
             const addressLines = cleanAddress
                 .split('\n')
@@ -253,20 +314,45 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
                 .filter(line => line.length > 0)
                 .slice(0, 3);
 
-            let yOffset = startY + 30;
-            doc.font("Helvetica").fontSize(9).fillColor("#000000");
             addressLines.forEach(line => {
                 doc.text(line.substring(0, 50), deliveryX, yOffset, { continued: false });
                 yOffset += 12;
             });
         } else {
-            doc.font("Helvetica").fontSize(9);
-            doc.text("2 avenue emilie zola", deliveryX, startY + 30, { continued: false });
-            doc.text("75015 PARIS", deliveryX, startY + 42, { continued: false });
-            doc.text("FRANCE", deliveryX, startY + 54, { continued: false });
+            // Default fallback
+            doc.text("2 avenue emilie zola", deliveryX, yOffset, { continued: false });
+            yOffset += 12;
+            doc.text("75015 PARIS", deliveryX, yOffset, { continued: false });
+            yOffset += 12;
+            doc.text("FRANCE", deliveryX, yOffset, { continued: false });
+            yOffset += 12;
         }
 
-        return startY + 75;
+        // Add phone numbers after delivery address
+        if (customer && (customer.phoneNumber || (customer.additionalPhoneNumbers && customer.additionalPhoneNumbers.length > 0))) {
+            const phoneNumbers = [];
+
+            // Add main phone number
+            if (customer.phoneNumber) {
+                phoneNumbers.push(customer.phoneNumber);
+            }
+
+            // Add additional phone numbers
+            if (customer.additionalPhoneNumbers && Array.isArray(customer.additionalPhoneNumbers)) {
+                phoneNumbers.push(...customer.additionalPhoneNumbers);
+            }
+
+            // Display phone numbers
+            if (phoneNumbers.length > 0) {
+                doc.fontSize(8).font("Helvetica").fillColor("#000000");
+                phoneNumbers.forEach((phone, index) => {
+                    doc.text(sanitizeText(phone), deliveryX, yOffset, { continued: false });
+                    yOffset += 12;
+                });
+            }
+        }
+
+        return startY + 90; // Increased to accommodate phone number
     };
 
     const drawTableHeader = (startY) => {
@@ -504,9 +590,9 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, isFirstDe
 
     doc.fontSize(8).font("Helvetica").fillColor("#666666");
     doc.text("Notes:", margin, currentY, { continued: false });
-if (deliveryNote.Comments) {
-    doc.fontSize(8).font("Helvetica").fillColor("#000000");
-    doc.text(deliveryNote.Comments, margin, currentY + 12, {
+    if (deliveryNote.Comments) {
+        doc.fontSize(8).font("Helvetica").fillColor("#000000");
+        doc.text(deliveryNote.Comments, margin, currentY + 12, {
             width: pageWidth - margin - 280,
             continued: false
         });
@@ -543,6 +629,8 @@ exports.generateBulkDeliveryNotePDFs = async (req, res) => {
         const fetchedDeliveryNotes = await DeliveryNote.find({ _id: { $in: deliveryNoteIds } })
             .populate("salesAgent", "firstName lastName email");
 
+
+
         fetchedDeliveryNotes.forEach(dn => {
             deliveryNotesMap[dn._id.toString()] = dn;
         });
@@ -557,6 +645,18 @@ exports.generateBulkDeliveryNotePDFs = async (req, res) => {
                 message: "No delivery notes found"
             });
         }
+
+        // Fetch customers for all delivery notes
+        const cardCodes = [...new Set(deliveryNotes.map(dn => dn.CardCode))];
+        const Customer = require("../models/Customer");
+        const customers = await Customer.find({ CardCode: { $in: cardCodes } })
+            .select("CardCode addresses phoneNumber additionalPhoneNumbers")
+            .lean();
+
+        const customerMap = {};
+        customers.forEach(c => {
+            customerMap[c.CardCode] = c;
+        });
 
         const logoUrl = "https://imageshfs.s3.ap-southeast-2.amazonaws.com/image-removebg-preview+(1).png";
         const logoBuffer = await downloadImage(logoUrl);
@@ -577,10 +677,11 @@ exports.generateBulkDeliveryNotePDFs = async (req, res) => {
 
         // FIX 4: Generate original + copy for EACH delivery note immediately
         for (let i = 0; i < deliveryNotes.length; i++) {
+            const customer = customerMap[deliveryNotes[i].CardCode];
             // Original
-            await generateDeliveryNotePage(doc, deliveryNotes[i], logoBuffer, i === 0);
+            await generateDeliveryNotePage(doc, deliveryNotes[i], logoBuffer, customer, i === 0);
             // Copy (immediately after)
-            await generateDeliveryNotePage(doc, deliveryNotes[i], logoBuffer, false);
+            await generateDeliveryNotePage(doc, deliveryNotes[i], logoBuffer, customer, false);
         }
 
         doc.end();

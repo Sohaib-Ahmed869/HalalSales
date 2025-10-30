@@ -758,8 +758,8 @@ exports.updateInvoiceTotalsForDate = async (req, res) => {
     // Find all invoices in local DB with DocDate = 2025-10-23
     const localInvoices = await Invoice.find({
       DocDate: {
-        $gte: new Date("2025-10-23T00:00:00.000Z"),
-        $lt: new Date("2025-10-24T00:00:00.000Z"),
+        $gte: new Date("2025-10-28T00:00:00.000Z"),
+        $lt: new Date("2025-10-29T00:00:00.000Z"),
       },
     }).select("DocNum DocEntry DocTotal CardCode CardName SAPDocEntry");
 

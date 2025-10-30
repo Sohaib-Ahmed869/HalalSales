@@ -2012,6 +2012,9 @@ exports.updateOrder = async (req, res) => {
 
         existingOrder.LocalStatus = "Synced";
         existingOrder.SyncErrors = null;
+        existingOrder.U_Notes = existingOrder.Comments || "";
+        existingOrder.Comments = existingOrder.Comments || "";
+        existingOrder.Remarks = existingOrder.Comments || "";
         await existingOrder.save();
 
         console.log("Order updated successfully in SAP");
@@ -2097,6 +2100,8 @@ exports.updateOrderNotes = async (req, res) => {
 
     // Update the U_Notes field
     order.U_Notes = notes || "";
+    order.Comments = notes || "";
+    order.Remarks = notes || "";
     order.UpdateDate = new Date();
 
     await order.save();
