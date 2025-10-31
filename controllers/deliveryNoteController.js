@@ -1335,7 +1335,8 @@ exports.syncDeliveryNoteStatusesFromSAP = async (req, res) => {
                 dn.UpdateDate = new Date();
                 dn.LocalStatus = "Synced";
                 dn.U_Notes = (dn.Remarks) || (dn.Comments) || "";
-
+                dn.Comments = dn.U_Notes;
+                dn.Remarks = dn.U_Notes;
                 await dn.save();
 
                 results.dnsOpened++;
@@ -1391,6 +1392,20 @@ exports.syncDeliveryNoteStatusesFromSAP = async (req, res) => {
                 }
                 if (vatDifference > 0.01) {
                     changeDetails.push(`VAT changed: ${localVat} → ${sapVat}`);
+                }
+
+                // **CHECK FOR CHANGES IN REMARKS/COMMENTS**
+                const localRemarks = (localDN.Comments || "").trim();
+                if (localDN.DocNum === 68642) {
+                    console.log(`Debugging remarks for DN 68642: Local="${localRemarks}", SAP="${sapDN.Comments || sapDN.Remarks || ""}"`);
+                }
+                const sapRemarks = (sapDN.Comments || sapDN.Remarks || "").trim();
+
+                if (localRemarks !== sapRemarks) {
+                    hasChanges = true;
+                    const truncatedLocal = localRemarks.length > 50 ? localRemarks.substring(0, 50) + "..." : localRemarks;
+                    const truncatedSap = sapRemarks.length > 50 ? sapRemarks.substring(0, 50) + "..." : sapRemarks;
+                    changeDetails.push(`Remarks changed: "${truncatedLocal}" → "${truncatedSap}"`);
                 }
 
                 // **CHECK FOR CHANGES IN DOCUMENT LINES**
@@ -1488,6 +1503,11 @@ exports.syncDeliveryNoteStatusesFromSAP = async (req, res) => {
                     localDN.ShipToCode = sapDN.ShipToCode || localDN.ShipToCode;
                     localDN.ShipFrom = sapDN.ShipFrom || localDN.ShipFrom;
                     localDN.PayToCode = sapDN.PayToCode || localDN.PayToCode;
+
+                    if (sapDN.Comments || sapDN.Remarks) {
+                        localDN.Comments = sapDN.Comments || sapDN.Remarks;
+                        localDN.Remarks = sapDN.Comments || sapDN.Remarks;
+                    }
 
                     // ✅ UPDATE ADDRESS EXTENSION
                     if (sapDN.AddressExtension) {
