@@ -1484,7 +1484,40 @@ exports.syncDeliveryNoteStatusesFromSAP = async (req, res) => {
                     localDN.DocDate = sapDN.DocDate || localDN.DocDate;
                     localDN.DocDueDate = sapDN.DocDueDate || localDN.DocDueDate;
                     localDN.TaxDate = sapDN.TaxDate || localDN.TaxDate;
+                    // ✅ UPDATE ADDRESS FIELDS
+                    localDN.ShipToCode = sapDN.ShipToCode || localDN.ShipToCode;
+                    localDN.ShipFrom = sapDN.ShipFrom || localDN.ShipFrom;
+                    localDN.PayToCode = sapDN.PayToCode || localDN.PayToCode;
 
+                    // ✅ UPDATE ADDRESS EXTENSION
+                    if (sapDN.AddressExtension) {
+                        localDN.AddressExtension = {
+                            ShipToStreet: sapDN.AddressExtension.ShipToStreet,
+                            ShipToStreetNo: sapDN.AddressExtension.ShipToStreetNo,
+                            ShipToBlock: sapDN.AddressExtension.ShipToBlock,
+                            ShipToBuilding: sapDN.AddressExtension.ShipToBuilding,
+                            ShipToCity: sapDN.AddressExtension.ShipToCity,
+                            ShipToZipCode: sapDN.AddressExtension.ShipToZipCode,
+                            ShipToCounty: sapDN.AddressExtension.ShipToCounty,
+                            ShipToState: sapDN.AddressExtension.ShipToState,
+                            ShipToCountry: sapDN.AddressExtension.ShipToCountry,
+                            BillToStreet: sapDN.AddressExtension.BillToStreet,
+                            BillToStreetNo: sapDN.AddressExtension.BillToStreetNo,
+                            BillToBlock: sapDN.AddressExtension.BillToBlock,
+                            BillToBuilding: sapDN.AddressExtension.BillToBuilding,
+                            BillToCity: sapDN.AddressExtension.BillToCity,
+                            BillToZipCode: sapDN.AddressExtension.BillToZipCode,
+                            BillToCounty: sapDN.AddressExtension.BillToCounty,
+                            BillToState: sapDN.AddressExtension.BillToState,
+                            BillToCountry: sapDN.AddressExtension.BillToCountry,
+                            ShipToAddress2: sapDN.AddressExtension.ShipToAddress2,
+                            ShipToAddress3: sapDN.AddressExtension.ShipToAddress3,
+                            BillToAddress2: sapDN.AddressExtension.BillToAddress2,
+                            BillToAddress3: sapDN.AddressExtension.BillToAddress3,
+                            PlaceOfSupply: sapDN.AddressExtension.PlaceOfSupply,
+                            DocEntry: sapDN.DocEntry
+                        };
+                    }
                     // Update document lines if they exist in SAP
                     if (sapDN.DocumentLines && sapDN.DocumentLines.length > 0) {
                         localDN.DocumentLines = sapDN.DocumentLines.map((line, index) => {
@@ -1597,7 +1630,33 @@ exports.syncDeliveryNoteStatusesFromSAP = async (req, res) => {
                     BaseType: sapDN.BaseType,
                     BaseEntry: sapDN.BaseEntry,
                     OriginatingOrder: sapDN.U_SourceOrderNum || null,
-
+                    // ✅ ADD ADDRESS EXTENSION
+                    AddressExtension: sapDN.AddressExtension ? {
+                        ShipToStreet: sapDN.AddressExtension.ShipToStreet,
+                        ShipToStreetNo: sapDN.AddressExtension.ShipToStreetNo,
+                        ShipToBlock: sapDN.AddressExtension.ShipToBlock,
+                        ShipToBuilding: sapDN.AddressExtension.ShipToBuilding,
+                        ShipToCity: sapDN.AddressExtension.ShipToCity,
+                        ShipToZipCode: sapDN.AddressExtension.ShipToZipCode,
+                        ShipToCounty: sapDN.AddressExtension.ShipToCounty,
+                        ShipToState: sapDN.AddressExtension.ShipToState,
+                        ShipToCountry: sapDN.AddressExtension.ShipToCountry,
+                        BillToStreet: sapDN.AddressExtension.BillToStreet,
+                        BillToStreetNo: sapDN.AddressExtension.BillToStreetNo,
+                        BillToBlock: sapDN.AddressExtension.BillToBlock,
+                        BillToBuilding: sapDN.AddressExtension.BillToBuilding,
+                        BillToCity: sapDN.AddressExtension.BillToCity,
+                        BillToZipCode: sapDN.AddressExtension.BillToZipCode,
+                        BillToCounty: sapDN.AddressExtension.BillToCounty,
+                        BillToState: sapDN.AddressExtension.BillToState,
+                        BillToCountry: sapDN.AddressExtension.BillToCountry,
+                        ShipToAddress2: sapDN.AddressExtension.ShipToAddress2,
+                        ShipToAddress3: sapDN.AddressExtension.ShipToAddress3,
+                        BillToAddress2: sapDN.AddressExtension.BillToAddress2,
+                        BillToAddress3: sapDN.AddressExtension.BillToAddress3,
+                        PlaceOfSupply: sapDN.AddressExtension.PlaceOfSupply,
+                        DocEntry: sapDN.DocEntry
+                    } : undefined,
                     // Document lines with base references
                     DocumentLines: sapDN.DocumentLines?.map((line, index) => {
                         const originalPrice = line.Price || line.UnitPrice || 0;
