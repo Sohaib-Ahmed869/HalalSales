@@ -2321,6 +2321,11 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
           changeDetails.push(`VAT changed: ${localVat} → ${sapVat}`);
         }
 
+        if(sapOrder.Comments !== localOrder.Comments) {
+          hasChanges = true;
+          changeDetails.push(`Comments changed`);
+        }
+
         // **CHECK FOR CHANGES IN DOCUMENT LINES**
         if (sapOrder.DocumentLines && sapOrder.DocumentLines.length > 0) {
           const localLines = localOrder.DocumentLines || [];
@@ -2393,6 +2398,7 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
                 hasChanges = true;
                 changeDetails.push(`Line ${sapLine.LineNum || i} (${sapLine.ItemCode}): Warehouse ${localLine.WarehouseCode} → ${sapLine.WarehouseCode}`);
               }
+              
             }
           }
         }
@@ -2402,6 +2408,9 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
           console.log(`   Changes detected:`);
           changeDetails.forEach(detail => console.log(`   - ${detail}`));
 
+          if(localOrder.DocNum === 74039) {
+            console.log("Comments in SAP Order:", sapOrder.Comments);
+          }
           // Update the order with SAP data
           localOrder.DocTotal = sapOrder.DocTotal;
           localOrder.VatSum = sapOrder.VatSum;
@@ -2414,8 +2423,8 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
           localOrder.StartDeliveryDate = sapOrder.StartDeliveryDate || localOrder.StartDeliveryDate;
           localOrder.RequriedDate = sapOrder.RequriedDate || localOrder.RequriedDate;
           localOrder.U_Notes = sapOrder.Comments || localOrder.U_Notes;
-          localOrder.Comments = sapOrder.Comments || localOrder.Comments;
-          localOrder.Remarks = sapOrder.Comments || localOrder.Remarks;
+          localOrder.Comments = sapOrder.Comments;
+          localOrder.Remarks = sapOrder.Comments;
 
           // Update document lines if they exist in SAP
           // Update document lines if they exist in SAP
