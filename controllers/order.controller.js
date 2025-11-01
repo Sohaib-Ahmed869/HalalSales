@@ -2414,6 +2414,8 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
           localOrder.StartDeliveryDate = sapOrder.StartDeliveryDate || localOrder.StartDeliveryDate;
           localOrder.RequriedDate = sapOrder.RequriedDate || localOrder.RequriedDate;
           localOrder.U_Notes = sapOrder.Comments || localOrder.U_Notes;
+          localOrder.Comments = sapOrder.Comments || localOrder.Comments;
+          localOrder.Remarks = sapOrder.Comments || localOrder.Remarks;
 
           // Update document lines if they exist in SAP
           // Update document lines if they exist in SAP
