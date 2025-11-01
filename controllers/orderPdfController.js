@@ -389,14 +389,7 @@ const generateOrderPage = async (doc, order, logoBuffer, isFirstOrder = false) =
 
     doc.fontSize(8).font("Helvetica").fillColor("#666666");
     doc.text("Notes:", margin, currentY, { continued: false });
-    // FIXED: Add U_Notes/Comments display
-    if (order.U_Notes) {
-        doc.fontSize(8).font("Helvetica").fillColor("#000000");
-        doc.text(order.U_Notes, margin, currentY + 12, {
-            width: pageWidth - margin - 280,
-            continued: false
-        });
-    } else if (order.Comments) {
+    if (order.Comments) {
         doc.fontSize(8).font("Helvetica").fillColor("#000000");
         doc.text(order.Comments, margin, currentY + 12, {
             width: pageWidth - margin - 280,

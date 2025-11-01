@@ -407,7 +407,8 @@ exports.bulkCreateDeliveryNotesFromOrders = async (req, res) => {
                     : (salesOrder.Comments || "");
 
                 if (customNote && salesOrder.salesAgent) {
-                    salesOrder.U_Notes = (salesOrder.U_Notes || "") + "\n\n" + customNote;
+                    salesOrder.U_Notes = (salesOrder.Comments || "") + "\n\n" + customNote;
+                    salesOrder.Comments = (salesOrder.Comments || "") + "\n\n" + customNote;
                     await salesOrder.save();
                 }
                 const frenchDate = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Paris" }));
@@ -1335,8 +1336,8 @@ exports.syncDeliveryNoteStatusesFromSAP = async (req, res) => {
                 dn.UpdateDate = new Date();
                 dn.LocalStatus = "Synced";
                 dn.U_Notes = (dn.Remarks) || (dn.Comments) || "";
-                dn.Comments = dn.U_Notes;
-                dn.Remarks = dn.U_Notes;
+                dn.Comments = dn.Comments || dn.Remarks || "";
+                dn.Remarks = dn.Comments || dn.Remarks || "";
                 await dn.save();
 
                 results.dnsOpened++;
