@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const invoiceController = require("../controllers/invoices.controller");
+const invoiceSyncController = require("../controllers/invoiceSync.controller");
 const { protect, authorize } = require("../middleware/auth");
 
 const multer = require("multer");
@@ -73,5 +74,21 @@ router.post(
     "/bulk-push-to-sap",
     invoiceController.bulkPushInvoicesToSAP
 );
+
+// Live sync invoice statuses from SAP (similar to order sync)
+router.post("/sync-statuses-from-sap", invoiceSyncController.syncInvoiceStatusesFromSAP);
+
+// Get unpaid invoices by customer
+router.get("/unpaid/customer/:cardCode", invoiceController.getUnpaidInvoicesByCustomer);
+
+// Get all unpaid invoices with filters
+router.get("/unpaid", invoiceController.getUnpaidInvoices);
+
+// Get invoice payment allocation details
+router.get("/:docEntry/allocations", invoiceController.getInvoiceAllocations);
+
+// Update invoice payment status manually
+router.put("/:docEntry/payment-status", invoiceController.updateInvoicePaymentStatus);
+
 
 module.exports = router;

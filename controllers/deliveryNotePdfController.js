@@ -609,10 +609,7 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, customer,
             }
 
             const lineTotal = netQty * (line.Price || line.UnitPrice || 0);
-            const vatAmount = lineTotal * (line.VATGroup === "C3" ? 0.055 : line.VATGroup === "C4" ? 0.20 : 0);
-
-
-
+            const vatAmount = lineTotal * (line.VatGroup === "C3" ? 0.055 : line.VatGroup === "C4" ? 0.20 : 0);
 
             doc.font("Helvetica").fontSize(7.5).fillColor("#000000");  // FIXED: Slightly smaller font for compactness
             doc.text(line.ItemCode || "", col1, currentY, { continued: false });

@@ -374,8 +374,56 @@ const invoiceSchema = new mongoose.Schema(
     },
     paymentStatus: {
       type: String,
-      enum: ['Unpaid', 'Partially Paid', 'Fully Paid', 'Overpaid'],
-      default: 'Unpaid'
+      enum: ["Unpaid", "Partially Paid", "Fully Paid", "Overpaid"],
+      default: "Unpaid",
+      index: true,
+    },
+
+    // Detailed payment tracking
+    paymentTracking: {
+      totalInvoiceAmount: {
+        type: Number,
+        default: 0,
+      },
+      totalPaidAmount: {
+        type: Number,
+        default: 0,
+      },
+      totalCreditAmount: {
+        type: Number,
+        default: 0,
+      },
+      remainingBalance: {
+        type: Number,
+        default: 0,
+      },
+      lastPaymentDate: Date,
+      lastPaymentAmount: Number,
+    },
+
+    // Array of allocated payments from FlattenedPayment
+    allocatedPayments: [{
+      flattenedPaymentId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "FlattenedPayment",
+      },
+      amountAllocated: Number,
+      allocationDate: Date,
+      allocatedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+      },
+      source: String, // salary_sheet, bred_bank, paypal
+    }],
+
+    // SAP sync status for payments
+    paymentSyncStatus: {
+      lastSyncDate: Date,
+      syncErrors: String,
+      needsSync: {
+        type: Boolean,
+        default: false,
+      },
     },
 
     // Document lines array

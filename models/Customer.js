@@ -274,6 +274,39 @@ const CustomerSchema = new Schema({
     index: true,
     sparse: true, // Allows null values but indexes non-null ones
   },
+  paymentNotAllocated: {
+    type: Number,
+    default: 0,
+    index: true,
+  },
+
+  totalPaymentsReceived: {
+    type: Number,
+    default: 0,
+  },
+
+  totalInvoiceAmount: {
+    type: Number,
+    default: 0,
+  },
+
+  totalInvoicePaid: {
+    type: Number,
+    default: 0,
+  },
+
+  // Payment allocation details
+  paymentAllocation: {
+    lastUpdated: Date,
+    allocatedPayments: {
+      type: Number,
+      default: 0,
+    },
+    unallocatedPayments: {
+      type: Number,
+      default: 0,
+    },
+  },
 });
 
 // Update timestamps on save
@@ -291,7 +324,7 @@ CustomerSchema.index({ createdAt: -1 }); // date sorting
 CustomerSchema.index({ CardName: 1 }); // name sorting (most common)
 CustomerSchema.index({ status: 1, createdAt: -1 }); // status + date filters
 CustomerSchema.index({ assignedTo: 1, CardName: 1 }); // assigned agent + name sorting
-
+CustomerSchema.index({ paymentNotAllocated: 1 });
 // Add text index for searching
 CustomerSchema.index({
   CardName: "text",

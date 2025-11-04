@@ -53,6 +53,7 @@ const returnRoutes = require('./routes/returnRoutes');
 const creditNoteRoutes = require('./routes/creditNoteRoutes');
 const superExportRoutes = require('./routes/Sales.export.routes');
 const emailLogRoutes = require('./routes/emailLogRoutes');
+const parserPaymentsRoutes = require('./routes/reconciliationModule/parserPayments.routes');
 //const vendorEmailRoutes = require('./routes/vendorEmailRoutes');
 const config = require("./services/config");
 const desktimeJob = require("./jobs/desktimeJob");
@@ -202,6 +203,7 @@ app.use('/api/email-logs', emailLogRoutes);
 //app.use('/api/vendor-email', vendorEmailRoutes);
 app.use('/api/sales-export', superExportRoutes);
 app.use("/api/financial-statements", require('./routes/financialStatements.routes'));
+app.use("/api/reconciliation/parser-payments", parserPaymentsRoutes);
 // Health check route
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });

@@ -2644,6 +2644,277 @@ exports.getInvoices = async (req, res) => {
   }
 };
 
+// ADD THESE FUNCTIONS TO controllers/invoices.controller.js
 
+/**
+ * Get unpaid invoices by customer
+ */
+exports.getUnpaidInvoicesByCustomer = async (req, res) => {
+  try {
+    const { cardCode } = req.params;
+    const {
+      page = 1,
+      limit = 50,
+    } = req.query;
+
+    // Unpaid invoices are those with DocumentStatus = Open
+    const filter = {
+      CardCode: cardCode,
+      DocumentStatus: { $in: ["bost_Open", "O"] },
+    };
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const invoices = await Invoice.find(filter)
+      .sort({ DocDate: 1 })
+      .skip(skip)
+      .limit(parseInt(limit))
+      .lean();
+
+    const total = await Invoice.countDocuments(filter);
+
+    // Calculate summary
+    const summary = await Invoice.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: null,
+          totalInvoices: { $sum: 1 },
+          totalAmount: { $sum: "$DocTotal" },
+          totalPaid: { $sum: { $ifNull: ["$PaidToDate", 0] } },
+          totalRemaining: {
+            $sum: {
+              $subtract: [
+                "$DocTotal",
+                { $ifNull: ["$PaidToDate", 0] }
+              ]
+            }
+          },
+        },
+      },
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        invoices,
+        summary: summary[0] || {
+          totalInvoices: 0,
+          totalAmount: 0,
+          totalPaid: 0,
+          totalRemaining: 0,
+        },
+        pagination: {
+          total,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          pages: Math.ceil(total / parseInt(limit)),
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching unpaid invoices:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch unpaid invoices",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Get all unpaid invoices with filters
+ */
+exports.getUnpaidInvoices = async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 50,
+      cardCode,
+      minAmount,
+      maxAmount,
+      startDate,
+      endDate,
+    } = req.query;
+
+    // Unpaid invoices are those with DocumentStatus = Open
+    const filter = {
+      DocumentStatus: { $in: ["bost_Open", "O"] },
+    };
+
+    if (cardCode) {
+      filter.CardCode = cardCode;
+    }
+
+    // Filter by remaining balance (DocTotal - PaidToDate)
+    if (minAmount || maxAmount) {
+      filter.$expr = {
+        $and: []
+      };
+
+      if (minAmount) {
+        filter.$expr.$and.push({
+          $gte: [
+            { $subtract: ["$DocTotal", { $ifNull: ["$PaidToDate", 0] }] },
+            parseFloat(minAmount)
+          ]
+        });
+      }
+
+      if (maxAmount) {
+        filter.$expr.$and.push({
+          $lte: [
+            { $subtract: ["$DocTotal", { $ifNull: ["$PaidToDate", 0] }] },
+            parseFloat(maxAmount)
+          ]
+        });
+      }
+    }
+
+    if (startDate && endDate) {
+      filter.DocDate = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate),
+      };
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const invoices = await Invoice.find(filter)
+      .sort({ DocDate: 1 })
+      .skip(skip)
+      .limit(parseInt(limit))
+      .lean();
+
+    const total = await Invoice.countDocuments(filter);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        invoices,
+        pagination: {
+          total,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          pages: Math.ceil(total / parseInt(limit)),
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching unpaid invoices:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch unpaid invoices",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Get invoice payment allocation details
+ */
+exports.getInvoiceAllocations = async (req, res) => {
+  try {
+    const { docEntry } = req.params;
+
+    const invoice = await Invoice.findOne({ DocEntry: docEntry })
+      .populate({
+        path: "allocatedPayments.flattenedPaymentId",
+        select: "cardCode cardName amount paymentDate source reference",
+      })
+      .lean();
+
+    if (!invoice) {
+      return res.status(404).json({
+        success: false,
+        message: "Invoice not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        invoice: {
+          DocNum: invoice.DocNum,
+          DocEntry: invoice.DocEntry,
+          CardCode: invoice.CardCode,
+          CardName: invoice.CardName,
+          DocTotal: invoice.DocTotal,
+          paymentStatus: invoice.paymentStatus,
+          paymentTracking: invoice.paymentTracking,
+        },
+        allocations: invoice.allocatedPayments || [],
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching invoice allocations:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch invoice allocations",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Update invoice payment status manually
+ */
+exports.updateInvoicePaymentStatus = async (req, res) => {
+  try {
+    const { docEntry } = req.params;
+    const { paymentStatus, notes } = req.body;
+
+    if (!paymentStatus) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment status is required",
+      });
+    }
+
+    const validStatuses = ["Unpaid", "Partially Paid", "Fully Paid", "Overpaid"];
+    if (!validStatuses.includes(paymentStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid payment status. Must be one of: ${validStatuses.join(", ")}`,
+      });
+    }
+
+    const invoice = await Invoice.findOne({ DocEntry: docEntry });
+
+    if (!invoice) {
+      return res.status(404).json({
+        success: false,
+        message: "Invoice not found",
+      });
+    }
+
+    invoice.paymentStatus = paymentStatus;
+
+    if (notes) {
+      invoice.Comments = (invoice.Comments || "") + `\n[Payment Status Update: ${paymentStatus}] ${notes}`;
+    }
+
+    invoice.UpdateDate = new Date();
+
+    await invoice.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Invoice payment status updated successfully",
+      data: {
+        DocNum: invoice.DocNum,
+        paymentStatus: invoice.paymentStatus,
+        paymentTracking: invoice.paymentTracking,
+      },
+    });
+  } catch (error) {
+    console.error("Error updating invoice payment status:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to update invoice payment status",
+      error: error.message,
+    });
+  }
+};
 
 module.exports = exports;
