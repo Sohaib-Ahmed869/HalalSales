@@ -41,7 +41,11 @@ exports.getFlattenedPayments = async (req, res) => {
         }
 
         if (reconciliationStatus) {
-            filter.reconciliationStatus = reconciliationStatus;
+            if (reconciliationStatus === 'Matched') {
+                filter.cardCode = { $ne: null };
+            } else if (reconciliationStatus === 'Unmatched') {
+                filter.cardCode = null;
+            }
         }
 
         if (startDate && endDate) {
@@ -56,6 +60,8 @@ exports.getFlattenedPayments = async (req, res) => {
             if (minAmount) filter.amount.$gte = parseFloat(minAmount);
             if (maxAmount) filter.amount.$lte = parseFloat(maxAmount);
         }
+
+        console.log("Flattened Payments Filter:", filter);
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
 
@@ -102,9 +108,9 @@ exports.getUnmatchedPayments = async (req, res) => {
 
         const filter = {
             $or: [
-                { cardCode: "UNMATCHED" },
-                { cardCode: { $exists: false } },
                 { cardCode: null },
+                { cardCode: { $exists: false } },
+                { cardCode: "" },
             ],
         };
 
@@ -259,6 +265,9 @@ exports.allocatePaymentToInvoice = async (req, res) => {
             });
         }
 
+  
+        console.log(`Allocating ${amountToAllocate} from payment ${paymentId} to invoice ${invoiceDocNum}`);   
+
         // Check if payment has enough remaining amount
         if (payment.remainingAmount < amountToAllocate) {
             return res.status(400).json({
@@ -272,7 +281,9 @@ exports.allocatePaymentToInvoice = async (req, res) => {
         const totalAllocated = (invoice.allocatedPayments || []).reduce((sum, alloc) => sum + alloc.amountAllocated, 0);
         const invoiceRemaining = invoice.DocTotal - totalPaid - totalAllocated;
 
-        if (invoiceRemaining < amountToAllocate) {
+        let differenceOfAllocation = amountToAllocate - invoiceRemaining;
+
+        if (differenceOfAllocation > 1 || differenceOfAllocation < -1) {
             return res.status(400).json({
                 success: false,
                 message: `Invoice only needs ${invoiceRemaining}, cannot allocate ${amountToAllocate}`,
@@ -325,6 +336,7 @@ exports.allocatePaymentToInvoice = async (req, res) => {
         // Update payment status
         if (invoice.paymentTracking.remainingBalance <= 0.01) {
             invoice.paymentStatus = "Fully Paid";
+            invoice.DocumentStatus = "bost_Closed"; 
         } else if (invoice.paymentTracking.totalPaidAmount > 0) {
             invoice.paymentStatus = "Partially Paid";
         }
@@ -703,10 +715,7 @@ exports.importSalarySheet = async (req, res) => {
         // Flatten to FlattenedPayment collection
         const flattenedPayments = await Promise.all(
             salaryPayments.map(async (payment) => {
-                // Skip if cardCode is UNMATCHED (will be matched from frontend later)
-                if (payment.cardCode === "UNMATCHED") {
-                    return null;
-                }
+
 
                 // Get customer name if not available
                 let cardName = payment.cardName;
@@ -740,8 +749,17 @@ exports.importSalarySheet = async (req, res) => {
         );
 
         // Filter out nulls (UNMATCHED payments)
-        const validFlattenedPayments = flattenedPayments.filter(p => p !== null);
-
+        const validFlattenedPayments = flattenedPayments.map(fp => {
+            // If payment was marked as UNMATCHED, set cardCode to null instead
+            if (fp && fp.cardCode === "UNMATCHED") {
+                return {
+                    ...fp,
+                    cardCode: null,
+                    reconciliationStatus: "Unmatched"
+                };
+            }
+            return fp;
+        }).filter(p => p !== null);
         const insertedFlattenedPayments = await FlattenedPayment.insertMany(validFlattenedPayments);
 
         console.log(`Created ${insertedFlattenedPayments.length} flattened payments`);
@@ -882,7 +900,7 @@ exports.flattenBankStatements = async (req, res) => {
     try {
         // Get all bank statements without matched customer
         const unmatchedStatements = await BankStatement.find({
-            matchedCustomer: { $exists: false },
+            matchedCustomer: { $eq: null },
         });
 
         console.log(`Found ${unmatchedStatements.length} unmatched bank statements`);
@@ -894,35 +912,27 @@ exports.flattenBankStatements = async (req, res) => {
             let cardCode = statement.matchedCustomer;
             let cardName = null;
 
-            if (!cardCode) {
-                // Try to find customer from details
-                const customer = await findCustomerFromBankStatement(statement);
-                if (customer) {
-                    cardCode = customer.CardCode;
-                    cardName = customer.CardName;
-                }
-            }
 
-            if (cardCode) {
-                flattenedPayments.push({
-                    cardCode: cardCode,
-                    cardName: cardName,
-                    amount: statement.amount,
-                    reference: statement.operationReference,
-                    source: "bred_bank",
-                    paymentDate: statement.operationDate,
-                    sourceDocument: {
-                        sourceType: "BankStatement",
-                        sourceId: statement._id,
-                    },
-                    sourceDetails: {
-                        operationType: statement.operationType,
-                        comment: statement.comment,
-                        details: statement.details,
-                    },
-                    remainingAmount: statement.amount,
-                });
-            }
+
+            flattenedPayments.push({
+                cardCode: cardCode || null,  // Allow null cardCode
+                cardName: cardName,
+                amount: statement.amount,
+                reference: statement.operationReference,
+                source: "bred_bank",
+                paymentDate: statement.operationDate,
+                sourceDocument: {
+                    sourceType: "BankStatement",
+                    sourceId: statement._id,
+                },
+                sourceDetails: {
+                    operationType: statement.operationType,
+                    comment: statement.comment,
+                    details: statement.details,
+                },
+                remainingAmount: statement.amount,
+                reconciliationStatus: cardCode ? "Unmatched" : "Unmatched", // Will stay unmatched until customer assigned
+            });
         }
 
         const inserted = await FlattenedPayment.insertMany(flattenedPayments);
@@ -953,7 +963,7 @@ exports.flattenBankStatements = async (req, res) => {
 exports.flattenPayPalStatements = async (req, res) => {
     try {
         const unmatchedStatements = await PayPalStatement.find({
-            matchedCustomer: { $exists: false },
+            matchedCustomer: { $eq: null },
         });
 
         console.log(`Found ${unmatchedStatements.length} unmatched PayPal statements`);
@@ -964,36 +974,28 @@ exports.flattenPayPalStatements = async (req, res) => {
             let cardCode = statement.matchedCustomer;
             let cardName = null;
 
-            if (!cardCode) {
-                const customer = await findCustomerFromPayPalStatement(statement);
-                if (customer) {
-                    cardCode = customer.CardCode;
-                    cardName = customer.CardName;
-                }
-            }
-
-            if (cardCode) {
-                flattenedPayments.push({
-                    cardCode: cardCode,
-                    cardName: cardName,
-                    amount: statement.netAmount,
-                    reference: statement.transactionId,
-                    source: "paypal",
-                    paymentDate: statement.date,
-                    sourceDocument: {
-                        sourceType: "PayPalStatement",
-                        sourceId: statement._id,
-                    },
-                    sourceDetails: {
-                        type: statement.type,
-                        status: statement.status,
-                        fromEmail: statement.fromEmail,
-                        toEmail: statement.toEmail,
-                        invoiceNumber: statement.invoiceNumber,
-                    },
-                    remainingAmount: statement.netAmount,
-                });
-            }
+            // AFTER (updated code):
+            flattenedPayments.push({
+                cardCode: cardCode || null,  // Allow null cardCode
+                cardName: cardName,
+                amount: statement.netAmount,
+                reference: statement.transactionId,
+                source: "paypal",
+                paymentDate: statement.date,
+                sourceDocument: {
+                    sourceType: "PayPalStatement",
+                    sourceId: statement._id,
+                },
+                sourceDetails: {
+                    type: statement.type,
+                    status: statement.status,
+                    fromEmail: statement.fromEmail,
+                    toEmail: statement.toEmail,
+                    invoiceNumber: statement.invoiceNumber,
+                },
+                remainingAmount: statement.netAmount,
+                reconciliationStatus: cardCode ? "Unmatched" : "Unmatched",
+            });
         }
 
         const inserted = await FlattenedPayment.insertMany(flattenedPayments);
@@ -1024,6 +1026,7 @@ exports.flattenPayPalStatements = async (req, res) => {
 exports.updatePaymentCardCode = async (req, res) => {
     try {
         const { paymentId, cardCode, cardCodes } = req.body;
+        console.log("Updating payment card code:", paymentId, cardCode, cardCodes);
 
         if (!paymentId || (!cardCode && !cardCodes)) {
             return res.status(400).json({
@@ -1032,24 +1035,13 @@ exports.updatePaymentCardCode = async (req, res) => {
             });
         }
 
-        // Find the payment in appropriate source collection
-        let payment = await SalarySheetPayment.findById(paymentId);
-        let sourceType = "SalarySheetPayment";
+        // CHANGE 1: Find the FlattenedPayment directly (it should already exist)
+        let flattenedPayment = await FlattenedPayment.findById(paymentId);
 
-        if (!payment) {
-            payment = await BankStatement.findById(paymentId);
-            sourceType = "BankStatement";
-        }
-
-        if (!payment) {
-            payment = await PayPalStatement.findById(paymentId);
-            sourceType = "PayPalStatement";
-        }
-
-        if (!payment) {
+        if (!flattenedPayment) {
             return res.status(404).json({
                 success: false,
-                message: "Payment not found",
+                message: "Payment not found in flattened payments. Please ensure the payment was properly imported and flattened.",
             });
         }
 
@@ -1066,46 +1058,43 @@ exports.updatePaymentCardCode = async (req, res) => {
             });
         }
 
-        // Update source payment
-        payment.cardCode = primaryCardCode;
-        payment.matchedCustomer = primaryCardCode;
-        await payment.save();
-
-        // Create or update flattened payment
-        let flattenedPayment = await FlattenedPayment.findOne({
-            "sourceDocument.sourceId": payment._id,
-        });
-
-        if (!flattenedPayment) {
-            flattenedPayment = new FlattenedPayment({
-                cardCode: primaryCardCode,
-                cardName: customer.CardName,
-                amount: payment.amount || payment.netAmount,
-                reference: payment.reference || payment.transactionId || payment.operationReference,
-                source: sourceType === "SalarySheetPayment" ? "salary_sheet" :
-                    sourceType === "BankStatement" ? "bred_bank" : "paypal",
-                paymentDate: payment.paymentDate || payment.date || payment.operationDate,
-                sourceDocument: {
-                    sourceType: sourceType,
-                    sourceId: payment._id,
-                },
-                alternateCardCodes: cardCodeArray.slice(1),
-                remainingAmount: payment.amount || payment.netAmount,
-            });
-        } else {
-            flattenedPayment.cardCode = primaryCardCode;
-            flattenedPayment.cardName = customer.CardName;
-            flattenedPayment.alternateCardCodes = cardCodeArray.slice(1);
-        }
+        // CHANGE 2: Update the FlattenedPayment with customer info
+        flattenedPayment.cardCode = primaryCardCode;
+        flattenedPayment.cardName = customer.CardName;
+        flattenedPayment.alternateCardCodes = cardCodeArray.slice(1);
+        flattenedPayment.reconciliationStatus = "Unmatched"; // Still unmatched until allocated to invoice
 
         await flattenedPayment.save();
 
-        // Update customer paymentNotAllocated
+        // CHANGE 3: ALSO update the source document (BankStatement/PayPal/SalarySheet)
+        if (flattenedPayment.sourceDocument && flattenedPayment.sourceDocument.sourceId) {
+            const sourceType = flattenedPayment.sourceDocument.sourceType;
+            const sourceId = flattenedPayment.sourceDocument.sourceId;
+
+            let sourceModel;
+            if (sourceType === "BankStatement") {
+                sourceModel = BankStatement;
+            } else if (sourceType === "PayPalStatement") {
+                sourceModel = PayPalStatement;
+            } else if (sourceType === "SalarySheetPayment") {
+                sourceModel = SalarySheetPayment;
+            }
+
+            if (sourceModel) {
+                await sourceModel.findByIdAndUpdate(sourceId, {
+                    matchedCustomer: primaryCardCode,
+                    cardCode: primaryCardCode,
+                    reconciliationStatus: "Matched", // Customer matched, but not yet allocated to invoice
+                });
+            }
+        }
+
+        // CHANGE 4: Update customer payment totals
         await updateCustomerPaymentTotals([primaryCardCode, ...cardCodeArray.slice(1)]);
 
         return res.status(200).json({
             success: true,
-            message: "Payment updated successfully",
+            message: "Payment updated successfully with customer information",
             data: flattenedPayment,
         });
 
@@ -1123,7 +1112,7 @@ exports.updatePaymentCardCode = async (req, res) => {
  * Helper function to update customer payment totals
  */
 async function updateCustomerPaymentTotals(cardCodes) {
-    const uniqueCardCodes = [...new Set(cardCodes)];
+    const uniqueCardCodes = [...new Set(cardCodes)].filter(code => code && code !== "UNMATCHED"); // Filter out null/undefined
 
     for (const cardCode of uniqueCardCodes) {
         const totalPayments = await FlattenedPayment.aggregate([

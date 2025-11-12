@@ -1335,7 +1335,7 @@ exports.syncDeliveryNoteStatusesFromSAP = async (req, res) => {
                 dn.DocumentStatus = "bost_Open";
                 dn.UpdateDate = new Date();
                 dn.LocalStatus = "Synced";
-                dn.U_Notes = (dn.Remarks) || (dn.Comments) || "";
+                dn.U_Notes = (dn.Comments) || "";
                 dn.Comments = dn.Comments || dn.Remarks || "";
                 dn.Remarks = dn.Comments || dn.Remarks || "";
                 await dn.save();

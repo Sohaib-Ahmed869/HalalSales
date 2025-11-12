@@ -1576,8 +1576,6 @@ exports.formatCreditNoteForSAP = async (creditNote) => {
   return sapCreditNote;
 };
 
-// In updateSalesOrderInSAP function, replace the entire function:
-
 exports.updateSalesOrderInSAP = async (docNum, orderData) => {
   try {
     if (!ENABLE_SAP_SYNC) {
@@ -1613,13 +1611,39 @@ exports.updateSalesOrderInSAP = async (docNum, orderData) => {
 
     console.log(`Found SAP order: DocEntry=${docEntry}, DocNum=${docNum}, CardCode=${sapOrder.CardCode}`);
 
-    // ✅ STEP 2: Update using DocEntry
+    // ✅ STEP 2: Build update data with ONLY the new lines
+    // SAP B1 will replace all existing lines with these new ones
+    const updateData = {
+      DocumentLines: []
+    };
+
+    // Add Comments and U_Notes if they exist
+    if (orderData.Comments !== undefined) {
+      updateData.Comments = orderData.Comments || "";
+    }
+
+    if (orderData.U_Notes !== undefined) {
+      updateData.U_Notes = orderData.U_Notes || "";
+    }
+
+    // ✅ CRITICAL FIX: Just send the new lines with sequential LineNum starting from 0
+    // SAP will replace ALL existing lines with these
+    if (orderData.DocumentLines && orderData.DocumentLines.length > 0) {
+      updateData.DocumentLines = orderData.DocumentLines.map((line, index) => ({
+        LineNum: index,  // Sequential numbering: 0, 1, 2, 3...
+        ItemCode: line.ItemCode,
+        ItemDescription: line.ItemDescription || "",
+        Quantity: Number(line.Quantity || 0),
+        UnitPrice: Number(line.UnitPrice || 0),
+      }));
+    }
+
     console.log(`Updating sales order DocEntry ${docEntry} in SAP B1...`);
-    console.log("Update data being sent:", JSON.stringify(orderData, null, 2));
+    console.log("Update data being sent:", JSON.stringify(updateData, null, 2));
 
     const response = await axios.patch(
       `${SAP_CONFIG.serviceLayerUrl}/Orders(${docEntry})`,
-      orderData,
+      updateData,
       {
         headers: {
           "Content-Type": "application/json",
@@ -1630,8 +1654,20 @@ exports.updateSalesOrderInSAP = async (docNum, orderData) => {
 
     console.log("Sales order updated successfully in SAP B1");
 
-    // SAP PATCH doesn't return the full object, so fetch it
-    const updatedOrder = await exports.getSalesOrderFromSAP(docEntry);
+    // ✅ STEP 3: Fetch updated order using DocNum
+    console.log(`Fetching updated order with DocNum ${docNum}...`);
+
+    const updatedOrderResponse = await axios.get(
+      `${SAP_CONFIG.serviceLayerUrl}/Orders?$filter=DocNum eq ${docNum}`,
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: `B1SESSION=${sessionId}`,
+        },
+      }
+    );
+
+    const updatedOrder = updatedOrderResponse.data.value?.[0] || null;
 
     return updatedOrder;
   } catch (error) {

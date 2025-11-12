@@ -6,8 +6,10 @@ const flattenedPaymentSchema = new mongoose.Schema(
         // Unified fields
         cardCode: {
             type: String,
-            required: true,
+            required: false,  // Allow null/undefined
+            default: null,
             index: true,
+            sparse: true,  // Sparse index to handle null values efficiently
         },
 
         cardName: {

@@ -8,7 +8,7 @@ const multer = require("multer");
 const upload = multer({ storage: multer.memoryStorage() });
 
 // Import salary sheet
-router.post("/salary-sheet/import", upload.single("file"),
+router.post("/import-salary-sheet", upload.single("file"),
     financialStatementsController2.importSalarySheet);
 
 // Flatten existing statements
@@ -18,31 +18,31 @@ router.post("/paypal/flatten",
     financialStatementsController2.flattenPayPalStatements);
 
 // Update payment card code (from frontend)
-router.put("/payment/update-cardcode",
+router.put("/update-payment-cardcode",
     financialStatementsController2.updatePaymentCardCode);
 
 // Get flattened payments
-router.get("/payments/flattened",
+router.get("/flattened-payments",
     financialStatementsController2.getFlattenedPayments);
-router.get("/payments/unmatched",
+router.get("/unmatched-payments",
     financialStatementsController2.getUnmatchedPayments);
 router.get("/payments/customer/:cardCode",
     financialStatementsController2.getPaymentsByCustomer);
 
 // Payment allocation
-router.post("/payments/allocate",
+router.post("/allocate-payment",
     financialStatementsController2.allocatePaymentToInvoice);
 router.post("/payments/auto-match",
     financialStatementsController2.autoMatchPayments);
 // Import routes
 router.post(
-    "/bank/import",
+    "/import-bank-statements",
     upload.single("file"),
     financialStatementsController.importBankStatements
 );
 
 router.post(
-    "/paypal/import",
+    "/import-paypal-statements",
     upload.single("file"),
     financialStatementsController.importPayPalStatements
 );

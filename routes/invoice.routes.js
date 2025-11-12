@@ -6,6 +6,8 @@ const { protect, authorize } = require("../middleware/auth");
 
 const multer = require("multer");
 const upload = multer({ storage: multer.memoryStorage() });
+router.post("/fix-duplicate-docentry", invoiceSyncController.fixDuplicateDocEntries);
+
 router.post('/update-totals-for-date', invoiceController.updateInvoiceTotalsForDate);
 // Get invoices by customer with pagination and filtering
 router.get("/customer", invoiceController.getInvoicesByCustomer);
@@ -76,7 +78,7 @@ router.post(
 );
 
 // Live sync invoice statuses from SAP (similar to order sync)
-router.post("/sync-statuses-from-sap", invoiceSyncController.syncInvoiceStatusesFromSAP);
+router.post("/invoices/sync-status", invoiceSyncController.syncInvoiceStatusesFromSAP);
 
 // Get unpaid invoices by customer
 router.get("/unpaid/customer/:cardCode", invoiceController.getUnpaidInvoicesByCustomer);

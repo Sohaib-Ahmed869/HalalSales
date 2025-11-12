@@ -7119,6 +7119,31 @@ exports.getCustomerDocuments = async (req, res) => {
   }
 };
 
+exports.searchCustomers = async (req, res) => {
+  try {
+    console.log("Searching customers with params:", req.query, req.params);
+    const { search } = req.query;
+    console.log(`Searching customers with CardCode: ${search}`);
+    const customers = await Customer.find({
+      CardCode: { $regex: `^${search}`, $options: "i" },
+    })
+      .limit(50)
+      .select("CardCode CardName Email phoneNumber");
+    res.status(200).json({
+      success: true,
+      customers,
+    });
+  }
+  catch (error) {
+    console.error("Error searching customers:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error searching customers",
+      error: error.message,
+    });
+  }
+};
+
 // Delete specific document
 exports.deleteCustomerDocument = async (req, res) => {
   try {

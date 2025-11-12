@@ -69,6 +69,12 @@ router.get(
   customerController.exportCustomersToCSV
 );
 
+// search customer
+router.get(
+  '/search',
+  customerController.searchCustomers
+)
+
 router.post(
   "/:customerId/sync-sap",
   auth,

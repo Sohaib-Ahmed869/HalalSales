@@ -1,6 +1,8 @@
 const BankStatement = require("../models/BankStatement");
 const PayPalStatement = require("../models/PayPalStatement");
+const FlattenedPayment = require("../models/FlattenedPayment");
 const Invoice = require("../models/Invoice");
+const Customer = require("../models/Customer");
 const XLSX = require("xlsx");
 
 /**
@@ -26,118 +28,231 @@ const parseFrenchDate = (dateStr) => {
     return new Date(dateStr);
 };
 
+// CORRECTED IMPORT FUNCTIONS
+
 /**
- * Import bank statements from Excel file
+ * Import and flatten bank statements (Excel/CSV format)
  */
 exports.importBankStatements = async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({
                 success: false,
-                message: "Excel file is required",
+                message: "Excel or CSV file is required",
             });
         }
 
-        console.log("Starting bank statement import...");
+        console.log("Starting bank statement import and flattening...");
 
-        // Parse Excel file
-        const workbook = XLSX.read(req.file.buffer, {
-            cellDates: true,
-            cellNF: true,
-            cellStyles: true,
-        });
+        const XLSX = require("xlsx");
+        let parsedData = [];
 
-        const sheetName = workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[sheetName];
+        // Determine file type and parse accordingly
+        const fileExtension = req.file.originalname.split('.').pop().toLowerCase();
 
-        // Convert to JSON
-        const rows = XLSX.utils.sheet_to_json(worksheet, {
-            defval: null,
-            blankrows: false,
-        });
+        if (fileExtension === 'xls' || fileExtension === 'xlsx') {
+            // Parse Excel file
+            const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+            const sheetName = workbook.SheetNames[0];
+            const worksheet = workbook.Sheets[sheetName];
 
-        console.log(`Parsed ${rows.length} rows from Excel`);
+            // Get raw data with header row
+            const rawData = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: null });
 
-        if (rows.length === 0) {
+            // Skip header row (row 0) and process data rows
+            for (let i = 1; i < rawData.length; i++) {
+                const row = rawData[i];
+                if (!row || row.length === 0) continue;
+
+                parsedData.push({
+                    dateSerial: row[0],  // Excel date serial number
+                    reference: row[1] || null,
+                    operationType: row[2] ? row[2].trim() : null,
+                    amountStr: row[3],  // French format string
+                    comment: row[4] || null,
+                    detail1: row[5] ? row[5].trim() : null,
+                    detail2: row[6] ? row[6].trim() : null,
+                    detail3: row[7] ? row[7].trim() : null,
+                    detail4: row[8] ? row[8].trim() : null,
+                    detail5: row[9] ? row[9].trim() : null,
+                    detail6: row[10] ? row[10].trim() : null,
+                });
+            }
+        } else {
+            // Parse CSV file
+            const csv = require("csv-parser");
+            const { Readable } = require("stream");
+
+            await new Promise((resolve, reject) => {
+                const stream = Readable.from(req.file.buffer.toString());
+                stream
+                    .pipe(csv({ separator: ";" }))
+                    .on("data", (row) => {
+                        parsedData.push({
+                            dateStr: row["Date d'opération"] || row["Date opération"],
+                            reference: row["Référence de l'opération"] || row["Référence"],
+                            operationType: row["Type de l'opération"] || row["Type d'opération"],
+                            amountStr: row["Montant"],
+                            comment: row["Commentaire"],
+                            detail1: row["Détail 1"],
+                            detail2: row["Détail 2"],
+                            detail3: row["Détail 3"],
+                            detail4: row["Détail 4"],
+                            detail5: row["Détail 5"],
+                            detail6: row["Détail 6"],
+                        });
+                    })
+                    .on("end", resolve)
+                    .on("error", reject);
+            });
+        }
+
+        console.log(`Parsed ${parsedData.length} rows from file`);
+
+        const bankStatements = [];
+        const flattenedPayments = [];
+
+        for (const row of parsedData) {
+            // Parse date
+            let operationDate;
+            if (row.dateSerial) {
+                // Excel date serial number (days since 1900-01-01)
+                // Excel incorrectly treats 1900 as a leap year, so subtract 1
+                const excelEpoch = new Date(1900, 0, 1);
+                operationDate = new Date(excelEpoch.getTime() + (row.dateSerial - 2) * 86400000);
+            } else if (row.dateStr) {
+                // CSV date string format "DD/MM/YYYY"
+                const [day, month, year] = row.dateStr.split("/");
+                operationDate = new Date(`${year}-${month}-${day}`);
+            } else {
+                operationDate = new Date();
+            }
+
+            // Parse amount - handle both French and standard formats
+            let amount = 0;
+            if (row.amountStr) {
+                // French format: "1 234,56" or "461,52"
+                // Standard format: "1234.56"
+                const amountStr = String(row.amountStr)
+                    .replace(/\s/g, "")  // Remove spaces
+                    .replace(",", ".");   // Replace comma with dot
+                amount = parseFloat(amountStr) || 0;
+            }
+
+            // Skip rows with zero or invalid amounts
+            if (amount === 0) {
+                console.log(`Skipping row with zero amount:`, row);
+                continue;
+            }
+
+            // Create bank statement
+            const bankStatement = {
+                operationDate: operationDate,
+                operationReference: row.reference,
+                operationType: row.operationType || "VIREMENT",
+                amount: amount,
+                comment: row.comment,
+                details: {
+                    detail1: row.detail1,
+                    detail2: row.detail2,
+                    detail3: row.detail3,
+                    detail4: row.detail4,
+                    detail5: row.detail5,
+                    detail6: row.detail6,
+                },
+                reconciliationStatus: "Unmatched",
+                importedAt: new Date(),
+            };
+
+            bankStatements.push(bankStatement);
+
+            // Try to match customer
+            let cardCode = null;
+            let cardName = null;
+
+
+            // Create flattened payment with ALL available data
+            const flattenedPayment = {
+                cardCode: cardCode,
+                cardName: cardName,
+                amount: amount,
+                reference: row.reference,
+                source: "bred_bank",
+                paymentDate: operationDate,
+                sourceDocument: {
+                    sourceType: "BankStatement",
+                    sourceId: null, // Will be updated after saving bank statement
+                },
+                paymentMethod: row.operationType,
+                sourceDetails: {
+                    operationType: row.operationType,
+                    operationReference: row.reference,
+                    comment: row.comment,
+                    details: {
+                        detail1: row.detail1,
+                        detail2: row.detail2,
+                        detail3: row.detail3,
+                        detail4: row.detail4,
+                        detail5: row.detail5,
+                        detail6: row.detail6,
+                    },
+
+                },
+                remainingAmount: amount,
+                reconciliationStatus: cardCode ? "Unmatched" : "Unmatched",
+                importedBy: req.user?._id,
+                importedAt: new Date(),
+            };
+
+            flattenedPayments.push(flattenedPayment);
+        }
+
+        if (bankStatements.length === 0) {
             return res.status(400).json({
                 success: false,
-                message: "Excel file contains no data rows",
+                message: "No valid bank statements found in file",
             });
         }
 
-        const statements = [];
-        const errors = [];
+        // Save bank statements
+        const savedBankStatements = await BankStatement.insertMany(bankStatements);
+        console.log(`✅ Saved ${savedBankStatements.length} bank statements`);
 
-        for (let i = 0; i < rows.length; i++) {
-            try {
-                const row = rows[i];
-
-                // Parse operation date
-                const operationDate = row["Date d'opération"];
-                if (!operationDate) {
-                    errors.push({ row: i + 2, error: "Missing operation date" });
-                    continue;
-                }
-
-                // Parse amount
-                const amount = parseFrenchNumber(row["Montant"]);
-                if (isNaN(amount)) {
-                    errors.push({ row: i + 2, error: "Invalid amount" });
-                    continue;
-                }
-
-                // Create statement object
-                const statement = {
-                    operationDate: operationDate instanceof Date ? operationDate : new Date(operationDate),
-                    operationReference: row["Référence de l'opération"] || null,
-                    operationType: row["Type de l'opération"]?.trim() || "Unknown",
-                    amount: amount,
-                    comment: row["Commentaire"] || null,
-                    details: {
-                        detail1: row["Détail 1"]?.trim() || null,
-                        detail2: row["Détail 2"]?.trim() || null,
-                        detail3: row["Détail 3"]?.trim() || null,
-                        detail4: row["Détail 4"]?.trim() || null,
-                        detail5: row["Détail 5"]?.trim() || null,
-                        detail6: row["Détail 6"]?.trim() || null,
-                    },
-                };
-
-                statements.push(statement);
-            } catch (error) {
-                errors.push({ row: i + 2, error: error.message });
-            }
+        // Update sourceId in flattened payments
+        for (let i = 0; i < flattenedPayments.length; i++) {
+            flattenedPayments[i].sourceDocument.sourceId = savedBankStatements[i]._id;
         }
 
-        // Bulk insert
-        let insertedCount = 0;
-        if (statements.length > 0) {
-            try {
-                const result = await BankStatement.insertMany(statements, {
-                    ordered: false,
-                });
-                insertedCount = result.length;
-                console.log(`Successfully inserted ${insertedCount} bank statements`);
-            } catch (error) {
-                if (error.writeErrors) {
-                    insertedCount = statements.length - error.writeErrors.length;
-                    console.log(`Partial success: ${insertedCount} inserted, ${error.writeErrors.length} failed`);
-                } else {
-                    throw error;
-                }
-            }
+        // Save flattened payments
+        const savedFlattenedPayments = await FlattenedPayment.insertMany(flattenedPayments);
+        console.log(`✅ Created ${savedFlattenedPayments.length} flattened payments`);
+
+        // Update bank statements with flattenedPaymentId reference
+        for (let i = 0; i < savedBankStatements.length; i++) {
+            savedBankStatements[i].flattenedPaymentId = savedFlattenedPayments[i]._id;
+            await savedBankStatements[i].save();
+        }
+
+        // Update customer payment totals for matched customers
+        const matchedCardCodes = flattenedPayments
+            .filter(fp => fp.cardCode)
+            .map(fp => fp.cardCode);
+
+        if (matchedCardCodes.length > 0) {
+            await updateCustomerPaymentTotals(matchedCardCodes);
         }
 
         return res.status(200).json({
             success: true,
-            message: "Bank statement import completed",
+            message: "Bank statements imported and flattened successfully",
             data: {
-                totalRows: rows.length,
-                inserted: insertedCount,
-                skipped: rows.length - insertedCount,
-                errors: errors.length > 0 ? errors : undefined,
+                totalImported: savedBankStatements.length,
+                flattenedPayments: savedFlattenedPayments.length,
+                matchedCustomers: matchedCardCodes.length,
+                unmatchedPayments: savedFlattenedPayments.length - matchedCardCodes.length,
             },
         });
+
     } catch (error) {
         console.error("Error importing bank statements:", error);
         return res.status(500).json({
@@ -149,7 +264,7 @@ exports.importBankStatements = async (req, res) => {
 };
 
 /**
- * Import PayPal statements from CSV file
+ * Import and flatten PayPal statements (CSV format)
  */
 exports.importPayPalStatements = async (req, res) => {
     try {
@@ -160,153 +275,233 @@ exports.importPayPalStatements = async (req, res) => {
             });
         }
 
-        console.log("Starting PayPal statement import...");
+        console.log("Starting PayPal statement import and flattening...");
 
-        // Parse CSV file
-        const workbook = XLSX.read(req.file.buffer, {
-            cellDates: true,
-            raw: false,
+        const csv = require("csv-parser");
+        const { Readable } = require("stream");
+        const results = [];
+
+        // Parse CSV (PayPal uses comma separator)
+        await new Promise((resolve, reject) => {
+            const stream = Readable.from(req.file.buffer.toString());
+            stream
+                .pipe(csv({ separator: "," }))  // PayPal uses comma
+                .on("data", (data) => results.push(data))
+                .on("end", resolve)
+                .on("error", reject);
         });
 
-        const sheetName = workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[sheetName];
+        console.log(`Parsed ${results.length} rows from CSV`);
 
-        // Convert to JSON
-        const rows = XLSX.utils.sheet_to_json(worksheet, {
-            defval: null,
-            blankrows: false,
-        });
+        const paypalStatements = [];
+        const flattenedPayments = [];
 
-        console.log(`Parsed ${rows.length} rows from CSV`);
+        for (const row of results) {
+            // Parse date - French format: "19/10/2025"
+            const dateStr = row["Date"] || row["date"];
+            const timeStr = row["Heure"] || row["Time"] || row["time"] || "00:00:00";
+            const timezone = row["Fuseau horaire"] || row["TimeZone"] || row["timezone"] || "PDT";
 
-        if (rows.length === 0) {
-            return res.status(400).json({
-                success: false,
-                message: "CSV file contains no data rows",
-            });
-        }
+            let transactionDate = new Date();
+            if (dateStr) {
+                const [day, month, year] = dateStr.split("/");
+                const [hours, minutes, seconds] = timeStr.split(":");
+                transactionDate = new Date(`${year}-${month}-${day}T${hours || '00'}:${minutes || '00'}:${seconds || '00'}`);
+            }
 
-        const statements = [];
-        const errors = [];
-        const duplicates = [];
+            // Parse amounts - French format with comma: "461,65"
+            const parseAmount = (amountStr) => {
+                if (!amountStr) return 0;
+                // Remove quotes, spaces, and convert comma to dot
+                const cleaned = String(amountStr)
+                    .replace(/"/g, "")
+                    .replace(/\s/g, "")
+                    .replace(",", ".");
+                return parseFloat(cleaned) || 0;
+            };
 
-        for (let i = 0; i < rows.length; i++) {
-            try {
-                const row = rows[i];
+            const grossAmount = parseAmount(row["Avant commission"] || row["Gross"] || row["gross"]);
+            const fee = parseAmount(row["Commission"] || row["Fee"] || row["fee"]);
+            const netAmount = parseAmount(row["Avant commission"] || row["Avant commission"]);
 
-                // Check for required fields
-                const transactionId = row["Numéro de transaction"];
-                if (!transactionId) {
-                    errors.push({ row: i + 2, error: "Missing transaction ID" });
-                    continue;
+            // Skip zero amount transactions
+            if (netAmount === 0) {
+                continue;
+            }
+
+            // if negative transaction, skip for now
+            if (netAmount < 0) {
+                continue;
+            }
+
+            // Create PayPal statement with ALL fields
+            const paypalStatement = {
+                date: transactionDate,
+                time: timeStr,
+                timezone: timezone,
+                name: row["Nom"] || row["Name"] || row["name"] || null,
+                type: row["Type"] || row["type"] || "Payment",
+                status: row["État"] || row["Status"] || row["status"] || "Completed",
+                currency: row["Devise"] || row["Currency"] || row["currency"] || "EUR",
+                grossAmount: grossAmount,
+                fee: fee,
+                netAmount: netAmount,
+                fromEmail: row["De l'adresse email"] || row["From Email Address"] || row["from_email"] || null,
+                toEmail: row["À l'adresse email"] || row["To Email Address"] || row["to_email"] || null,
+                transactionId: row["Numéro de transaction"] || row["Transaction ID"] || row["transaction_id"] || `PAYPAL-${Date.now()}-${Math.random()}`,
+                referenceTransactionId: row["Numéro de la transaction de référence"] || row["Reference Txn ID"] || null,
+                invoiceNumber: row["Numéro de facture"] || row["Invoice Number"] || row["invoice_number"] || null,
+                customerNumber: row["Numéro de client"] || row["Customer Number"] || null,
+                receiptNumber: row["Numéro de reçu"] || row["Receipt ID"] || null,
+                shippingAddress: {
+                    fullAddress: row["Adresse de livraison"] || row["Shipping Address"] || null,
+                    addressStatus: row["État de l'adresse"] || row["Address Status"] || null,
+                    street: row["Adresse"] || row["Street"] || null,
+                    district: row["Adresse (suite)/District/Quartier"] || row["District/Neighborhood"] || null,
+                    city: row["Ville"] || row["Town/City"] || null,
+                    state: row["État/Province/Région/Comté/Territoire/Préfecture/République"] || row["State/Province/Region/County/Territory/Prefecture/Republic"] || null,
+                    postalCode: row["Code postal"] || row["Zip/Postal Code"] || null,
+                    country: row["Pays"] || row["Country"] || null,
+                    phoneNumber: row["Numéro de téléphone du contact"] || row["Contact Phone Number"] || null,
+                },
+                itemTitle: row["Titre de l'objet"] || row["Item Title"] || null,
+                itemNumber: row["Numéro de l'objet"] || row["Item ID"] || null,
+                quantity: row["Quantité"] ? parseInt(row["Quantité"]) : null,
+                shippingAndHandling: parseAmount(row["Montant des frais d'expédition et de traitement"] || row["Shipping and Handling Amount"] || "0"),
+                insurance: parseAmount(row["Montant de l'assurance"] || row["Insurance Amount"] || "0"),
+                vat: parseAmount(row["TVA"] || row["Sales Tax"] || "0"),
+                option1Name: row["Nom de l'option 1"] || row["Option 1 Name"] || null,
+                option1Value: row["Valeur de l'option 1"] || row["Option 1 Value"] || null,
+                option2Name: row["Nom de l'option 2"] || row["Option 2 Name"] || null,
+                option2Value: row["Valeur de l'option 2"] || row["Option 2 Value"] || null,
+                balance: parseAmount(row["Solde"] || row["Balance"] || "0"),
+                subject: row["Objet"] || row["Subject"] || null,
+                note: row["Remarque"] || row["Note"] || null,
+                countryCode: row["Indicatif pays"] || row["Country Code"] || null,
+                balanceImpact: row["Impact sur le solde"] || row["Balance Impact"] || null,
+                reconciliationStatus: "Unmatched",
+                importedAt: new Date(),
+            };
+
+
+
+            paypalStatements.push(paypalStatement);
+
+            // Try to match customer
+            let cardCode = null;
+            let cardName = null;
+
+            // Try matching by invoice number
+            if (paypalStatement.invoiceNumber) {
+                const invoice = await Invoice.findOne({
+                    DocNum: parseInt(paypalStatement.invoiceNumber),
+                }).lean();
+
+                if (invoice) {
+                    const customer = await Customer.findOne({
+                        CardCode: invoice.CardCode,
+                    }).lean();
+
+                    if (customer) {
+                        cardCode = customer.CardCode;
+                        cardName = customer.CardName;
+                        paypalStatement.matchedCustomer = cardCode;
+                        paypalStatement.matchedInvoice = invoice.DocNum;
+                        console.log(`✅ Matched by invoice: ${customer.CardName} (${cardCode})`);
+                    }
                 }
+            }
 
-                // Check if transaction already exists
-                const exists = await PayPalStatement.findOne({ transactionId });
-                if (exists) {
-                    duplicates.push({ row: i + 2, transactionId });
-                    continue;
-                }
 
-                // Parse date
-                const date = parseFrenchDate(row["Date"]);
-                if (!date) {
-                    errors.push({ row: i + 2, error: "Invalid date" });
-                    continue;
-                }
-
-                // Parse amounts
-                const grossAmount = parseFrenchNumber(row["Avant commission"]);
-                const fee = parseFrenchNumber(row["Commission"]);
-                const netAmount = parseFrenchNumber(row["Net"]);
-                const balance = parseFrenchNumber(row["Solde"]);
-
-                // Create statement object
-                const statement = {
-                    date: date,
-                    time: row["Heure"] || "00:00:00",
-                    timezone: row["Fuseau horaire"] || "UTC",
-                    name: row["Nom"] || null,
-                    type: row["Type"]?.trim() || "Unknown",
-                    status: row["État"]?.trim() || "Unknown",
-                    currency: row["Devise"] || "EUR",
+            // Create flattened payment with ALL available data
+            const flattenedPayment = {
+                cardCode: cardCode,
+                cardName: cardName,
+                amount: netAmount,
+                reference: paypalStatement.transactionId,
+                source: "paypal",
+                paymentDate: transactionDate,
+                sourceDocument: {
+                    sourceType: "PayPalStatement",
+                    sourceId: null, // Will be updated after saving
+                },
+                paymentMethod: paypalStatement.type,
+                sourceDetails: {
+                    type: paypalStatement.type,
+                    status: paypalStatement.status,
+                    currency: paypalStatement.currency,
                     grossAmount: grossAmount,
                     fee: fee,
                     netAmount: netAmount,
-                    fromEmail: row["De l'adresse email"] || null,
-                    toEmail: row["À l'adresse email"] || null,
-                    transactionId: transactionId,
-                    referenceTransactionId: row["Numéro de la transaction de référence"] || null,
-                    invoiceNumber: row["Numéro de facture"] || null,
-                    customerNumber: row["Numéro de client"] || null,
-                    receiptNumber: row["Numéro de reçu"] || null,
-                    shippingAddress: {
-                        fullAddress: row["Adresse de livraison"] || null,
-                        addressStatus: row["État de l'adresse"] || null,
-                        street: row["Adresse"] || null,
-                        district: row["Adresse (suite)/District/Quartier"] || null,
-                        city: row["Ville"] || null,
-                        state: row["État/Province/Région/Comté/Territoire/Préfecture/République"] || null,
-                        postalCode: row["Code postal"] ? String(row["Code postal"]) : null,
-                        country: row["Pays"] || null,
-                        phoneNumber: row["Numéro de téléphone du contact"] ? String(row["Numéro de téléphone du contact"]) : null,
-                    },
-                    itemTitle: row["Titre de l'objet"] || null,
-                    itemNumber: row["Numéro de l'objet"] || null,
-                    quantity: row["Quantité"] ? parseFloat(row["Quantité"]) : null,
-                    shippingAndHandling: parseFrenchNumber(row["Montant des frais d'expédition et de traitement"]),
-                    insurance: parseFrenchNumber(row["Montant de l'assurance"]),
-                    vat: parseFrenchNumber(row["TVA"]),
-                    option1Name: row["Nom de l'option 1"] || null,
-                    option1Value: row["Valeur de l'option 1"] || null,
-                    option2Name: row["Nom de l'option 2"] || null,
-                    option2Value: row["Valeur de l'option 2"] || null,
-                    balance: balance,
-                    subject: row["Objet"] || null,
-                    note: row["Remarque"] || null,
-                    countryCode: row["Indicatif pays"] || null,
-                    balanceImpact: row["Impact sur le solde"] || null,
-                };
+                    fromEmail: paypalStatement.fromEmail,
+                    toEmail: paypalStatement.toEmail,
+                    transactionId: paypalStatement.transactionId,
+                    referenceTransactionId: paypalStatement.referenceTransactionId,
+                    invoiceNumber: paypalStatement.invoiceNumber,
+                    customerNumber: paypalStatement.customerNumber,
+                    receiptNumber: paypalStatement.receiptNumber,
+                    itemTitle: paypalStatement.itemTitle,
+                    itemNumber: paypalStatement.itemNumber,
+                    quantity: paypalStatement.quantity,
+                    shippingAndHandling: paypalStatement.shippingAndHandling,
+                    insurance: paypalStatement.insurance,
+                    vat: paypalStatement.vat,
+                    shippingAddress: paypalStatement.shippingAddress,
+                    subject: paypalStatement.subject,
+                    note: paypalStatement.note,
+                    balance: paypalStatement.balance,
+                    balanceImpact: paypalStatement.balanceImpact,
+                    timezone: timezone,
+                    time: timeStr,
+                },
+                remainingAmount: netAmount,
+                reconciliationStatus: cardCode ? "Unmatched" : "Unmatched",
+                importedBy: req.user?._id,
+                importedAt: new Date(),
+            };
 
-                statements.push(statement);
-            } catch (error) {
-                errors.push({ row: i + 2, error: error.message });
-            }
+            flattenedPayments.push(flattenedPayment);
         }
 
-        // Bulk insert
-        let insertedCount = 0;
-        if (statements.length > 0) {
-            try {
-                const result = await PayPalStatement.insertMany(statements, {
-                    ordered: false,
-                });
-                insertedCount = result.length;
-                console.log(`Successfully inserted ${insertedCount} PayPal statements`);
-            } catch (error) {
-                if (error.writeErrors) {
-                    insertedCount = statements.length - error.writeErrors.length;
-                    console.log(`Partial success: ${insertedCount} inserted, ${error.writeErrors.length} failed`);
-                } else {
-                    throw error;
-                }
-            }
+        if (paypalStatements.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "No valid PayPal statements found in file",
+            });
         }
+
+        // Save PayPal statements
+        const savedPayPalStatements = await PayPalStatement.insertMany(paypalStatements);
+        console.log(`✅ Saved ${savedPayPalStatements.length} PayPal statements`);
+
+        // Update sourceId in flattened payments
+        for (let i = 0; i < flattenedPayments.length; i++) {
+            flattenedPayments[i].sourceDocument.sourceId = savedPayPalStatements[i]._id;
+        }
+
+        // Save flattened payments
+        const savedFlattenedPayments = await FlattenedPayment.insertMany(flattenedPayments);
+        console.log(`✅ Created ${savedFlattenedPayments.length} flattened payments`);
+
+        // Update PayPal statements with flattenedPaymentId reference
+        for (let i = 0; i < savedPayPalStatements.length; i++) {
+            savedPayPalStatements[i].flattenedPaymentId = savedFlattenedPayments[i]._id;
+            await savedPayPalStatements[i].save();
+        }
+
+
 
         return res.status(200).json({
             success: true,
-            message: "PayPal statement import completed",
+            message: "PayPal statements imported and flattened successfully",
             data: {
-                totalRows: rows.length,
-                inserted: insertedCount,
-                duplicates: duplicates.length,
-                errors: errors.length,
-                details: {
-                    duplicates: duplicates.length > 0 ? duplicates : undefined,
-                    errors: errors.length > 0 ? errors : undefined,
-                },
+                totalImported: savedPayPalStatements.length,
+                flattenedPayments: savedFlattenedPayments.length,
+
+
             },
         });
+
     } catch (error) {
         console.error("Error importing PayPal statements:", error);
         return res.status(500).json({
@@ -316,7 +511,6 @@ exports.importPayPalStatements = async (req, res) => {
         });
     }
 };
-
 /**
  * Get bank statements with pagination and filters
  */
