@@ -3,6 +3,7 @@ const PayPalStatement = require("../models/PayPalStatement");
 const FlattenedPayment = require("../models/FlattenedPayment");
 const Invoice = require("../models/Invoice");
 const Customer = require("../models/Customer");
+const syncMetadata = require("../models/SyncMetadata");
 const XLSX = require("xlsx");
 
 /**
@@ -748,11 +749,14 @@ exports.getFinancialSummary = async (req, res) => {
             },
         ]);
 
+        const lastSync = await syncMetadata.findOne({ syncType: "invoice_status_sync" }).lean();
+
         return res.status(200).json({
             success: true,
             data: {
                 bank: bankSummary[0] || {},
                 paypal: paypalSummary[0] || {},
+                lastInvoiceStatusSyncTime : lastSync ? lastSync.lastSyncDate : null,
             },
         });
     } catch (error) {

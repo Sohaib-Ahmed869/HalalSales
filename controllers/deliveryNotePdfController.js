@@ -228,10 +228,11 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, customer,
         doc.text("Addresse de facturation", margin, startY + 15, { continued: false });
 
         // Get billing address from customer
+        console.log("Customer addresses:", customer.addresses);
         let billingAddress = null;
         if (customer && customer.addresses && customer.addresses.length > 0) {
             billingAddress = customer.addresses.find(addr =>
-                addr.addressType === "bo_BillTo" && addr.isDefault
+                addr.addressType === "bo_BillTo"
             ) || customer.addresses.find(addr => addr.addressType === "bo_BillTo");
         }
 

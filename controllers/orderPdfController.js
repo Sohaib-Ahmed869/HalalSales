@@ -70,7 +70,7 @@ const formatDate = (date) => {
 };
 
 // Generate single order (can span multiple pages)
-const generateOrderPage = async (doc, order, logoBuffer, isFirstOrder = false) => {
+const generateOrderPage = async (doc, order, logoBuffer, isFirstOrder = false, customer) => {
     if (!isFirstOrder) {
         doc.addPage();
     }
@@ -212,10 +212,34 @@ const generateOrderPage = async (doc, order, logoBuffer, isFirstOrder = false) =
         doc.text("Addresse de facturation", margin, startY + 15, { continued: false });
 
         doc.fontSize(9).font("Helvetica").fillColor("#000000");
-        doc.text("2 avenue emilie zola", margin, startY + 30, { continued: false });
-        doc.text("75015 PARIS", margin, startY + 42, { continued: false });
-        doc.text("FRANCE", margin, startY + 54, { continued: false });
+        let billingAddress = null;
+        if (customer && customer.addresses && customer.addresses.length > 0) {
+            billingAddress = customer.addresses.find(addr =>
+                addr.addressType === "bo_BillTo"
+            ) || customer.addresses.find(addr => addr.addressType === "bo_BillTo");
+        }
 
+        if (billingAddress) {
+            let yOffset = startY + 30;
+            doc.fontSize(9).font("Helvetica").fillColor("#000000");
+
+            if (billingAddress.street) {
+                doc.text(sanitizeText(billingAddress.street).substring(0, 50), margin, yOffset, { continued: false });
+                yOffset += 12;
+            }
+
+            const cityLine = [billingAddress.zipCode, billingAddress.city]
+                .filter(Boolean)
+                .join(" ");
+            if (cityLine) {
+                doc.text(sanitizeText(cityLine).substring(0, 50), margin, yOffset, { continued: false });
+                yOffset += 12;
+            }
+
+            if (billingAddress.country) {
+                doc.text(sanitizeText(billingAddress.country).substring(0, 50), margin, yOffset, { continued: false });
+            }
+        }
         // RIGHT COLUMN - Delivery Address with customer name on top
         const deliveryX = pageWidth / 2 + 20;
 
@@ -431,6 +455,17 @@ exports.generateBulkOrderPDFs = async (req, res) => {
             });
         }
 
+        const cardCodes = [...new Set(orders.map(order => order.CardCode))];
+        const Customer = require("../models/Customer");
+        const customers = await Customer.find({ CardCode: { $in: cardCodes } })
+            .select("CardCode addresses phoneNumber additionalPhoneNumbers")
+            .lean();
+
+        const customerMap = {};
+        customers.forEach(c => {
+            customerMap[c.CardCode] = c;
+        });
+
         const logoUrl = "https://imageshfs.s3.ap-southeast-2.amazonaws.com/image-removebg-preview+(1).png";
         const logoBuffer = await downloadImage(logoUrl);
 
@@ -450,10 +485,11 @@ exports.generateBulkOrderPDFs = async (req, res) => {
 
         // FIX 4: Generate original + copy for EACH order immediately
         for (let i = 0; i < orders.length; i++) {
+            const customer = customerMap[orders[i].CardCode];
             // Original
-            await generateOrderPage(doc, orders[i], logoBuffer, i === 0);
+            await generateOrderPage(doc, orders[i], logoBuffer, i === 0, customer);
             // Copy (immediately after)
-            await generateOrderPage(doc, orders[i], logoBuffer, false);
+            await generateOrderPage(doc, orders[i], logoBuffer, false, customer);
         }
 
         doc.end();

@@ -1591,9 +1591,9 @@ exports.updateSalesOrderInSAP = async (docNum, orderData) => {
 
     console.log(`Finding SAP order with DocNum ${docNum}...`);
 
-    // ✅ STEP 1: Get the DocEntry from DocNum
+    // STEP 1: Get current order from SAP with all its lines
     const searchResponse = await axios.get(
-      `${SAP_CONFIG.serviceLayerUrl}/Orders?$filter=DocNum eq ${docNum}&$select=DocEntry,DocNum,CardCode`,
+      `${SAP_CONFIG.serviceLayerUrl}/Orders?$filter=DocNum eq ${docNum}`,
       {
         headers: {
           "Content-Type": "application/json",
@@ -1606,18 +1606,20 @@ exports.updateSalesOrderInSAP = async (docNum, orderData) => {
       throw new Error(`Order with DocNum ${docNum} not found in SAP`);
     }
 
-    const sapOrder = searchResponse.data.value[0];
-    const docEntry = sapOrder.DocEntry;
+    const currentSAPOrder = searchResponse.data.value[0];
+    const docEntry = currentSAPOrder.DocEntry;
+    const currentSAPLines = currentSAPOrder.DocumentLines || [];
 
-    console.log(`Found SAP order: DocEntry=${docEntry}, DocNum=${docNum}, CardCode=${sapOrder.CardCode}`);
+    console.log(`Found SAP order: DocEntry=${docEntry}, DocNum=${docNum}`);
+    console.log(`Current SAP order has ${currentSAPLines.length} lines`);
+    console.log(`New order data has ${orderData.DocumentLines?.length || 0} lines`);
 
-    // ✅ STEP 2: Build update data with ONLY the new lines
-    // SAP B1 will replace all existing lines with these new ones
+    // STEP 2: Build update data - only DocumentLines array
     const updateData = {
       DocumentLines: []
     };
 
-    // Add Comments and U_Notes if they exist
+    // Add Comments and U_Notes if provided
     if (orderData.Comments !== undefined) {
       updateData.Comments = orderData.Comments || "";
     }
@@ -1626,19 +1628,50 @@ exports.updateSalesOrderInSAP = async (docNum, orderData) => {
       updateData.U_Notes = orderData.U_Notes || "";
     }
 
-    // ✅ CRITICAL FIX: Just send the new lines with sequential LineNum starting from 0
-    // SAP will replace ALL existing lines with these
+    // ✅ CRITICAL: Build the DocumentLines array
+    // We need to match new lines to existing SAP LineNum values
     if (orderData.DocumentLines && orderData.DocumentLines.length > 0) {
-      updateData.DocumentLines = orderData.DocumentLines.map((line, index) => ({
-        LineNum: index,  // Sequential numbering: 0, 1, 2, 3...
-        ItemCode: line.ItemCode,
-        ItemDescription: line.ItemDescription || "",
-        Quantity: Number(line.Quantity || 0),
-        UnitPrice: Number(line.UnitPrice || 0),
-      }));
+      
+      // Create a map of ItemCode to SAP LineNum from current order
+      const sapLineNumMap = {};
+      currentSAPLines.forEach(sapLine => {
+        if (!sapLineNumMap[sapLine.ItemCode]) {
+          sapLineNumMap[sapLine.ItemCode] = [];
+        }
+        sapLineNumMap[sapLine.ItemCode].push(sapLine.LineNum);
+      });
+
+      // Build new DocumentLines array
+      orderData.DocumentLines.forEach((line, index) => {
+        const newLine = {
+          ItemCode: line.ItemCode,
+          ItemDescription: line.ItemDescription || "",
+          Quantity: Number(line.Quantity || 0),
+          UnitPrice: Number(line.UnitPrice || 0),
+        };
+
+        // Try to preserve LineNum if this item existed before
+        if (sapLineNumMap[line.ItemCode] && sapLineNumMap[line.ItemCode].length > 0) {
+          // Use the first available LineNum for this ItemCode and remove it from the map
+          newLine.LineNum = sapLineNumMap[line.ItemCode].shift();
+          console.log(`Line ${index}: Reusing existing LineNum ${newLine.LineNum} for ${line.ItemCode}`);
+        } else {
+          // This is a new item, use sequential numbering
+          newLine.LineNum = index;
+          console.log(`Line ${index}: New item ${line.ItemCode}, assigning LineNum ${index}`);
+        }
+
+        updateData.DocumentLines.push(newLine);
+      });
+
+      console.log(`Built DocumentLines array with ${updateData.DocumentLines.length} lines`);
+      
+      if (orderData.DocumentLines.length < currentSAPLines.length) {
+        console.log(`⚠️ Reducing from ${currentSAPLines.length} to ${orderData.DocumentLines.length} lines - omitted lines will be deleted`);
+      }
     }
 
-    console.log(`Updating sales order DocEntry ${docEntry} in SAP B1...`);
+    console.log(`Updating sales order DocEntry ${docEntry} in SAP B1 with PATCH...`);
     console.log("Update data being sent:", JSON.stringify(updateData, null, 2));
 
     const response = await axios.patch(
@@ -1652,11 +1685,9 @@ exports.updateSalesOrderInSAP = async (docNum, orderData) => {
       }
     );
 
-    console.log("Sales order updated successfully in SAP B1");
+    console.log("✅ Sales order updated successfully in SAP B1");
 
-    // ✅ STEP 3: Fetch updated order using DocNum
-    console.log(`Fetching updated order with DocNum ${docNum}...`);
-
+    // STEP 3: Fetch and return updated order
     const updatedOrderResponse = await axios.get(
       `${SAP_CONFIG.serviceLayerUrl}/Orders?$filter=DocNum eq ${docNum}`,
       {
@@ -1668,6 +1699,10 @@ exports.updateSalesOrderInSAP = async (docNum, orderData) => {
     );
 
     const updatedOrder = updatedOrderResponse.data.value?.[0] || null;
+    
+    if (updatedOrder) {
+      console.log(`✅ Verified: Updated order now has ${updatedOrder.DocumentLines?.length || 0} lines`);
+    }
 
     return updatedOrder;
   } catch (error) {
