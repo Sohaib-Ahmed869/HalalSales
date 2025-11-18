@@ -202,11 +202,19 @@ const generateInvoicePage = async (doc, invoice, logoBuffer, isFirstInvoice = fa
         doc.fontSize(8).font("Helvetica").fillColor("#666666");
         doc.text("Addresse de facturation", margin, startY + 15, { continued: false });
 
-        doc.fontSize(9).font("Helvetica").fillColor("#000000");
-        doc.text("2 avenue emilie zola", margin, startY + 30, { continued: false });
-        doc.text("75015 PARIS", margin, startY + 42, { continued: false });
-        doc.text("FRANCE", margin, startY + 54, { continued: false });
+        const cleanAddress = sanitizeText(invoice.Address);
+        const addressLines = cleanAddress
+            .split('\n')
+            .map(line => line.trim())
+            .filter(line => line.length > 0)
+            .slice(0, 3);
 
+        let yOffset = startY + 30;
+        doc.font("Helvetica").fontSize(9).fillColor("#000000");
+        addressLines.forEach(line => {
+            doc.text(line.substring(0, 50), margin, yOffset, { continued: false });
+            yOffset += 12;
+        });
         // RIGHT COLUMN - Delivery Address with customer name on top
         const deliveryX = pageWidth / 2 + 20;
 
