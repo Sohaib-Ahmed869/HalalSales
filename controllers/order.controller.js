@@ -716,6 +716,16 @@ exports.createOrder = async (req, res) => {
 
     console.log("Request body PriceList:", req.body.PriceList);
 
+    console.log("Delivery Date:", req.body.StartDeliveryDate);
+
+    if (!req.body.StartDeliveryDate) {
+      console.log("StartDeliveryDate not provided, setting to today's date");
+      return res.status(400).json({
+        success: false,
+        message: "Delivery Date (StartDeliveryDate) is required",
+      });
+    }
+
     const salesAgentId = req.user._id;
 
     // Validate that at least one document line exists
@@ -827,7 +837,7 @@ exports.createOrder = async (req, res) => {
       CreationDate: today,
       StartDeliveryDate: req.body.StartDeliveryDate || today,
       DocDate: req.body.DocDate || today,
-      DocDueDate: req.body.DocDueDate || today,
+      DocDueDate: req.body.StartDeliveryDate || today,
       UpdateDate: today,
       SyncedWithSAP: false,
       LocalStatus: "Created",
@@ -2321,7 +2331,7 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
           changeDetails.push(`VAT changed: ${localVat} → ${sapVat}`);
         }
 
-        if(sapOrder.Comments !== localOrder.Comments) {
+        if (sapOrder.Comments !== localOrder.Comments) {
           hasChanges = true;
           changeDetails.push(`Comments changed`);
         }
@@ -2398,7 +2408,7 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
                 hasChanges = true;
                 changeDetails.push(`Line ${sapLine.LineNum || i} (${sapLine.ItemCode}): Warehouse ${localLine.WarehouseCode} → ${sapLine.WarehouseCode}`);
               }
-              
+
             }
           }
         }
@@ -2408,7 +2418,7 @@ exports.syncOrderStatusesFromSAP = async (req, res) => {
           console.log(`   Changes detected:`);
           changeDetails.forEach(detail => console.log(`   - ${detail}`));
 
-          if(localOrder.DocNum === 74039) {
+          if (localOrder.DocNum === 74039) {
             console.log("Comments in SAP Order:", sapOrder.Comments);
           }
           // Update the order with SAP data
