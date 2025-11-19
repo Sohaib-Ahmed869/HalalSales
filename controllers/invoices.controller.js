@@ -873,6 +873,142 @@ exports.updateInvoiceTotalsForDate = async (req, res) => {
     });
   }
 };
+
+// Preview invoices before creation with customer emails
+exports.previewInvoicesFromDeliveryNotes = async (req, res) => {
+  try {
+    const { deliveryNoteDocNums } = req.body;
+
+    if (!deliveryNoteDocNums || !Array.isArray(deliveryNoteDocNums) || deliveryNoteDocNums.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide delivery note DocNums array",
+      });
+    }
+
+    const previewData = [];
+
+    for (const docNum of deliveryNoteDocNums) {
+      const deliveryNote = await DeliveryNote.findOne({ DocNum: docNum });
+
+      if (!deliveryNote) {
+        previewData.push({
+          docNum,
+          error: "Delivery note not found",
+          canCreate: false
+        });
+        continue;
+      }
+
+      // Check if synced (for system-created DNs)
+      let canCreate = true;
+      let error = null;
+
+      if (deliveryNote.salesAgent && (!deliveryNote.SyncedWithSAP || !deliveryNote.SAPDocEntry)) {
+        canCreate = false;
+        error = "Delivery note not synced with SAP";
+      }
+
+      // Check if invoice already exists
+      const sapBaseEntry = deliveryNote.salesAgent
+        ? deliveryNote.SAPDocEntry
+        : (deliveryNote.SAPDocEntry || deliveryNote.DocEntry);
+
+      const existingInvoice = await Invoice.findOne({
+        $or: [
+          { BaseEntry: sapBaseEntry },
+          { OriginatingDeliveryNote: deliveryNote.DocNum }
+        ]
+      });
+
+      if (existingInvoice) {
+        canCreate = false;
+        error = "Invoice already exists";
+      }
+
+      // Get customer email
+      let customerEmail = "";
+      try {
+        const customer = await Customer.findOne({ CardCode: deliveryNote.CardCode }).lean();
+        if (customer && customer.Email) {
+          customerEmail = customer.Email;
+        }
+      } catch (err) {
+        console.error(`Error fetching customer email for ${deliveryNote.CardCode}:`, err);
+      }
+
+      // Calculate totals after returns
+      let netTotal = deliveryNote.DocTotal;
+      let lineCount = deliveryNote.DocumentLines?.length || 0;
+
+      if (deliveryNote.hasReturns && deliveryNote.returnDocEntries && deliveryNote.returnDocEntries.length > 0) {
+        const Return = require("../models/Return");
+        const returns = await Return.find({
+          DocEntry: { $in: deliveryNote.returnDocEntries }
+        });
+
+        const returnTotal = returns.reduce((sum, ret) => sum + (ret.DocTotal || 0), 0);
+        netTotal -= returnTotal;
+
+        // Count remaining lines after returns
+        let returnedQuantities = {};
+        returns.forEach(returnDoc => {
+          if (returnDoc.DocumentLines && Array.isArray(returnDoc.DocumentLines)) {
+            returnDoc.DocumentLines.forEach(line => {
+              returnedQuantities[line.ItemCode] = (returnedQuantities[line.ItemCode] || 0) + line.Quantity;
+            });
+          }
+        });
+
+        lineCount = deliveryNote.DocumentLines.filter(line => {
+          const deliveredQty = line.Quantity || 0;
+          const returnedQty = returnedQuantities[line.ItemCode] || 0;
+          return deliveredQty > returnedQty;
+        }).length;
+      }
+
+      previewData.push({
+        _id: deliveryNote._id,
+        docNum: deliveryNote.DocNum,
+        cardCode: deliveryNote.CardCode,
+        cardName: deliveryNote.CardName,
+        docDate: deliveryNote.DocDate,
+        originalTotal: deliveryNote.DocTotal,
+        netTotal: netTotal,
+        docCurrency: deliveryNote.DocCurrency || "EUR",
+        hasReturns: deliveryNote.hasReturns || false,
+        lineCount: lineCount,
+        customerEmail: customerEmail,
+        hasEmail: !!customerEmail,
+        canCreate: canCreate,
+        error: error,
+        synced: deliveryNote.SyncedWithSAP,
+        sapDocEntry: deliveryNote.SAPDocEntry
+      });
+    }
+
+    res.json({
+      success: true,
+      data: previewData,
+      summary: {
+        total: previewData.length,
+        canCreate: previewData.filter(dn => dn.canCreate).length,
+        withEmail: previewData.filter(dn => dn.hasEmail).length,
+        withoutEmail: previewData.filter(dn => !dn.hasEmail).length,
+        blocked: previewData.filter(dn => !dn.canCreate).length
+      }
+    });
+
+  } catch (error) {
+    console.error("Error previewing invoices:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error previewing invoices",
+      error: error.message
+    });
+  }
+};
+
 // controllers/invoiceController.js
 exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
   try {
@@ -1186,21 +1322,20 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
             const Customer = require("../models/Customer");
             const customer = await Customer.findOne({ CardCode: deliveryNote.CardCode });
 
-            if (customer && customer.Email) {
+            const recipientEmail = req.body.emailOverrides?.[docNum] || customer?.Email;
+
+
+            if (recipientEmail) {
               console.log(`📧 Sending invoice email to ${customer.Email}...`);
 
               const { sendInvoiceEmailToCustomer } = require('./invoicePdfController');
               const emailResult = await sendInvoiceEmailToCustomer(invoice._id, {
-                recipientEmail: customer.Email,
+                recipientEmail: recipientEmail,
                 subject: `Facture #${sapResponse.DocNum} - ${deliveryNote.CardName}`,
                 message: `Bonjour,
 
 Veuillez trouver ci-joint votre facture #${sapResponse.DocNum}.
 
-Montant total: ${new Intl.NumberFormat("fr-FR", {
-                  style: "currency",
-                  currency: invoice.DocCurrency || "EUR",
-                }).format(invoiceTotal)}
 Date: ${new Date(invoice.DocDate).toLocaleDateString("fr-FR")}
 Date d'échéance: ${new Date(invoice.DocDueDate).toLocaleDateString("fr-FR")}
 

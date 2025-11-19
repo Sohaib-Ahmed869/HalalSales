@@ -6,6 +6,9 @@ const { protect, authorize } = require("../middleware/auth");
 
 const multer = require("multer");
 const upload = multer({ storage: multer.memoryStorage() });
+
+router.post("/preview-bulk-create", invoiceController.previewInvoicesFromDeliveryNotes);
+
 router.post("/fix-duplicate-docentry", invoiceSyncController.fixDuplicateDocEntries);
 
 router.post('/update-totals-for-date', invoiceController.updateInvoiceTotalsForDate);

@@ -307,7 +307,7 @@ exports.createDeliveryNoteFromOrder = async (req, res) => {
             U_Notes: salesOrder.Comments || "",
         });
 
-        await deliveryNote.save();
+        
 
         console.log(`✅ Created DN ${newDocNum} with BaseEntry ${sapBaseEntry} (SAP-imported: ${isImportedFromSAP})`);
 
