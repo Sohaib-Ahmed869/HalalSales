@@ -6,7 +6,7 @@ const morgan = require("morgan");
 const path = require("path");
 const fs = require("fs");
 require("dotenv").config();
- 
+
 // Import routes
 const authRoutes = require("./routes/auth.routes");
 const customerRoutes = require("./routes/customer.routes");
@@ -54,6 +54,10 @@ const creditNoteRoutes = require('./routes/creditNoteRoutes');
 const superExportRoutes = require('./routes/Sales.export.routes');
 const emailLogRoutes = require('./routes/emailLogRoutes');
 const parserPaymentsRoutes = require('./routes/reconciliationModule/parserPayments.routes');
+const pdaRoutes = require('./routes/pdaRoutes');
+const mapRoutes = require("./routes/map.routes");
+const aiSummaryRoutes = require("./routes/aiSummary.routes");
+const areaAnalysisRoutes = require("./routes/areaAnalysis.routes");
 //const vendorEmailRoutes = require('./routes/vendorEmailRoutes');
 const config = require("./services/config");
 const desktimeJob = require("./jobs/desktimeJob");
@@ -204,6 +208,10 @@ app.use('/api/email-logs', emailLogRoutes);
 app.use('/api/sales-export', superExportRoutes);
 app.use("/api/financial-statements", require('./routes/financialStatements.routes'));
 app.use("/api/reconciliation/parser-payments", parserPaymentsRoutes);
+app.use('/api/pda', pdaRoutes);
+app.use("/api/map", mapRoutes);
+app.use("/api/ai-summary", aiSummaryRoutes);
+app.use("/api/area-analysis", areaAnalysisRoutes);
 // Health check route
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });
@@ -261,4 +269,3 @@ process.on("unhandledRejection", (err) => {
     process.exit(1);
   }
 });
- 

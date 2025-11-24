@@ -126,6 +126,15 @@ const UserSchema = new Schema({
     type: Date,
     sparse: true,
   },
+  assignedPostalCodes: [{
+    type: String
+  }],
+  lastPostalCodeAssignment: {
+    type: Date
+  },
+  lastAutoAssignment: {
+    type: Date
+  },
   // Reference to the user who created this user (admin or sales manager)
   createdBy: {
     type: Schema.Types.ObjectId,

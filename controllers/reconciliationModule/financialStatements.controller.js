@@ -27,8 +27,12 @@ exports.getFlattenedPayments = async (req, res) => {
             maxAmount,
         } = req.query;
 
-        const filter = {};
+        const filter = {
+            amount: { $gt: 0 }, // ✅ Only show positive payments
+            remainingAmount: { $gt: 0 } // ✅ Only show payments with remaining balance
+        };
 
+        // ... rest of existing filter logic stays the same
         if (cardCode) {
             filter.$or = [
                 { cardCode: cardCode },
@@ -56,7 +60,7 @@ exports.getFlattenedPayments = async (req, res) => {
         }
 
         if (minAmount || maxAmount) {
-            filter.amount = {};
+            filter.amount = filter.amount || {};
             if (minAmount) filter.amount.$gte = parseFloat(minAmount);
             if (maxAmount) filter.amount.$lte = parseFloat(maxAmount);
         }
@@ -257,7 +261,7 @@ exports.allocatePaymentToInvoice = async (req, res) => {
             });
         }
 
-        // Check if invoice is open (unpaid)
+        // Check if invoice is open
         if (!["bost_Open", "O"].includes(invoice.DocumentStatus)) {
             return res.status(400).json({
                 success: false,
@@ -265,8 +269,7 @@ exports.allocatePaymentToInvoice = async (req, res) => {
             });
         }
 
-  
-        console.log(`Allocating ${amountToAllocate} from payment ${paymentId} to invoice ${invoiceDocNum}`);   
+        console.log(`Allocating ${amountToAllocate} from payment ${paymentId} to invoice ${invoiceDocNum}`);
 
         // Check if payment has enough remaining amount
         if (payment.remainingAmount < amountToAllocate) {
@@ -276,7 +279,7 @@ exports.allocatePaymentToInvoice = async (req, res) => {
             });
         }
 
-        // Calculate invoice remaining balance properly
+        // Calculate invoice remaining balance
         const totalPaid = invoice.PaidToDate || 0;
         const totalAllocated = (invoice.allocatedPayments || []).reduce((sum, alloc) => sum + alloc.amountAllocated, 0);
         const invoiceRemaining = invoice.DocTotal - totalPaid - totalAllocated;
@@ -309,10 +312,13 @@ exports.allocatePaymentToInvoice = async (req, res) => {
 
         invoice.allocatedPayments.push({
             flattenedPaymentId: payment._id,
+            creditNoteId: null,
+            allocationType: 'payment',
             amountAllocated: amountToAllocate,
             allocationDate: new Date(),
             allocatedBy: req.user?._id,
             source: payment.source,
+            notes: notes,
         });
 
         // Update invoice payment tracking
@@ -325,10 +331,18 @@ exports.allocatePaymentToInvoice = async (req, res) => {
             };
         }
 
+        // Update breakdown
+        if (!invoice.paymentBreakdown) {
+            invoice.paymentBreakdown = {
+                actualPayments: 0,
+                creditNotes: 0,
+                outstandingBalance: 0
+            };
+        }
+
+        invoice.paymentBreakdown.actualPayments += amountToAllocate;
         invoice.paymentTracking.totalPaidAmount += amountToAllocate;
-        invoice.paymentTracking.remainingBalance = invoice.paymentTracking.totalInvoiceAmount -
-            invoice.paymentTracking.totalPaidAmount -
-            invoice.paymentTracking.totalCreditAmount;
+        invoice.paymentTracking.remainingBalance -= amountToAllocate;
 
         invoice.paymentTracking.lastPaymentDate = new Date();
         invoice.paymentTracking.lastPaymentAmount = amountToAllocate;
@@ -336,7 +350,7 @@ exports.allocatePaymentToInvoice = async (req, res) => {
         // Update payment status
         if (invoice.paymentTracking.remainingBalance <= 0.01) {
             invoice.paymentStatus = "Fully Paid";
-            invoice.DocumentStatus = "bost_Closed"; 
+            invoice.DocumentStatus = "bost_Close";
         } else if (invoice.paymentTracking.totalPaidAmount > 0) {
             invoice.paymentStatus = "Partially Paid";
         }
@@ -360,6 +374,7 @@ exports.allocatePaymentToInvoice = async (req, res) => {
                     DocNum: invoice.DocNum,
                     paymentStatus: invoice.paymentStatus,
                     remainingBalance: invoice.paymentTracking.remainingBalance,
+                    paymentBreakdown: invoice.paymentBreakdown
                 },
             },
         });
@@ -369,6 +384,451 @@ exports.allocatePaymentToInvoice = async (req, res) => {
         return res.status(500).json({
             success: false,
             message: "Failed to allocate payment",
+            error: error.message,
+        });
+    }
+};
+
+/**
+ * Allocate customer's outstanding balance to invoice
+ */
+exports.allocateOutstandingBalanceToInvoice = async (req, res) => {
+    try {
+        const { invoiceDocNum, amountToAllocate, notes } = req.body;
+
+        // Validate input
+        if (!invoiceDocNum || !amountToAllocate || amountToAllocate <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Invoice DocNum and valid amount are required",
+            });
+        }
+
+        console.log(`Allocating ${amountToAllocate} from outstanding balance to invoice ${invoiceDocNum}`);
+
+        // Find invoice
+        const invoice = await Invoice.findOne({ DocNum: invoiceDocNum });
+        if (!invoice) {
+            return res.status(404).json({
+                success: false,
+                message: "Invoice not found",
+            });
+        }
+
+        // Check if invoice is open
+        if (!["bost_Open", "O"].includes(invoice.DocumentStatus)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invoice is already closed/paid",
+            });
+        }
+
+        // Find customer
+        const customer = await Customer.findOne({ CardCode: invoice.CardCode });
+        if (!customer) {
+            return res.status(404).json({
+                success: false,
+                message: "Customer not found",
+            });
+        }
+
+        // Calculate available outstanding balance (SAP balance - what we've used locally)
+        // Only NEGATIVE balance means customer has prepaid (credit available)
+        const sapBalance = customer.outstandingBalance || 0;
+        const localUsed = customer.outstandingBalanceUsed || 0;
+
+        // ✅ FIX: Only negative balance is available to allocate
+        // Negative balance = customer paid in advance
+        if (sapBalance >= 0) {
+            return res.status(400).json({
+                success: false,
+                message: `Customer has no prepaid balance. Outstanding balance must be negative to allocate. Current balance: €${sapBalance.toFixed(2)}`,
+                data: {
+                    sapBalance,
+                    localUsed,
+                    availableBalance: 0
+                }
+            });
+        }
+
+        // Convert to positive for allocation (negative balance = available credit)
+        const availableBalance = Math.abs(sapBalance);
+
+        console.log(`Customer ${customer.CardCode} - SAP Balance: ${sapBalance}, Local Used: ${localUsed}, Available: ${availableBalance}`);
+
+        if (availableBalance <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: `No prepaid balance available. Customer has already used all prepaid credit.`,
+                data: {
+                    sapBalance,
+                    localUsed,
+                    availableBalance: 0
+                }
+            });
+        }
+
+        if (availableBalance < amountToAllocate) {
+            return res.status(400).json({
+                success: false,
+                message: `Insufficient prepaid balance. Available: €${availableBalance.toFixed(2)}, Requested: €${amountToAllocate.toFixed(2)}`,
+                data: {
+                    sapBalance,
+                    localUsed,
+                    availableBalance
+                }
+            });
+        }
+
+        // Calculate invoice remaining
+        const totalPaid = invoice.PaidToDate || 0;
+        const totalAllocated = (invoice.allocatedPayments || []).reduce((sum, alloc) => sum + alloc.amountAllocated, 0);
+        const invoiceRemaining = invoice.DocTotal - totalPaid - totalAllocated;
+
+        if (amountToAllocate > invoiceRemaining + 1) { // Allow 1 euro tolerance
+            return res.status(400).json({
+                success: false,
+                message: `Cannot allocate more than invoice balance. Invoice needs: €${invoiceRemaining.toFixed(2)}, Requested: €${amountToAllocate.toFixed(2)}`,
+            });
+        }
+
+        // Add allocation to invoice
+        if (!invoice.allocatedPayments) {
+            invoice.allocatedPayments = [];
+        }
+
+        invoice.allocatedPayments.push({
+            flattenedPaymentId: null,
+            creditNoteId: null,
+            allocationType: 'outstanding_balance',
+            amountAllocated: amountToAllocate,
+            allocationDate: new Date(),
+            allocatedBy: req.user?._id,
+            notes: notes || `Outstanding balance applied by ${req.user?.firstName || 'system'}`,
+        });
+
+        // Update payment tracking
+        if (!invoice.paymentTracking) {
+            invoice.paymentTracking = {
+                totalInvoiceAmount: invoice.DocTotal,
+                totalPaidAmount: 0,
+                totalCreditAmount: 0,
+                remainingBalance: invoice.DocTotal,
+            };
+        }
+
+        // Update breakdown
+        if (!invoice.paymentBreakdown) {
+            invoice.paymentBreakdown = {
+                actualPayments: 0,
+                creditNotes: 0,
+                outstandingBalance: 0
+            };
+        }
+
+        invoice.paymentBreakdown.outstandingBalance += amountToAllocate;
+        invoice.paymentTracking.totalPaidAmount += amountToAllocate;
+        invoice.paymentTracking.remainingBalance -= amountToAllocate;
+
+        // Update payment status
+        if (invoice.paymentTracking.remainingBalance <= 0.01) {
+            invoice.paymentStatus = "Fully Paid";
+            invoice.DocumentStatus = "bost_Close";
+        } else {
+            invoice.paymentStatus = "Partially Paid";
+        }
+
+        await invoice.save();
+
+        // Update customer's LOCAL usage (NOT the SAP balance!)
+        customer.outstandingBalanceUsed = localUsed + amountToAllocate;
+        customer.availableOutstandingBalance = sapBalance - customer.outstandingBalanceUsed;
+        await customer.save();
+
+        console.log(`✅ Allocated ${amountToAllocate} from outstanding balance to invoice ${invoiceDocNum}`);
+
+        return res.status(200).json({
+            success: true,
+            message: "Outstanding balance allocated successfully",
+            data: {
+                invoice: {
+                    DocNum: invoice.DocNum,
+                    paymentStatus: invoice.paymentStatus,
+                    remainingBalance: invoice.paymentTracking.remainingBalance,
+                    paymentBreakdown: invoice.paymentBreakdown
+                },
+                customer: {
+                    CardCode: customer.CardCode,
+                    sapOutstandingBalance: customer.outstandingBalance,
+                    localUsed: customer.outstandingBalanceUsed,
+                    availableBalance: customer.availableOutstandingBalance
+                }
+            },
+        });
+
+    } catch (error) {
+        console.error("Error allocating outstanding balance:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to allocate outstanding balance",
+            error: error.message,
+        });
+    }
+};
+
+/**
+ * Allocate credit note to invoice
+ */
+exports.allocateCreditNoteToInvoice = async (req, res) => {
+    try {
+        const { creditNoteDocNum, invoiceDocNum, amountToAllocate, notes } = req.body;
+
+        if (!creditNoteDocNum || !invoiceDocNum || !amountToAllocate || amountToAllocate <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Credit note DocNum, invoice DocNum, and valid amount are required",
+            });
+        }
+
+        console.log(`Allocating ${amountToAllocate} from credit note ${creditNoteDocNum} to invoice ${invoiceDocNum}`);
+
+        // Find credit note (using existing CreditNotes model)
+        const CreditNotes = require("../../models/CreditNotes");
+        const creditNote = await CreditNotes.findOne({ DocNum: creditNoteDocNum });
+
+        if (!creditNote) {
+            return res.status(404).json({
+                success: false,
+                message: "Credit note not found",
+            });
+        }
+
+        // Calculate credit note remaining amount
+        const creditNoteUsed = (creditNote.allocatedToInvoices || []).reduce((sum, alloc) => sum + alloc.amountAllocated, 0);
+        const creditNoteRemaining = (creditNote.DocTotal || 0) - creditNoteUsed;
+
+        console.log(`Credit note ${creditNoteDocNum} - Total: ${creditNote.DocTotal}, Used: ${creditNoteUsed}, Remaining: ${creditNoteRemaining}`);
+
+        if (creditNoteRemaining < amountToAllocate) {
+            return res.status(400).json({
+                success: false,
+                message: `Insufficient credit note balance. Available: €${creditNoteRemaining.toFixed(2)}, Requested: €${amountToAllocate.toFixed(2)}`,
+                data: {
+                    creditNoteTotal: creditNote.DocTotal,
+                    creditNoteUsed,
+                    creditNoteRemaining
+                }
+            });
+        }
+
+        // Find invoice
+        const invoice = await Invoice.findOne({ DocNum: invoiceDocNum });
+        if (!invoice) {
+            return res.status(404).json({
+                success: false,
+                message: "Invoice not found",
+            });
+        }
+
+        // Check if invoice is open
+        if (!["bost_Open", "O"].includes(invoice.DocumentStatus)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invoice is already closed/paid",
+            });
+        }
+
+        // Verify same customer
+        if (invoice.CardCode !== creditNote.CardCode) {
+            return res.status(400).json({
+                success: false,
+                message: "Credit note and invoice must belong to same customer",
+                data: {
+                    invoiceCustomer: invoice.CardCode,
+                    creditNoteCustomer: creditNote.CardCode
+                }
+            });
+        }
+
+        // Calculate invoice remaining
+        const totalPaid = invoice.PaidToDate || 0;
+        const totalAllocated = (invoice.allocatedPayments || []).reduce((sum, alloc) => sum + alloc.amountAllocated, 0);
+        const invoiceRemaining = invoice.DocTotal - totalPaid - totalAllocated;
+
+        if (amountToAllocate > invoiceRemaining + 1) { // Allow 1 euro tolerance
+            return res.status(400).json({
+                success: false,
+                message: `Cannot allocate more than invoice balance. Invoice needs: €${invoiceRemaining.toFixed(2)}, Requested: €${amountToAllocate.toFixed(2)}`,
+            });
+        }
+
+        // Add allocation to invoice
+        if (!invoice.allocatedPayments) {
+            invoice.allocatedPayments = [];
+        }
+
+        invoice.allocatedPayments.push({
+            flattenedPaymentId: null,
+            creditNoteId: creditNote._id,
+            allocationType: 'credit_note',
+            amountAllocated: amountToAllocate,
+            allocationDate: new Date(),
+            allocatedBy: req.user?._id,
+            source: 'credit_note',
+            notes: notes || `Credit note #${creditNoteDocNum} applied`,
+        });
+
+        // Update payment tracking
+        if (!invoice.paymentTracking) {
+            invoice.paymentTracking = {
+                totalInvoiceAmount: invoice.DocTotal,
+                totalPaidAmount: 0,
+                totalCreditAmount: 0,
+                remainingBalance: invoice.DocTotal,
+            };
+        }
+
+        // Update breakdown
+        if (!invoice.paymentBreakdown) {
+            invoice.paymentBreakdown = {
+                actualPayments: 0,
+                creditNotes: 0,
+                outstandingBalance: 0
+            };
+        }
+
+        invoice.paymentBreakdown.creditNotes += amountToAllocate;
+        invoice.paymentTracking.totalCreditAmount += amountToAllocate;
+        invoice.paymentTracking.remainingBalance -= amountToAllocate;
+
+        // Update payment status
+        if (invoice.paymentTracking.remainingBalance <= 0.01) {
+            invoice.paymentStatus = "Fully Paid";
+            invoice.DocumentStatus = "bost_Close";
+        } else {
+            invoice.paymentStatus = "Partially Paid";
+        }
+
+        await invoice.save();
+
+        // Update credit note with allocation
+        if (!creditNote.allocatedToInvoices) {
+            creditNote.allocatedToInvoices = [];
+        }
+
+        creditNote.allocatedToInvoices.push({
+            invoiceDocNum: invoice.DocNum,
+            invoiceDocEntry: invoice.DocEntry,
+            amountAllocated: amountToAllocate,
+            allocationDate: new Date(),
+        });
+
+        creditNote.remainingAmount = creditNoteRemaining - amountToAllocate;
+
+        if (creditNote.remainingAmount <= 0.01) {
+            creditNote.fullyAllocated = true;
+        }
+
+        await creditNote.save();
+
+        console.log(`✅ Allocated ${amountToAllocate} from credit note ${creditNoteDocNum} to invoice ${invoiceDocNum}`);
+
+        return res.status(200).json({
+            success: true,
+            message: "Credit note allocated successfully",
+            data: {
+                invoice: {
+                    DocNum: invoice.DocNum,
+                    paymentStatus: invoice.paymentStatus,
+                    remainingBalance: invoice.paymentTracking.remainingBalance,
+                    paymentBreakdown: invoice.paymentBreakdown
+                },
+                creditNote: {
+                    DocNum: creditNote.DocNum,
+                    remainingAmount: creditNote.remainingAmount,
+                    fullyAllocated: creditNote.fullyAllocated
+                }
+            },
+        });
+
+    } catch (error) {
+        console.error("Error allocating credit note:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to allocate credit note",
+            error: error.message,
+        });
+    }
+};
+
+/**
+ * Get available credit notes for customer
+ */
+exports.getAvailableCreditNotesByCustomer = async (req, res) => {
+    try {
+        const { cardCode } = req.params;
+        const {
+            page = 1,
+            limit = 50,
+        } = req.query;
+
+        const CreditNotes = require("../../models/CreditNotes");
+
+        // Get credit notes that are not fully allocated
+        const filter = {
+            CardCode: cardCode,
+            fullyAllocated: { $ne: true },
+            Cancelled: { $ne: "Y" },
+            DocTotal: { $gt: 0 },
+        };
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        const creditNotes = await CreditNotes.find(filter)
+            .sort({ DocDate: -1 })
+            .skip(skip)
+            .limit(parseInt(limit))
+            .lean();
+
+        // Calculate remaining amount for each credit note
+        const creditNotesWithRemaining = creditNotes.map(cn => {
+            const used = (cn.allocatedToInvoices || []).reduce((sum, alloc) => sum + alloc.amountAllocated, 0);
+            return {
+                ...cn,
+                usedAmount: used,
+                remainingAmount: (cn.DocTotal || 0) - used,
+            };
+        });
+
+        // Filter out fully allocated ones (in case remainingAmount field wasn't updated)
+        const availableCreditNotes = creditNotesWithRemaining.filter(cn => cn.remainingAmount > 0.01);
+
+        const total = await CreditNotes.countDocuments(filter);
+
+        // Calculate summary
+        const summary = {
+            totalCreditNotes: availableCreditNotes.length,
+            totalAvailableAmount: availableCreditNotes.reduce((sum, cn) => sum + cn.remainingAmount, 0),
+        };
+
+        return res.status(200).json({
+            success: true,
+            data: {
+                creditNotes: availableCreditNotes,
+                summary,
+                pagination: {
+                    total,
+                    page: parseInt(page),
+                    limit: parseInt(limit),
+                    pages: Math.ceil(total / parseInt(limit)),
+                },
+            },
+        });
+    } catch (error) {
+        console.error("Error fetching available credit notes:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to fetch credit notes",
             error: error.message,
         });
     }

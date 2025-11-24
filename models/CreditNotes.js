@@ -339,6 +339,44 @@ const CreditNotesSchema = new mongoose.Schema({
 
   CreationDate: Date,
   UpdateDate: Date,
+
+
+  // Allocation tracking
+  allocatedToInvoices: [{
+    invoiceDocNum: Number,
+    invoiceDocEntry: Number,
+    amountAllocated: Number,
+    allocationDate: {
+      type: Date,
+      default: Date.now
+    },
+  }],
+
+  remainingAmount: {
+    type: Number,
+    default: function () {
+      return this.DocTotal || 0;
+    }
+  },
+
+  fullyAllocated: {
+    type: Boolean,
+    default: false,
+    index: true,
+  },
+
+  // Sync tracking (if not already present)
+  SyncedWithSAP: {
+    type: Boolean,
+    default: false,
+    index: true,
+  },
+
+  LocalStatus: {
+    type: String,
+    enum: ["Created", "Synced", "SyncFailed"],
+    default: "Created",
+  },
 }, {
   timestamps: true,
   collection: 'creditnotes'
@@ -348,5 +386,7 @@ const CreditNotesSchema = new mongoose.Schema({
 CreditNotesSchema.index({ CardCode: 1, DocDate: -1 });
 CreditNotesSchema.index({ SyncedWithSAP: 1, LocalStatus: 1 });
 CreditNotesSchema.index({ BaseEntry: 1 });
+CreditNotesSchema.index({ CardCode: 1, fullyAllocated: 1 });
+CreditNotesSchema.index({ remainingAmount: 1 });
 
 module.exports = mongoose.model('CreditNotes', CreditNotesSchema);

@@ -57,4 +57,7 @@ router.get("/summary", financialStatementsController.getFinancialSummary);
 // Manual reconciliation
 router.post("/match", financialStatementsController.matchStatementToInvoice);
 
+router.post('/allocate-outstanding-balance', financialStatementsController2.allocateOutstandingBalanceToInvoice);
+router.post('/allocate-credit-note', financialStatementsController2.allocateCreditNoteToInvoice);
+router.get('/credit-notes/available/:cardCode', financialStatementsController2.getAvailableCreditNotesByCustomer);
 module.exports = router;

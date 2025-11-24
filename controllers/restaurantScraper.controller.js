@@ -673,6 +673,229 @@ const restaurantScraperController = {
         error: error.message
       });
     }
+  },
+  /**
+ * Assign postal codes to agents
+ */
+  assignPostalCodes: async (req, res) => {
+    try {
+      const { assignments } = req.body; // Array of { agentId, postalCodes: [] }
+      const assignedBy = req.user.id;
+
+      // Validate admin permission
+      if (req.user.role !== 'admin') {
+        return res.status(403).json({
+          success: false,
+          message: 'Only admins can assign postal codes'
+        });
+      }
+
+      const results = [];
+      const errors = [];
+
+      for (const assignment of assignments) {
+        try {
+          const agent = await User.findById(assignment.agentId);
+          if (!agent || !['sales_agent', 'sales_manager'].includes(agent.role)) {
+            errors.push({ agentId: assignment.agentId, error: 'Invalid agent' });
+            continue;
+          }
+
+          // Update agent's assigned postal codes
+          agent.assignedPostalCodes = assignment.postalCodes;
+          agent.lastPostalCodeAssignment = new Date();
+          await agent.save();
+
+          results.push({
+            agentId: assignment.agentId,
+            agentName: `${agent.firstName} ${agent.lastName}`,
+            postalCodes: assignment.postalCodes
+          });
+        } catch (error) {
+          errors.push({ agentId: assignment.agentId, error: error.message });
+        }
+      }
+
+      res.json({
+        success: true,
+        data: { results, errors }
+      });
+
+    } catch (error) {
+      console.error('Error assigning postal codes:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Error assigning postal codes',
+        error: error.message
+      });
+    }
+  },
+
+  /**
+   * Get postal code assignments
+   */
+  getPostalCodeAssignments: async (req, res) => {
+    try {
+      const agents = await User.find({
+        role: { $in: ['sales_agent', 'sales_manager'] },
+        deactivated: false
+      }).select('firstName lastName email assignedPostalCodes lastPostalCodeAssignment');
+
+      res.json({
+        success: true,
+        data: agents.filter(agent => agent.assignedPostalCodes && agent.assignedPostalCodes.length > 0)
+      });
+
+    } catch (error) {
+      console.error('Error fetching postal code assignments:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Error fetching postal code assignments',
+        error: error.message
+      });
+    }
+  },
+
+  /**
+   * Auto-assign restaurants to agents
+   */
+  autoAssignRestaurants: async (req, res) => {
+    try {
+      const { restaurantsPerAgent } = req.body;
+      const assignedBy = req.user.id;
+
+      if (!restaurantsPerAgent || restaurantsPerAgent < 1) {
+        return res.status(400).json({
+          success: false,
+          message: 'Valid number of restaurants per agent is required'
+        });
+      }
+
+      // Get all agents with assigned postal codes
+      const agents = await User.find({
+        role: { $in: ['sales_agent', 'sales_manager'] },
+        deactivated: false,
+        assignedPostalCodes: { $exists: true, $ne: [] }
+      });
+
+      if (agents.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'No agents with assigned postal codes found'
+        });
+      }
+
+      const assignmentResults = [];
+      const errors = [];
+
+      for (const agent of agents) {
+        try {
+          // Get already assigned restaurant IDs for this agent
+          const existingAssignments = await RestaurantAssignment.find({
+            assignedAgent: agent._id
+          }).select('restaurant');
+
+          const assignedRestaurantIds = existingAssignments.map(a => a.restaurant.toString());
+
+          // Find unassigned restaurants in agent's postal codes
+          const unassignedRestaurants = await Restaurant.find({
+            postal_code: { $in: agent.assignedPostalCodes },
+            _id: { $nin: assignedRestaurantIds }
+          })
+            .sort({ scraped_at: -1 }) // Get most recently scraped first
+            .limit(restaurantsPerAgent);
+
+          if (unassignedRestaurants.length === 0) {
+            errors.push({
+              agentId: agent._id,
+              agentName: `${agent.firstName} ${agent.lastName}`,
+              error: 'No unassigned restaurants available in assigned postal codes'
+            });
+            continue;
+          }
+
+          // Create assignments
+          const newAssignments = [];
+          for (const restaurant of unassignedRestaurants) {
+            const assignment = new RestaurantAssignment({
+              restaurant: restaurant._id,
+              assignedAgent: agent._id,
+              assignedBy,
+              priority: 'medium',
+              assignmentType: 'auto'
+            });
+            await assignment.save();
+
+            // Create task
+            const task = new Task({
+              title: `Follow up with ${restaurant.name}`,
+              description: `Contact restaurant: ${restaurant.name}\nPostal Code: ${restaurant.postal_code}\nMenu Items: ${restaurant.menu_items_count}`,
+              type: 'restaurant_follow_up',
+              assignedTo: agent._id,
+              createdBy: assignedBy,
+              priority: 'medium',
+              dueDate: new Date(Date.now() + 24 * 60 * 60 * 1000),
+              relatedRestaurant: assignment._id
+            });
+            await task.save();
+
+            // Create notification
+            const notification = new Notification({
+              recipient: agent._id,
+              sender: assignedBy,
+              type: 'restaurant_assigned',
+              title: 'New Restaurant Auto-Assigned',
+              message: `You have been automatically assigned to follow up with ${restaurant.name}`,
+              relatedTask: task._id,
+              relatedRestaurant: assignment._id
+            });
+            await notification.save();
+
+            newAssignments.push({
+              restaurantId: restaurant._id,
+              restaurantName: restaurant.name,
+              postalCode: restaurant.postal_code
+            });
+          }
+
+          // Update agent's last assignment date
+          agent.lastAutoAssignment = new Date();
+          await agent.save();
+
+          assignmentResults.push({
+            agentId: agent._id,
+            agentName: `${agent.firstName} ${agent.lastName}`,
+            assignedCount: newAssignments.length,
+            assignments: newAssignments
+          });
+
+        } catch (error) {
+          errors.push({
+            agentId: agent._id,
+            agentName: `${agent.firstName} ${agent.lastName}`,
+            error: error.message
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        data: {
+          totalAgents: agents.length,
+          totalAssigned: assignmentResults.reduce((sum, r) => sum + r.assignedCount, 0),
+          results: assignmentResults,
+          errors
+        }
+      });
+
+    } catch (error) {
+      console.error('Error auto-assigning restaurants:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Error auto-assigning restaurants',
+        error: error.message
+      });
+    }
   }
 };
 

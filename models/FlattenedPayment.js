@@ -81,6 +81,11 @@ const flattenedPaymentSchema = new mongoose.Schema(
                 ref: "User",
             },
         }],
+        allocationType: {
+            type: String,
+            enum: ['payment', 'credit_note', 'outstanding_balance'],
+            default: 'payment'
+        },
 
         // Total allocated amount
         totalAllocated: {

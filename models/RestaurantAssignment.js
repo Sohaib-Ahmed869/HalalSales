@@ -33,6 +33,11 @@ const RestaurantAssignmentSchema = new Schema({
         addedAt: { type: Date, default: Date.now },
         type: { type: String, enum: ['call', 'email', 'meeting', 'general'], default: 'general' }
     }],
+    assignmentType: {
+        type: String,
+        enum: ['manual', 'auto'],
+        default: 'manual'
+    },
     contactAttempts: { type: Number, default: 0 },
     lastContactDate: Date,
     nextFollowUpDate: Date,

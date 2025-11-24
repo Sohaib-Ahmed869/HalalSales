@@ -210,9 +210,46 @@ const CustomerSchema = new Schema({
       default: "France",
     },
   },
+  coordinates: {
+    lat: {
+      type: Number,
+      index: true,
+    },
+    lng: {
+      type: Number,
+      index: true,
+    },
+    geocodedAt: {
+      type: Date,
+    },
+    geocodeSource: {
+      type: String,
+      enum: ["nominatim", "google", "manual", "imported"],
+      default: "nominatim",
+    },
+    displayName: {
+      type: String,
+    },
+    confidence: {
+      type: Number,
+      min: 0,
+      max: 1,
+    },
+  },
   outstandingBalance: {
     type: Number,
     default: 0,
+  },
+  outstandingBalanceUsed: {
+    type: Number,
+    default: 0,
+    index: true,
+  },
+
+  availableOutstandingBalance: {
+    type: Number,
+    default: 0,
+    index: true,
   },
   SyncedWithSAP: {
     type: Boolean,
@@ -335,6 +372,26 @@ CustomerSchema.index({
   CardCode: "text",
   company: "text",
 });
+
+// Calculate available prepaid balance dynamically
+// Only NEGATIVE outstanding balance is available to allocate (prepaid)
+CustomerSchema.virtual('computedAvailableBalance').get(function () {
+  const sapBalance = this.outstandingBalance || 0;
+  const localUsed = this.outstandingBalanceUsed || 0;
+
+  // If balance is positive or zero, no prepaid credit available
+  if (sapBalance >= 0) {
+    return 0;
+  }
+
+  // Negative balance = prepaid credit (convert to positive, subtract used)
+  return Math.abs(sapBalance);
+});
+
+// Ensure virtuals are included in JSON
+CustomerSchema.set('toJSON', { virtuals: true });
+CustomerSchema.set('toObject', { virtuals: true });
+
 
 const Customer = mongoose.model("Customer", CustomerSchema);
 module.exports = Customer;

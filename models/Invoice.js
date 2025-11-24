@@ -405,16 +405,39 @@ const invoiceSchema = new mongoose.Schema(
     allocatedPayments: [{
       flattenedPaymentId: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: "FlattenedPayment",
+        ref: 'FlattenedPayment'
       },
-      amountAllocated: Number,
-      allocationDate: Date,
+      creditNoteId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'CreditNote'
+      },
+      allocationType: {
+        type: String,
+        enum: ['payment', 'credit_note', 'outstanding_balance'],
+        required: true
+      },
+      amountAllocated: {
+        type: Number,
+        required: true
+      },
+      allocationDate: {
+        type: Date,
+        default: Date.now
+      },
       allocatedBy: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: "User",
+        ref: 'User'
       },
-      source: String, // salary_sheet, bred_bank, paypal
+      source: String,
+      notes: String
     }],
+
+    // Add payment breakdown
+    paymentBreakdown: {
+      actualPayments: { type: Number, default: 0 },
+      creditNotes: { type: Number, default: 0 },
+      outstandingBalance: { type: Number, default: 0 }
+    },
 
     // SAP sync status for payments
     paymentSyncStatus: {

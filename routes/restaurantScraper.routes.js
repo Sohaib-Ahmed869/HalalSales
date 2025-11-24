@@ -73,4 +73,25 @@ router.post('/scrape', restaurantScraperController.startScraping);
  */
 router.get('/test/:postalCode', restaurantScraperController.testScraping);
 
+/**
+ * @route   POST /api/restaurant-scraper/assign-postal-codes
+ * @desc    Assign postal codes to agents
+ * @access  Private (Admin only)
+ */
+router.post('/assign-postal-codes', restaurantScraperController.assignPostalCodes);
+
+/**
+ * @route   GET /api/restaurant-scraper/postal-code-assignments
+ * @desc    Get postal code assignments
+ * @access  Private (Admin only)
+ */
+router.get('/postal-code-assignments', restaurantScraperController.getPostalCodeAssignments);
+
+/**
+ * @route   POST /api/restaurant-scraper/auto-assign
+ * @desc    Auto-assign restaurants to agents
+ * @access  Private (Admin only)
+ */
+router.post('/auto-assign', restaurantScraperController.autoAssignRestaurants);
+
 module.exports = router;
