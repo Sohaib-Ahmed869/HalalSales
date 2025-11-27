@@ -214,13 +214,35 @@ exports.getTasks = async (req, res) => {
     }
 
     // Get tasks
-    const tasks = await Task.find(query)
+    let tasks = await Task.find(query)
       .populate("assignedTo", "firstName lastName email role")
       .populate("createdBy", "firstName lastName email role")
       .populate("leadId", "fullName email company")
       .populate("relatedCustomer")
+      .populate("relatedRestaurant")
       .sort({ createdAt: 1, priority: -1 })
       .lean();
+
+    tasks = await Promise.all(
+      tasks.map(async (task) => {
+        if (task.relatedQuotation) {
+          const Quotation = require("../models/Quotation");
+          console.log("Related Quotation ID:", task.relatedQuotation);
+          const quotationDetails = await Quotation.findOne(
+            { DocEntry: task.relatedQuotation }
+          )
+          const Customer = require("../models/Customer");
+          const customerDetails = await Customer.findOne(
+            { CardCode: quotationDetails.CardCode }
+          );
+          console.log("Customer CardCode:", quotationDetails.CardCode, customerDetails);
+          task.customerDetails = customerDetails;
+        }
+        return task;
+      })
+    );
+
+
 
     return res.status(200).json({
       success: true,
@@ -947,12 +969,46 @@ exports.getMyTasks = async (req, res) => {
       }
     }
     // Get tasks
-    const tasks = await Task.find(query)
+    let tasks = await Task.find(query)
       .populate("leadId", "fullName email company")
       .populate("createdBy", "firstName lastName email role")
       .populate("relatedCustomer")
+      .populate("relatedRestaurant")
+      .populate("relatedQuotation")
       .sort({ createdAt: 1, priority: -1 })
       .lean();
+
+    // if task is restaurant related or customer related, populate those details
+    tasks = await Promise.all(
+      tasks.map(async (task) => {
+        if (task.relatedRestaurant) {
+          const Restaurant = require("../models/Restaurant");
+          const restaurantDetails = await Restaurant.findById(
+            task.relatedRestaurant.restaurant
+          ).lean();
+          task.relatedRestaurant.details = restaurantDetails;
+        }
+        return task;
+      })
+    );
+
+    //if task is quotation related, populate customer details
+    tasks = await Promise.all(
+      tasks.map(async (task) => {
+        if (task.relatedQuotation) {
+          const Quotation = require("../models/Quotation");
+          const quotationDetails = await Quotation.findById(
+            task.relatedQuotation._id
+          )
+          const Customer = require("../models/Customer");
+          const customerDetails = await Customer.find(
+            { CardCode: quotationDetails.CardCode }
+          ).lean();
+          task.relatedQuotation.customerDetails = customerDetails;
+        }
+        return task;
+      })
+    );
 
     // Get task counts by status for statistics
     const statusCounts = await Task.aggregate([

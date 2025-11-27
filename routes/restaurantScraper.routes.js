@@ -7,6 +7,13 @@ const { auth } = require('../middleware/auth');
 // Apply authentication to all routes
 router.use(auth);
 // Add these routes:
+/**
+ * @route   POST /api/restaurant-scraper/clean-postal-codes
+ * @desc    Clean malformed postal codes (remove BOM and special characters)
+ * @access  Private (Admin only)
+ */
+router.post('/clean-postal-codes', restaurantScraperController.cleanPostalCodes);
+
 
 /**
  * @route   POST /api/restaurant-scraper/assign

@@ -10,6 +10,66 @@ const SCRAPER_BASE_URL = process.env.SCRAPER_BASE_URL || 'http://localhost:3000'
 
 const restaurantScraperController = {
   /**
+ * Clean malformed postal codes
+ */
+  cleanPostalCodes: async (req, res) => {
+    try {
+      // Find all restaurants with BOM character in postal code
+      const malformedRestaurants = await Restaurant.find({
+        postal_code: { $regex: /[^\d]/ } // Contains non-digit characters
+      });
+
+      let updatedCount = 0;
+      const errors = [];
+
+      for (const restaurant of malformedRestaurants) {
+        try {
+          // Remove BOM and other non-digit characters, keep only digits
+          const cleanPostalCode = restaurant.postal_code.replace(/[^\d]/g, '');
+
+          // Validate it's a proper 5-digit French postal code
+          if (cleanPostalCode.match(/^(?:0[1-9]|[1-8][0-9]|9[0-6])[0-9]{3}$/)) {
+            restaurant.postal_code = cleanPostalCode;
+            await restaurant.save();
+            updatedCount++;
+          } else {
+            errors.push({
+              restaurantId: restaurant._id,
+              name: restaurant.name,
+              oldPostalCode: restaurant.postal_code,
+              cleanedCode: cleanPostalCode,
+              error: 'Invalid postal code format after cleaning'
+            });
+          }
+        } catch (error) {
+          errors.push({
+            restaurantId: restaurant._id,
+            name: restaurant.name,
+            error: error.message
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        data: {
+          totalFound: malformedRestaurants.length,
+          updated: updatedCount,
+          errors: errors.length,
+          errorDetails: errors
+        }
+      });
+
+    } catch (error) {
+      console.error('Error cleaning postal codes:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Error cleaning postal codes',
+        error: error.message
+      });
+    }
+  },
+  /**
  * Assign restaurants to agents
  */
   assignRestaurants: async (req, res) => {
