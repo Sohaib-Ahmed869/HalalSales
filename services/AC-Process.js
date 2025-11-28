@@ -9,7 +9,7 @@
  */
 
 const MONGODB_URL =
-  "mongodb+srv://sohaibsipra869:nvidia940MX@cluster0.q1so4va.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"; // UPDATE THIS
+  ""; // UPDATE THIS
 const EXCEL_FILE_PATH = "./carts3.csv"; // UPDATE THIS PATH
 
 // ============ DEPENDENCIES ============

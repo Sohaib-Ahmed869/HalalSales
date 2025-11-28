@@ -4,7 +4,7 @@ const fs = require("fs");
 const csv = require("csv-parser");
 const Customer = require("../models/Customer"); // Adjust the path as necessary
 
-mongoose.connect("mongodb+srv://sohaibsipra869:nvidia940MX@cluster0.q1so4va.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0", {
+mongoose.connect(process.env.MONGODB_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
 });

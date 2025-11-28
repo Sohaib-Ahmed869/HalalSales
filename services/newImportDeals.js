@@ -9,8 +9,7 @@ const csv = require("csv-parser"); // You'll need to install this: npm install c
 // Connect to MongoDB
 mongoose
   .connect(
-    process.env.MONGODB_URI ||
-      "mongodb+srv://sohaibsipra869:nvidia940MX@cluster0.q1so4va.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+    process.env.MONGODB_URI
   )
   .then(() => console.log("MongoDB connected"))
   .catch((err) => {
