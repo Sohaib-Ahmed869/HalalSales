@@ -974,7 +974,6 @@ exports.getMyTasks = async (req, res) => {
       .populate("createdBy", "firstName lastName email role")
       .populate("relatedCustomer")
       .populate("relatedRestaurant")
-      .populate("relatedQuotation")
       .sort({ createdAt: 1, priority: -1 })
       .lean();
 
@@ -997,8 +996,9 @@ exports.getMyTasks = async (req, res) => {
       tasks.map(async (task) => {
         if (task.relatedQuotation) {
           const Quotation = require("../models/Quotation");
-          const quotationDetails = await Quotation.findById(
-            task.relatedQuotation._id
+          console.log("Related Quotation ID:", task.relatedQuotation);
+          const quotationDetails = await Quotation.findOne(
+            { DocEntry: task.relatedQuotation }
           )
           const Customer = require("../models/Customer");
           const customerDetails = await Customer.find(
