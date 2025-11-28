@@ -1001,10 +1001,11 @@ exports.getMyTasks = async (req, res) => {
             { DocEntry: task.relatedQuotation }
           )
           const Customer = require("../models/Customer");
-          const customerDetails = await Customer.find(
+          const customerDetails = await Customer.findOne(
             { CardCode: quotationDetails.CardCode }
-          ).lean();
-          task.relatedQuotation.customerDetails = customerDetails;
+          );
+          console.log("Customer CardCode:", quotationDetails.CardCode, customerDetails);
+          task.customerDetails = customerDetails;
         }
         return task;
       })
