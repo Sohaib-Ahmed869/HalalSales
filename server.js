@@ -269,3 +269,13 @@ process.on("unhandledRejection", (err) => {
     process.exit(1);
   }
 });
+// Better error handling
+process.on('uncaughtException', (error) => {
+  console.error('❌ Uncaught Exception:', error);
+  console.error('Stack:', error.stack);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise);
+  console.error('Reason:', reason);
+});
