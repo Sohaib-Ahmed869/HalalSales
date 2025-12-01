@@ -3147,7 +3147,14 @@ exports.getCustomersPaginated = async (req, res) => {
         const [invoices, orders] = await Promise.all([
           Invoice.aggregate([
             { $match: { CardCode: { $in: customerCodes } } },
-            { $group: { _id: "$CardCode", count: { $sum: 1 }, total: { $sum: "$DocTotal" } } },
+            {
+              $group: {
+                _id: "$CardCode",
+                count: { $sum: 1 },
+                total: { $sum: "$DocTotal" },
+                latestDate: { $max: "$DocDate" }  // ← ADD THIS LINE
+              }
+            },
           ]).catch(() => []),
 
           SalesOrder.aggregate([
@@ -3159,7 +3166,11 @@ exports.getCustomersPaginated = async (req, res) => {
         console.log("Metrics calculated - Invoices:", invoices.length, "Orders:", orders.length);
 
         // Create lookup maps
-        const invoiceMap = new Map(invoices.map(i => [i._id, { count: i.count || 0, total: i.total || 0 }]));
+        const invoiceMap = new Map(invoices.map(i => [i._id, {
+          count: i.count || 0,
+          total: i.total || 0,
+          latestDate: i.latestDate || null  // ← ADD THIS
+        }]));
         const orderMap = new Map(orders.map(o => [o._id, { count: o.count || 0, total: o.total || 0 }]));
 
         // Enhance ALL customers with metrics
@@ -3176,7 +3187,7 @@ exports.getCustomersPaginated = async (req, res) => {
               abandonedCartCount: 0,
               sapTurnover: invoice.total,
               salesOrderTotal: order.total,
-              latestInvoiceDate: null,
+              latestInvoiceDate: invoice.latestDate || null,
               historicalTurnover: customer.CardCode?.startsWith('C') ? 0 : invoice.total,
               sapTurnoverOnly: customer.CardCode?.startsWith('C') ? invoice.total : 0,
             }
@@ -3214,6 +3225,11 @@ exports.getCustomersPaginated = async (req, res) => {
             case 'sapTurnoverOnly':
               aVal = a.metrics?.sapTurnoverOnly || 0;
               bVal = b.metrics?.sapTurnoverOnly || 0;
+              break;
+            case 'latestInvoiceDate':  // ← ADD THIS CASE
+              // Handle null dates by treating them as very old dates for sorting
+              aVal = a.metrics?.latestInvoiceDate ? new Date(a.metrics.latestInvoiceDate).getTime() : 0;
+              bVal = b.metrics?.latestInvoiceDate ? new Date(b.metrics.latestInvoiceDate).getTime() : 0;
               break;
             default:
               return 0;
