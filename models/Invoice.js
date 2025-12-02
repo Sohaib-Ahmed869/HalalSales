@@ -401,7 +401,6 @@ const invoiceSchema = new mongoose.Schema(
       lastPaymentAmount: Number,
     },
 
-    // Array of allocated payments from FlattenedPayment
     allocatedPayments: [{
       flattenedPaymentId: {
         type: mongoose.Schema.Types.ObjectId,
@@ -429,8 +428,19 @@ const invoiceSchema = new mongoose.Schema(
         ref: 'User'
       },
       source: String,
-      notes: String
-    }],
+      notes: String,
+
+      // ✅ ADD THESE NEW FIELDS:
+      sapPaymentDocEntry: Number,
+      sapSyncStatus: {
+        type: String,
+        enum: ['pending', 'synced', 'failed'],
+        default: 'pending'
+      },
+      sapSyncError: String,
+      sapSyncDate: Date,
+    }]
+    ,
 
     // Add payment breakdown
     paymentBreakdown: {

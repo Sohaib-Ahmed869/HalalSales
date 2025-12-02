@@ -80,6 +80,8 @@ const flattenedPaymentSchema = new mongoose.Schema(
                 type: mongoose.Schema.Types.ObjectId,
                 ref: "User",
             },
+            // ✅ ADD THIS NEW FIELD:
+            sapPaymentDocEntry: Number,
         }],
         allocationType: {
             type: String,

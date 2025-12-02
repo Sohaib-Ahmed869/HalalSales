@@ -1693,9 +1693,9 @@ exports.syncDeliveryNoteStatusesFromSAP = async (req, res) => {
                             ItemDescription: line.ItemDescription,
                             Quantity: line.Quantity,
                             Price: effectivePrice,  // Store the effective price after discount
-                            OriginalPrice: originalPrice,  // Store original price for reference
+                            OriginalPrice: effectivePrice, // Store original price for reference
                             DiscountPercent: discountPercent,
-                            UnitPrice: originalPrice,
+                            UnitPrice: effectivePrice,
                             PriceAfterVAT: line.PriceAfterVAT,
                             Currency: line.Currency || sapDN.DocCurrency,
                             LineTotal: line.LineTotal,

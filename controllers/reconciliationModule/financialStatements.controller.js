@@ -7,7 +7,7 @@ const Customer = require("../../models/Customer");
 const Invoice = require("../../models/Invoice");
 const BankStatement = require("../../models/BankStatement");
 const PayPalStatement = require("../../models/PayPalStatement");
-
+const sapPaymentService = require("../../services/sapPaymentService");
 // ADD THESE FUNCTIONS TO controllers/financialStatements.controller.js
 
 /**
@@ -230,7 +230,7 @@ exports.getPaymentsByCustomer = async (req, res) => {
 };
 
 /**
- * Allocate payment to invoice
+ * ✅ UPDATED: Allocate payment to invoice WITH SAP INTEGRATION
  */
 exports.allocatePaymentToInvoice = async (req, res) => {
     try {
@@ -293,6 +293,82 @@ exports.allocatePaymentToInvoice = async (req, res) => {
             });
         }
 
+        // ✅ NEW: Create payment in SAP
+        let sapPaymentDocEntry = null;
+        let sapError = null;
+
+        try {
+            // Determine payment method and account based on source
+            let paymentMethod = {};
+
+            // Map payment source to SAP payment method
+            if (payment.source === 'bred_bank' || payment.paymentMethod === 'VIREMENT') {
+                paymentMethod.TransferSum = amountToAllocate;
+                paymentMethod.TransferAccount = process.env.SAP_BANK_ACCOUNT || '_SYS00000000001';
+            } else if (payment.source === 'paypal') {
+                paymentMethod.TransferSum = amountToAllocate;
+                paymentMethod.TransferAccount = process.env.SAP_PAYPAL_ACCOUNT || '_SYS00000000002';
+            } else if (payment.paymentMethod === 'checks' || payment.paymentMethod?.toLowerCase().includes('cheque')) {
+                paymentMethod.CheckSum = amountToAllocate;  // Only add CheckSum when needed
+
+                if (payment.sourceDetails?.checkNumber) {
+                    paymentMethod.PaymentChecks = [{
+                        CheckNumber: payment.sourceDetails.checkNumber,
+                        BankCode: payment.sourceDetails.bank || '',
+                        CheckSum: amountToAllocate,
+                        DueDate: payment.paymentDate,
+                    }];
+                }
+            } else if (payment.paymentMethod?.toLowerCase().includes('cash')) {
+                paymentMethod.CashSum = amountToAllocate;
+                paymentMethod.CashAccount = process.env.SAP_CASH_ACCOUNT || '_SYS00000000003';
+            } else if (payment.paymentMethod?.toLowerCase().includes('credit')) {
+                paymentMethod.CreditSum = amountToAllocate;
+
+                paymentMethod.PaymentCreditCards = [{
+                    CreditSum: amountToAllocate,
+                    CreditCardNumber: payment.reference || '',
+                    CardValidUntil: new Date(new Date().getFullYear() + 5, 11, 31),
+                }];
+            } else {
+                // Default to bank transfer
+                paymentMethod.TransferSum = amountToAllocate;
+                paymentMethod.TransferAccount = process.env.SAP_BANK_ACCOUNT || '_SYS00000000001';
+            }
+
+            const sapPaymentData = {
+                CardCode: invoice.CardCode,
+                DocDate: new Date(payment.paymentDate).toISOString().split('T')[0],
+                TaxDate: new Date().toISOString().split('T')[0],
+                Remarks: notes || `Payment from ${payment.source} - Ref: ${payment.reference || 'N/A'}`,
+                ...paymentMethod,
+                PaymentInvoices: [{
+                    DocEntry: invoice.DocEntry,
+                    InvoiceType: 'it_Invoice',
+                    SumApplied: amountToAllocate,
+                }],
+            };
+
+            console.log('Creating SAP payment:', JSON.stringify(sapPaymentData, null, 2));
+
+            const sapResponse = await sapPaymentService.createIncomingPayment(sapPaymentData);
+            sapPaymentDocEntry = sapResponse.DocEntry;
+
+            console.log(`✅ SAP Payment created: DocEntry ${sapPaymentDocEntry}`);
+
+            // ✅ If invoice is fully paid, close it in SAP
+            if (invoiceRemaining - amountToAllocate <= 0.01) {
+                await sapPaymentService.closeInvoice(invoice.DocEntry);
+                console.log(`✅ SAP Invoice ${invoice.DocEntry} closed`);
+            }
+
+        } catch (error) {
+            console.error('❌ SAP Payment Creation Error:', error);
+            sapError = error.message;
+
+            // Continue with local allocation even if SAP fails
+        }
+
         // Add allocation to payment
         payment.matchedInvoices.push({
             invoiceDocNum: invoice.DocNum,
@@ -300,6 +376,7 @@ exports.allocatePaymentToInvoice = async (req, res) => {
             amountAllocated: amountToAllocate,
             matchedDate: new Date(),
             matchedBy: req.user?._id,
+            sapPaymentDocEntry: sapPaymentDocEntry,
         });
 
         payment.calculateRemaining();
@@ -319,6 +396,9 @@ exports.allocatePaymentToInvoice = async (req, res) => {
             allocatedBy: req.user?._id,
             source: payment.source,
             notes: notes,
+            sapPaymentDocEntry: sapPaymentDocEntry,
+            sapSyncStatus: sapPaymentDocEntry ? 'synced' : 'pending',
+            sapSyncError: sapError,
         });
 
         // Update invoice payment tracking
@@ -355,6 +435,15 @@ exports.allocatePaymentToInvoice = async (req, res) => {
             invoice.paymentStatus = "Partially Paid";
         }
 
+        // Mark if SAP sync needed
+        if (!sapPaymentDocEntry) {
+            invoice.paymentSyncStatus = {
+                needsSync: true,
+                lastSyncAttempt: new Date(),
+                syncErrors: sapError,
+            };
+        }
+
         await invoice.save();
 
         // Update customer totals
@@ -363,7 +452,9 @@ exports.allocatePaymentToInvoice = async (req, res) => {
 
         return res.status(200).json({
             success: true,
-            message: "Payment allocated successfully",
+            message: sapPaymentDocEntry
+                ? "Payment allocated and synced to SAP"
+                : "Payment allocated locally (SAP sync pending)",
             data: {
                 payment: {
                     _id: payment._id,
@@ -375,6 +466,11 @@ exports.allocatePaymentToInvoice = async (req, res) => {
                     paymentStatus: invoice.paymentStatus,
                     remainingBalance: invoice.paymentTracking.remainingBalance,
                     paymentBreakdown: invoice.paymentBreakdown
+                },
+                sapSync: {
+                    synced: !!sapPaymentDocEntry,
+                    sapPaymentDocEntry: sapPaymentDocEntry,
+                    error: sapError,
                 },
             },
         });
@@ -388,15 +484,13 @@ exports.allocatePaymentToInvoice = async (req, res) => {
         });
     }
 };
-
 /**
- * Allocate customer's outstanding balance to invoice
+ * ✅ UPDATED: Allocate outstanding balance to invoice WITH SAP INTEGRATION
  */
 exports.allocateOutstandingBalanceToInvoice = async (req, res) => {
     try {
         const { invoiceDocNum, amountToAllocate, notes } = req.body;
 
-        // Validate input
         if (!invoiceDocNum || !amountToAllocate || amountToAllocate <= 0) {
             return res.status(400).json({
                 success: false,
@@ -432,13 +526,11 @@ exports.allocateOutstandingBalanceToInvoice = async (req, res) => {
             });
         }
 
-        // Calculate available outstanding balance (SAP balance - what we've used locally)
-        // Only NEGATIVE balance means customer has prepaid (credit available)
+        // Calculate available outstanding balance
         const sapBalance = customer.outstandingBalance || 0;
         const localUsed = customer.outstandingBalanceUsed || 0;
 
         // ✅ FIX: Only negative balance is available to allocate
-        // Negative balance = customer paid in advance
         if (sapBalance >= 0) {
             return res.status(400).json({
                 success: false,
@@ -485,11 +577,27 @@ exports.allocateOutstandingBalanceToInvoice = async (req, res) => {
         const totalAllocated = (invoice.allocatedPayments || []).reduce((sum, alloc) => sum + alloc.amountAllocated, 0);
         const invoiceRemaining = invoice.DocTotal - totalPaid - totalAllocated;
 
-        if (amountToAllocate > invoiceRemaining + 1) { // Allow 1 euro tolerance
+        if (amountToAllocate > invoiceRemaining + 1) {
             return res.status(400).json({
                 success: false,
                 message: `Cannot allocate more than invoice balance. Invoice needs: €${invoiceRemaining.toFixed(2)}, Requested: €${amountToAllocate.toFixed(2)}`,
             });
+        }
+
+        // ✅ NEW: Close invoice in SAP (but don't create payment)
+        let sapClosed = false;
+        let sapError = null;
+
+        try {
+            // Mark invoice as paid in SAP by closing it
+            if (invoiceRemaining - amountToAllocate <= 0.01) {
+                await sapPaymentService.closeInvoice(invoice.DocEntry);
+                sapClosed = true;
+                console.log(`✅ SAP Invoice ${invoice.DocEntry} closed (paid by outstanding balance)`);
+            }
+        } catch (error) {
+            console.error('❌ SAP Invoice Close Error:', error);
+            sapError = error.message;
         }
 
         // Add allocation to invoice
@@ -505,6 +613,8 @@ exports.allocateOutstandingBalanceToInvoice = async (req, res) => {
             allocationDate: new Date(),
             allocatedBy: req.user?._id,
             notes: notes || `Outstanding balance applied by ${req.user?.firstName || 'system'}`,
+            sapSyncStatus: sapClosed ? 'synced' : 'pending',
+            sapSyncError: sapError,
         });
 
         // Update payment tracking
@@ -538,6 +648,15 @@ exports.allocateOutstandingBalanceToInvoice = async (req, res) => {
             invoice.paymentStatus = "Partially Paid";
         }
 
+        // Mark if SAP sync needed
+        if (!sapClosed && invoiceRemaining - amountToAllocate <= 0.01) {
+            invoice.paymentSyncStatus = {
+                needsSync: true,
+                lastSyncAttempt: new Date(),
+                syncErrors: sapError,
+            };
+        }
+
         await invoice.save();
 
         // Update customer's LOCAL usage (NOT the SAP balance!)
@@ -549,7 +668,9 @@ exports.allocateOutstandingBalanceToInvoice = async (req, res) => {
 
         return res.status(200).json({
             success: true,
-            message: "Outstanding balance allocated successfully",
+            message: sapClosed
+                ? "Outstanding balance allocated and invoice closed in SAP"
+                : "Outstanding balance allocated locally (SAP sync pending)",
             data: {
                 invoice: {
                     DocNum: invoice.DocNum,
@@ -562,7 +683,11 @@ exports.allocateOutstandingBalanceToInvoice = async (req, res) => {
                     sapOutstandingBalance: customer.outstandingBalance,
                     localUsed: customer.outstandingBalanceUsed,
                     availableBalance: customer.availableOutstandingBalance
-                }
+                },
+                sapSync: {
+                    closed: sapClosed,
+                    error: sapError,
+                },
             },
         });
 
@@ -571,6 +696,124 @@ exports.allocateOutstandingBalanceToInvoice = async (req, res) => {
         return res.status(500).json({
             success: false,
             message: "Failed to allocate outstanding balance",
+            error: error.message,
+        });
+    }
+};
+
+/**
+ * ✅ NEW: Retry failed SAP syncs
+ */
+exports.retrySAPSync = async (req, res) => {
+    try {
+        const { invoiceDocNum } = req.body;
+
+        const invoice = await Invoice.findOne({ DocNum: invoiceDocNum });
+        if (!invoice) {
+            return res.status(404).json({
+                success: false,
+                message: "Invoice not found",
+            });
+        }
+
+        if (!invoice.paymentSyncStatus?.needsSync) {
+            return res.status(400).json({
+                success: false,
+                message: "Invoice doesn't need SAP sync",
+            });
+        }
+
+        // Get all pending allocations
+        const pendingAllocations = (invoice.allocatedPayments || []).filter(
+            alloc => alloc.sapSyncStatus === 'pending'
+        );
+
+        if (pendingAllocations.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "No pending allocations to sync",
+            });
+        }
+
+        const results = {
+            successful: [],
+            failed: [],
+        };
+
+        for (const allocation of pendingAllocations) {
+            try {
+                if (allocation.allocationType === 'payment') {
+                    // Find the payment
+                    const payment = await FlattenedPayment.findById(allocation.flattenedPaymentId);
+                    if (!payment) continue;
+
+                    // Create payment in SAP (use same logic as allocatePaymentToInvoice)
+                    const sapPaymentData = {
+                        CardCode: invoice.CardCode,
+                        DocDate: new Date(allocation.allocationDate).toISOString().split('T')[0],
+                        TaxDate: new Date().toISOString().split('T')[0],
+                        Remarks: allocation.notes || `Retry sync - ${payment.source}`,
+                        TransferSum: allocation.amountAllocated,
+                        TransferAccount: process.env.SAP_BANK_ACCOUNT || '_SYS00000000001',
+                        PaymentInvoices: [{
+                            DocEntry: invoice.DocEntry,
+                            InvoiceType: 'it_Invoice',
+                            SumApplied: allocation.amountAllocated,
+                        }],
+                    };
+
+                    const sapResponse = await sapPaymentService.createIncomingPayment(sapPaymentData);
+
+                    // Update allocation
+                    allocation.sapPaymentDocEntry = sapResponse.DocEntry;
+                    allocation.sapSyncStatus = 'synced';
+                    allocation.sapSyncError = null;
+
+                    results.successful.push(allocation);
+
+                } else if (allocation.allocationType === 'outstanding_balance') {
+                    // Just close the invoice in SAP
+                    await sapPaymentService.closeInvoice(invoice.DocEntry);
+
+                    allocation.sapSyncStatus = 'synced';
+                    allocation.sapSyncError = null;
+
+                    results.successful.push(allocation);
+                }
+
+            } catch (error) {
+                console.error(`SAP Sync retry failed for allocation:`, error);
+                allocation.sapSyncError = error.message;
+                results.failed.push(allocation);
+            }
+        }
+
+        // Update invoice sync status
+        if (results.failed.length === 0) {
+            invoice.paymentSyncStatus.needsSync = false;
+        }
+        invoice.paymentSyncStatus.lastSyncAttempt = new Date();
+
+        await invoice.save();
+
+        return res.status(200).json({
+            success: true,
+            message: `Synced ${results.successful.length} allocations, ${results.failed.length} failed`,
+            data: {
+                successful: results.successful.length,
+                failed: results.failed.length,
+                invoice: {
+                    DocNum: invoice.DocNum,
+                    needsSync: invoice.paymentSyncStatus.needsSync,
+                },
+            },
+        });
+
+    } catch (error) {
+        console.error("Error retrying SAP sync:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to retry SAP sync",
             error: error.message,
         });
     }
