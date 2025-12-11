@@ -16,7 +16,10 @@ exports.getCustomerSalesReport = async (req, res) => {
             sortBy = "totalSales",
             sortOrder = "desc",
             comparisonStartDate,
-            comparisonEndDate
+            comparisonEndDate,
+            assignedTo, // NEW: Agent filter
+            page = 1,   // NEW: Pagination
+            limit = 50  // NEW: Pagination
         } = req.query;
 
         console.log("Fetching customer sales report...", {
@@ -24,15 +27,20 @@ exports.getCustomerSalesReport = async (req, res) => {
             endDate,
             cardCode,
             comparisonStartDate,
-            comparisonEndDate
+            comparisonEndDate,
+            assignedTo,
+            page,
+            limit,
+            sortBy,
+            sortOrder
         });
 
-        // Build current period date filter
-        let dateFilter = {};
+        // Build current period date filter (only for filtering invoices, not customers)
+        let invoiceDateFilter = {};
         if (startDate || endDate) {
-            dateFilter.DocDate = {};
-            if (startDate) dateFilter.DocDate.$gte = new Date(startDate);
-            if (endDate) dateFilter.DocDate.$lte = new Date(endDate);
+            invoiceDateFilter.DocDate = {};
+            if (startDate) invoiceDateFilter.DocDate.$gte = new Date(startDate);
+            if (endDate) invoiceDateFilter.DocDate.$lte = new Date(endDate);
         }
 
         // Build customer filter
@@ -40,9 +48,29 @@ exports.getCustomerSalesReport = async (req, res) => {
         if (cardCode) {
             customerFilter.CardCode = cardCode;
         }
+        // NEW: Add agent filter
+        if (assignedTo) {
+            customerFilter.assignedTo = assignedTo;
+        }
 
-        // Combine filters for current period
-        const invoiceFilter = { ...dateFilter, ...customerFilter };
+        //only include the customers that have cardcode starting with C (customers)
+        customerFilter.CardCode = { $regex: /^C/i };
+
+        // NEW: Get ALL customers matching the filter (not just those with invoices in period)
+        const allCustomers = await Customer.find(customerFilter)
+            .populate('assignedTo', 'firstName lastName') // ADD THIS LINE
+            .select("CardCode CardName assignedTo status Email")
+            .lean();
+
+        const customerMap = new Map(
+            allCustomers.map(c => [c.CardCode, c])
+        );
+
+        // Combine filters for current period invoices
+        const invoiceFilter = { ...invoiceDateFilter };
+        if (cardCode) {
+            invoiceFilter.CardCode = cardCode;
+        }
 
         // Aggregate invoice data by customer for CURRENT period
         const customerSales = await Invoice.aggregate([
@@ -60,20 +88,6 @@ exports.getCustomerSalesReport = async (req, res) => {
                 },
             },
             {
-                $lookup: {
-                    from: "customers",
-                    localField: "_id",
-                    foreignField: "CardCode",
-                    as: "customerDetails",
-                },
-            },
-            {
-                $unwind: {
-                    path: "$customerDetails",
-                    preserveNullAndEmptyArrays: true,
-                },
-            },
-            {
                 $project: {
                     cardCode: "$_id",
                     customerName: 1,
@@ -83,23 +97,41 @@ exports.getCustomerSalesReport = async (req, res) => {
                     avgInvoiceValue: 1,
                     lastInvoiceDate: 1,
                     firstInvoiceDate: 1,
-                    assignedTo: "$customerDetails.assignedTo",
-                    customerStatus: "$customerDetails.status",
                 },
             },
-            { $sort: { [sortBy]: sortOrder === "asc" ? 1 : -1 } },
         ]);
+
+        // NEW: Get last invoice date for ALL customers (regardless of date range)
+        const allLastInvoices = await Invoice.aggregate([
+            {
+                $match: {
+                    CardCode: { $in: Array.from(customerMap.keys()) }
+                }
+            },
+            {
+                $group: {
+                    _id: "$CardCode",
+                    lastInvoiceDate: { $max: "$DocDate" }
+                }
+            }
+        ]);
+
+        const lastInvoiceMap = new Map(
+            allLastInvoices.map(li => [li._id, li.lastInvoiceDate])
+        );
 
         // Get COMPARISON period data if dates provided
         let comparisonSalesMap = new Map();
         if (comparisonStartDate && comparisonEndDate) {
             const comparisonFilter = {
-                ...customerFilter,
                 DocDate: {
                     $gte: new Date(comparisonStartDate),
                     $lte: new Date(comparisonEndDate),
                 },
             };
+            if (cardCode) {
+                comparisonFilter.CardCode = cardCode;
+            }
 
             const comparisonSales = await Invoice.aggregate([
                 { $match: comparisonFilter },
@@ -119,7 +151,10 @@ exports.getCustomerSalesReport = async (req, res) => {
         }
 
         // Get sales orders for the same period
-        const salesOrderFilter = { ...dateFilter, ...customerFilter };
+        const salesOrderFilter = { ...invoiceDateFilter };
+        if (cardCode) {
+            salesOrderFilter.CardCode = cardCode;
+        }
         const salesOrders = await SalesOrder.aggregate([
             { $match: salesOrderFilter },
             {
@@ -133,7 +168,10 @@ exports.getCustomerSalesReport = async (req, res) => {
         ]);
 
         // Get quotations for the same period
-        const quotationFilter = { ...dateFilter, ...customerFilter };
+        const quotationFilter = { ...invoiceDateFilter };
+        if (cardCode) {
+            quotationFilter.CardCode = cardCode;
+        }
         const quotations = await Quotation.aggregate([
             { $match: quotationFilter },
             {
@@ -147,28 +185,31 @@ exports.getCustomerSalesReport = async (req, res) => {
         ]);
 
         // Merge all data
+        const salesMap = new Map(customerSales.map(cs => [cs.cardCode, cs]));
         const salesOrderMap = new Map(salesOrders.map(so => [so._id, so]));
         const quotationMap = new Map(quotations.map(q => [q._id, q]));
 
-        const enrichedData = customerSales.map(customer => {
-            const so = salesOrderMap.get(customer.cardCode) || {};
-            const qt = quotationMap.get(customer.cardCode) || {};
-            const comparison = comparisonSalesMap.get(customer.cardCode);
+        // NEW: Build enriched data for ALL customers
+        const enrichedData = Array.from(customerMap.values()).map(customer => {
+            const sales = salesMap.get(customer.CardCode) || {};
+            const so = salesOrderMap.get(customer.CardCode) || {};
+            const qt = quotationMap.get(customer.CardCode) || {};
+            const comparison = comparisonSalesMap.get(customer.CardCode);
 
             // Calculate period-over-period changes
             let periodComparison = null;
-            if (comparison) {
-                const salesChange = customer.totalSales - comparison.totalSales;
+            if (comparison && sales.totalSales !== undefined) {
+                const salesChange = sales.totalSales - comparison.totalSales;
                 const salesChangePercent = comparison.totalSales !== 0
                     ? parseFloat(((salesChange / comparison.totalSales) * 100).toFixed(2))
                     : null;
 
-                const invoiceChange = customer.totalInvoices - comparison.totalInvoices;
+                const invoiceChange = (sales.totalInvoices || 0) - comparison.totalInvoices;
                 const invoiceChangePercent = comparison.totalInvoices !== 0
                     ? parseFloat(((invoiceChange / comparison.totalInvoices) * 100).toFixed(2))
                     : null;
 
-                const avgInvoiceChange = customer.avgInvoiceValue - comparison.avgInvoiceValue;
+                const avgInvoiceChange = (sales.avgInvoiceValue || 0) - comparison.avgInvoiceValue;
                 const avgInvoiceChangePercent = comparison.avgInvoiceValue !== 0
                     ? parseFloat(((avgInvoiceChange / comparison.avgInvoiceValue) * 100).toFixed(2))
                     : null;
@@ -191,7 +232,18 @@ exports.getCustomerSalesReport = async (req, res) => {
             }
 
             return {
-                ...customer,
+                cardCode: customer.CardCode,
+                customerName: customer.CardName || sales.customerName || "Unknown",
+                totalSales: sales.totalSales || 0,
+                totalInvoices: sales.totalInvoices || 0,
+                invoiceNumbers: sales.invoiceNumbers || [],
+                avgInvoiceValue: sales.avgInvoiceValue || 0,
+                lastInvoiceDate: lastInvoiceMap.get(customer.CardCode) || null,
+                firstInvoiceDate: sales.firstInvoiceDate || null,
+                assignedTo: customer.assignedTo?._id || customer.assignedTo || null, // NEW: Handle populated object
+                assignedToName: customer.assignedTo ? `${customer.assignedTo.firstName} ${customer.assignedTo.lastName}` : null, // NEW
+                customerStatus: customer.status || null,
+                email: customer.Email || null,
                 salesOrders: {
                     count: so.totalOrders || 0,
                     numbers: so.orderNumbers || [],
@@ -206,16 +258,54 @@ exports.getCustomerSalesReport = async (req, res) => {
             };
         });
 
+        // NEW: Apply sorting
+        const validSortFields = ['totalSales', 'totalInvoices', 'avgInvoiceValue', 'lastInvoiceDate', 'customerName', 'cardCode'];
+        const actualSortBy = validSortFields.includes(sortBy) ? sortBy : 'totalSales';
+        const actualSortOrder = sortOrder === 'asc' ? 1 : -1;
+
+        enrichedData.sort((a, b) => {
+            let aVal = a[actualSortBy];
+            let bVal = b[actualSortBy];
+
+            // Handle null values
+            if (aVal === null || aVal === undefined) return 1;
+            if (bVal === null || bVal === undefined) return -1;
+
+            // Handle string comparison
+            if (typeof aVal === 'string') {
+                return actualSortOrder * aVal.localeCompare(bVal);
+            }
+
+            // Handle date comparison
+            if (aVal instanceof Date || actualSortBy === 'lastInvoiceDate') {
+                aVal = aVal ? new Date(aVal).getTime() : 0;
+                bVal = bVal ? new Date(bVal).getTime() : 0;
+            }
+
+            return actualSortOrder * (aVal - bVal);
+        });
+
+        // NEW: Apply pagination
+        const pageNum = parseInt(page);
+        const limitNum = parseInt(limit);
+        const startIndex = (pageNum - 1) * limitNum;
+        const endIndex = startIndex + limitNum;
+        const paginatedData = enrichedData.slice(startIndex, endIndex);
+
         res.status(200).json({
             success: true,
-            count: enrichedData.length,
-            data: enrichedData,
+            count: paginatedData.length,
+            total: enrichedData.length,
+            page: pageNum,
+            totalPages: Math.ceil(enrichedData.length / limitNum),
+            data: paginatedData,
             filters: {
                 startDate,
                 endDate,
                 cardCode,
                 comparisonStartDate,
                 comparisonEndDate,
+                assignedTo,
             },
         });
     } catch (error) {

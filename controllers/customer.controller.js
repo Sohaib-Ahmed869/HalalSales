@@ -3072,11 +3072,11 @@ exports.getCustomersPaginated = async (req, res) => {
       console.log("Sales agent filter applied:", req.user._id);
     }
 
-    const { status, search, assignedTo, sortBy, sortOrder } = req.query;
+    const { status, search, assignedTo, sortBy, sortOrder, sapCustomersOnly } = req.query;
     const query = {};
 
     // Build query with detailed logging
-    console.log("Building query with filters:", { status, search, assignedTo, sortBy, sortOrder });
+    console.log("Building query with filters:", { status, search, assignedTo, sortBy, sortOrder, sapCustomersOnly });
 
     if (status && status !== 'all') {
       query.status = status;
@@ -3099,6 +3099,17 @@ exports.getCustomersPaginated = async (req, res) => {
       ];
       console.log("Added search filter:", search);
     }
+
+    // 🎯 EXCLUDE customers with CardCode starting with 'S'
+    query.CardCode = { $not: { $regex: /^S/i } };
+
+    if (sapCustomersOnly === 'true') {
+      query.CardCode.$regex = /^C/i;
+      console.log("Filtering to see only SAP customers (CardCode starts with 'C')");
+    }
+    console.log("Added exclusion filter: CardCode NOT starting with 'S'");
+
+    console.log("Final MongoDB query:", JSON.stringify(query, null, 2));
 
     console.log("Final MongoDB query:", JSON.stringify(query, null, 2));
 
