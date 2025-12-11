@@ -715,7 +715,7 @@ async function parseNaturalLanguageRFQWithFunctions(userInput) {
 /**
  * NEW: Parse vendor information from email using AI
  */
-async function parseVendorInfoFromEmail (emailData) {
+async function parseVendorInfoFromEmail(emailData) {
     try {
         const prompt = `
 Extract vendor information from this email communication:
@@ -755,7 +755,7 @@ Focus on extracting actual structured data. Return only the JSON.
 
         const content = response.choices[0].message.content.trim();
         const jsonMatch = content.match(/\{[\s\S]*\}/);
-        
+
         if (jsonMatch) {
             return JSON.parse(jsonMatch[0]);
         }
@@ -770,7 +770,7 @@ Focus on extracting actual structured data. Return only the JSON.
 /**
  * NEW: Parse RFQ response with AI (handles multi-level replies and PDFs)
  */
-async function parseRFQResponseWithAI (data) {
+async function parseRFQResponseWithAI(data) {
     try {
         const prompt = `
 Analyze this RFQ response for RFQ Number: ${data.rfqNumber}
@@ -829,7 +829,7 @@ Return only valid JSON.
 
         const content = response.choices[0].message.content.trim();
         const jsonMatch = content.match(/\{[\s\S]*\}/);
-        
+
         if (jsonMatch) {
             return JSON.parse(jsonMatch[0]);
         }
@@ -841,6 +841,70 @@ Return only valid JSON.
     }
 };
 
+/**
+ * Parse quotation data from email text using AI
+ */
+async function parseQuotationFromText(emailText, rfqItems) {
+    const prompt = `
+You are a quotation parser. Extract structured quotation data from the vendor's email response.
+
+RFQ Items Requested:
+${rfqItems.map((item, i) => `${i + 1}. ${item.productName} - ${item.quantity} ${item.unit}`).join('\n')}
+
+Vendor Email Response:
+${emailText}
+
+Extract the following information in JSON format:
+{
+    "quotedItems": [
+        {
+            "productName": "string",
+            "quantity": number,
+            "unit": "string",
+            "unitPrice": number,
+            "totalPrice": number,
+            "currency": "string (EUR, USD, etc)"
+        }
+    ],
+    "totalQuotedAmount": number,
+    "currency": "string",
+    "deliveryTimeInDays": number,
+    "deliveryDate": "YYYY-MM-DD or null",
+    "paymentTerms": "string",
+    "validityPeriod": "string",
+    "additionalNotes": "string",
+    "isValidQuotation": boolean (true if they provided prices)
+}
+
+If prices are not mentioned, set isValidQuotation to false.
+Return ONLY the JSON object, no other text.
+    `;
+
+    try {
+        const response = await callClaudeAPI(prompt);
+        const jsonMatch = response.match(/\{[\s\S]*\}/);
+
+        if (jsonMatch) {
+            return JSON.parse(jsonMatch[0]);
+        }
+
+        return {
+            quotedItems: [],
+            totalQuotedAmount: 0,
+            isValidQuotation: false,
+            additionalNotes: 'Could not parse quotation data',
+        };
+    } catch (error) {
+        console.error('❌ Error parsing quotation:', error);
+        return {
+            quotedItems: [],
+            totalQuotedAmount: 0,
+            isValidQuotation: false,
+            additionalNotes: 'Error parsing quotation',
+        };
+    }
+}
+
 module.exports = {
     parseNaturalLanguageRFQ,
     parseNaturalLanguageRFQWithFunctions,
@@ -849,4 +913,5 @@ module.exports = {
     generateRFQEmail,
     parseVendorInfoFromEmail,
     parseRFQResponseWithAI,
+    parseQuotationFromText,
 };

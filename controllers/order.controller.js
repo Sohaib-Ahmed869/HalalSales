@@ -1310,9 +1310,7 @@ exports.pushUnsyncedOrdersToSAP = async (req, res) => {
     // Orders with sales agents were created in our system
     // Orders without sales agents came from SAP bulk import and shouldn't be pushed back
     const unsyncedOrders = await SalesOrder.find({
-      SyncedWithSAP: false,
-      SAPSyncDisabled: { $ne: true },
-      salesAgent: { $exists: true, $ne: null }, // Only orders with sales agents
+      DocEntry: 114709
     }).populate("salesAgent", "firstName lastName email");
 
     if (unsyncedOrders.length === 0) {

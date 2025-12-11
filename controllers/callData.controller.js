@@ -1105,10 +1105,12 @@ const callDataController = {
       });
     }
   },
+  // Analyze call using internal service
   analyzeCall: async (req, res) => {
     try {
       const { callID, audioUrl } = req.body;
 
+      // Validate required parameters
       if (!callID) {
         return res.status(400).json({ error: "Missing callID parameter" });
       }
@@ -1119,122 +1121,99 @@ const callDataController = {
         return res.status(404).json({ error: "Call not found" });
       }
 
-      // Check if analysis already exists and is recent (less than 30 days old)
+      // Check if analysis already exists and is less than 30 days old
       if (
         callData.analysis &&
         callData.transcript &&
-        callData.qualityScore > 0 &&
-        callData.structuredAnalysis
+        callData.qualityScore > 0
       ) {
         const analysisAge = callData.analysisTimestamp
-          ? (new Date() - new Date(callData.analysisTimestamp)) / (1000 * 60 * 60 * 24)
+          ? (new Date() - new Date(callData.analysisTimestamp)) /
+          (1000 * 60 * 60 * 24)
           : 999;
 
         if (analysisAge < 30) {
-          console.log(`Returning cached analysis for call ${callID}`);
+          // Return existing analysis
           return res.status(200).json({
             transcript: callData.transcript,
+            originalTranscript: callData.originalTranscript,
             analysis: callData.analysis,
             qualityScore: callData.qualityScore,
-            structuredAnalysis: callData.structuredAnalysis,
-            speakers: callData.speakers || [],
-            summary: callData.summary || "",
+            structuredAnalysis: callData.structuredAnalysis || null,
+            speakers: callData.speakers || null,
+            summary:
+              callData.structuredAnalysis?.generalAnalysis || callData.analysis,
             fromCache: true,
           });
         }
       }
 
-      // Use the file URL from the database if not provided
-      const fileUrl = audioUrl || callData.file;
-      if (!fileUrl) {
-        return res.status(400).json({ error: "No audio file available for this call" });
+      // Continue with analysis if it doesn't exist or is outdated
+      if (!audioUrl) {
+        return res.status(400).json({ error: "Missing audioUrl parameter" });
       }
 
-      // Return 202 immediately - analysis will happen in background
-      res.status(202).json({
-        message: "Analysis started. This may take 30-60 seconds.",
-        callID: callID,
-        estimatedTime: 45
-      });
+      // Import the internal call analysis service
+      const internalCallAnalysisService = require("../services/internalCallAnalysisService");
 
-      // Call Python server at 127.0.0.1:5005 in background
-      const axios = require("axios");
+      try {
+        console.log(`Starting internal analysis for call ${callID}...`);
 
-      (async () => {
-        try {
-          console.log(`Sending call ${callID} to Python server for analysis...`);
+        // Prepare call context for analysis
+        const callContext = {
+          callID: callData.callID,
+          direction: callData.direction,
+          duration: callData.totalDuration,
+          agentName: callData.userName,
+          fromNumber: callData.fromNumber,
+          toNumber: callData.toNumber,
+        };
 
-          const pythonResponse = await axios.post(
-            `http://127.0.0.1:5005/api/call-data/analyze/${callData._id}`,
-            {
-              audio_url: fileUrl,
-              call_id: callData._id
+        // Analyze the call using internal service
+        const analysisResult = await internalCallAnalysisService.analyzeCall(
+          audioUrl,
+          callContext
+        );
+
+        // Update the call data in the database
+        await CallData.findOneAndUpdate(
+          { callID: callID },
+          {
+            $set: {
+              transcript: analysisResult.transcript,
+              originalTranscript: analysisResult.originalTranscript,
+              analysis: analysisResult.analysis,
+              qualityScore: analysisResult.qualityScore || 0,
+              analysisTimestamp: new Date(),
+              structuredAnalysis: analysisResult.structuredAnalysis || null,
+              speakers: analysisResult.speakers || null,
             },
-            {
-              timeout: 120000 // 2 minute timeout
-            }
-          );
+          },
+          { new: true }
+        );
 
-          const result = pythonResponse.data;
+        console.log(`Analysis saved for call ${callID}`);
 
-          // Extract data from Python output
-          const frenchTranscript = result?.transcripts?.fr || "";
-          const scoringExplanation = result?.scoring?.explanation || "";
-          const finalScore = result?.scoring?.final_score || 0;
+        // Return the analysis results to the client
+        return res.status(200).json({
+          ...analysisResult,
+          fromCache: false,
+        });
+      } catch (analysisError) {
+        console.error("Error during call analysis:", analysisError.message);
 
-          // Build structured analysis
-          const structuredAnalysis = {
-            generalAnalysis: result?.summary || "Call analysis completed.",
-            speakerIdentification: {
-              agentLines: result?.speakers
-                ?.find(s => s.speaker === "Agent")
-                ?.segments?.map((seg, idx) => `Line ${idx + 1}: ${seg.text_fr}`) || [],
-              clientLines: result?.speakers
-                ?.find(s => s.speaker === "Client")
-                ?.segments?.map((seg, idx) => `Line ${idx + 1}: ${seg.text_fr}`).join("; ") || "Not identified",
-              confidence: result?.classification?.quality || "medium"
-            },
-            salesPerformance: {
-              score: finalScore,
-              strengths: extractStrengths(scoringExplanation),
-              weaknesses: extractWeaknesses(scoringExplanation),
-              productsDiscussed: result?.products_discussed || [],
-              closingAttempts: 0,
-              objectionHandling: "Standard"
-            },
-            conversationDynamics: {
-              agentTalkRatio: calculateAgentTalkRatio(result?.speakers),
-              keyMoments: extractKeyMoments(result?.speakers),
-              missedOpportunities: extractRecommendations(scoringExplanation).slice(0, 2)
-            },
-            recommendations: extractRecommendations(scoringExplanation)
-          };
-
-          // Save everything to CallData
-          await CallData.findOneAndUpdate(
-            { callID: callID },
-            {
-              $set: {
-                transcript: frenchTranscript,
-                analysis: result?.summary || scoringExplanation,
-                qualityScore: finalScore,
-                analysisTimestamp: new Date(),
-                structuredAnalysis: structuredAnalysis,
-                speakers: result?.speakers || [],
-                summary: result?.summary || ""
-              },
-            },
-            { new: true }
-          );
-
-          console.log(`✅ Analysis completed and saved for call ${callID} (Score: ${finalScore}/10)`);
-        } catch (error) {
-          console.error(`❌ Error analyzing call ${callID}:`, error.message);
-        }
-      })();
-
+        return res.status(500).json({
+          error: "Error during call analysis",
+          details: analysisError.message,
+          callID,
+        });
+      }
     } catch (error) {
-      console.error("Error in analyzeCall:", error);
+      console.error("Error analyzing call:", error);
+      return res.status(500).json({
+        error: "Error analyzing call",
+        details: error.message,
+      });
     }
   },
 };

@@ -38,7 +38,7 @@ const getInvoiceColor = (amount, minAmount, maxAmount) => {
  */
 exports.getDocumentsByDateRange = async (req, res) => {
     try {
-        const { startDate, endDate, type = "all" } = req.query;
+        const { startDate, endDate, type = "all", includePotentialCustomers = "false" } = req.query;
 
         if (!startDate || !endDate) {
             return res.status(400).json({
@@ -49,23 +49,27 @@ exports.getDocumentsByDateRange = async (req, res) => {
 
         const start = new Date(startDate);
         const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999); // Include full end day
+        end.setHours(23, 59, 59, 999);
 
-        console.log(`Fetching map data from ${start} to ${end}, type: ${type}`);
+        console.log(`Fetching map data from ${start} to ${end}, type: ${type}, potential: ${includePotentialCustomers}`);
 
         const results = {
             invoices: [],
             orders: [],
             quotations: [],
+            customers: [],
+            potentialCustomers: [],
             stats: {
                 totalInvoices: 0,
                 totalOrders: 0,
                 totalQuotations: 0,
+                totalCustomers: 0,
+                totalPotentialCustomers: 0,
                 invoiceAmountRange: { min: 0, max: 0 },
             },
         };
 
-        // Get all customers with coordinates for lookup
+        // Get all customers with coordinates
         const customersWithCoords = await Customer.find({
             "coordinates.lat": { $exists: true, $ne: null },
         })
@@ -87,7 +91,6 @@ exports.getDocumentsByDateRange = async (req, res) => {
                 .select("DocEntry DocNum DocDate CardCode CardName DocTotal Address DocumentStatus")
                 .lean();
 
-            // Calculate amount range for color coding
             const amounts = invoices.map((inv) => inv.DocTotal || 0).filter((a) => a > 0);
             if (amounts.length > 0) {
                 results.stats.invoiceAmountRange.min = Math.min(...amounts);
@@ -118,9 +121,11 @@ exports.getDocumentsByDateRange = async (req, res) => {
             results.stats.totalInvoices = results.invoices.length;
         }
 
+        let orders = [];
+
         // Fetch Sales Orders
         if (type === "all" || type === "order") {
-            const orders = await SalesOrder.find({
+            orders = await SalesOrder.find({
                 DocDate: { $gte: start, $lte: end },
             })
                 .select("DocEntry DocNum DocDate CardCode CardName DocTotal DocumentStatus")
@@ -139,7 +144,7 @@ exports.getDocumentsByDateRange = async (req, res) => {
                         amount: order.DocTotal || 0,
                         status: order.DocumentStatus,
                         coordinates: customer.coordinates,
-                        color: "#3498db", // Blue for orders
+                        color: "#3498db",
                     });
                 }
             }
@@ -168,11 +173,55 @@ exports.getDocumentsByDateRange = async (req, res) => {
                         status: quotation.DocumentStatus,
                         approvalStatus: quotation.approvalStatus,
                         coordinates: customer.coordinates,
-                        color: "#27ae60", // Green for quotations
+                        color: "#27ae60",
                     });
                 }
             }
             results.stats.totalQuotations = results.quotations.length;
+        }
+
+        // Get customers who placed orders in date range
+        if (type === "all" || type === "customer") {
+            const uniqueCustomerCodes = new Set();
+            for (const order of orders) {
+                uniqueCustomerCodes.add(order.CardCode);
+            }
+
+            for (const cardCode of uniqueCustomerCodes) {
+                const customer = customerMap.get(cardCode);
+                if (customer && customer.coordinates) {
+                    results.customers.push({
+                        type: "customer",
+                        cardCode: customer.CardCode,
+                        cardName: customer.CardName,
+                        address: customer.address || customer.deliveryAddress,
+                        coordinates: customer.coordinates,
+                        color: "#f39c12", // Orange for active customers
+                    });
+                }
+            }
+            results.stats.totalCustomers = results.customers.length;
+        }
+
+        console.log(includePotentialCustomers);
+
+        // Get potential customers (those WITHOUT orders in date range)
+        if (includePotentialCustomers === "true") {
+            const customersWithOrders = new Set(orders.map(o => o.CardCode));
+
+            for (const customer of customersWithCoords) {
+                if (!customersWithOrders.has(customer.CardCode)) {
+                    results.potentialCustomers.push({
+                        type: "potentialCustomer",
+                        cardCode: customer.CardCode,
+                        cardName: customer.CardName,
+                        address: customer.address || customer.deliveryAddress,
+                        coordinates: customer.coordinates,
+                        color: "#95a5a6", // Gray for potential customers
+                    });
+                }
+            }
+            results.stats.totalPotentialCustomers = results.potentialCustomers.length;
         }
 
         res.json({

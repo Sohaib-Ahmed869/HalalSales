@@ -90,6 +90,7 @@ exports.getAreaAnalysis = async (req, res) => {
             return res.json({
                 success: true,
                 data: {
+                    center: { lat: centerLat, lng: centerLng },
                     area: {
                         center: { lat: centerLat, lng: centerLng },
                         radius: radiusKm,
@@ -236,6 +237,7 @@ exports.getAreaAnalysis = async (req, res) => {
         return res.json({
             success: true,
             data: {
+                center: { lat: centerLat, lng: centerLng },
                 area: {
                     center: { lat: centerLat, lng: centerLng },
                     radius: radiusKm,

@@ -1290,7 +1290,7 @@ exports.bulkCreateInvoicesFromDeliveryNotes = async (req, res) => {
             OriginatingDeliveryNote: deliveryNote.DocNum,
 
             DocumentLines: invoiceLines,
-            DocumentStatus: "bost_Close",
+            DocumentStatus: "bost_Open",
             SyncedWithSAP: true,
             LocalStatus: "Synced",
             salesAgent: deliveryNote.salesAgent,

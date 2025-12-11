@@ -1523,6 +1523,7 @@ exports.convertToOrder = async (req, res) => {
     });
 
     if (!quotation) {
+      console.log('here')
       return res.status(404).json({
         success: false,
         message: `Active quotation with DocEntry ${req.params.docEntry} not found`,
@@ -1597,6 +1598,7 @@ exports.convertToOrder = async (req, res) => {
       UpdateDate: new Date(),
       DocDate: req.body.DocDate || new Date(),
       DocDueDate: req.body.DocDueDate || new Date(),
+      RequriedDate: req.body.DocDueDate,
       SyncedWithSAP: false,
       LocalStatus: "Created",
 

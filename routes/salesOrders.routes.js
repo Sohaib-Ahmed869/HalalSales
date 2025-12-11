@@ -74,7 +74,7 @@ router.get("/", orderController.getAllOrders);
 // @route   POST /api/orders/bulk-sync-to-sap
 // @desc    Push all unsynced orders to SAP B1
 // @access  Private
-router.post("/bulk-sync-to-sap", auth, orderController.pushUnsyncedOrdersToSAP);
+router.post("/bulk-sync-to-sap",  orderController.pushUnsyncedOrdersToSAP);
 
 // @route   GET /api/orders
 // @desc    Get all orders with pagination and filtering

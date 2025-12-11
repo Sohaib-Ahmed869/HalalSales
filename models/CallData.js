@@ -39,6 +39,10 @@ const callDataSchema = new mongoose.Schema(
     qualityScore: { type: Number, default: 0 },
     analysisTimestamp: { type: Date },
     summary: { type: String }, // ADD THIS
+    originalTranscript: {
+      type: String,
+      default: null,
+    },
 
     // ADD THIS ENTIRE FIELD
     speakers: [{
@@ -72,6 +76,27 @@ const callDataSchema = new mongoose.Schema(
         missedOpportunities: [{ type: String }],
       },
       recommendations: [{ type: String }],
+    },
+    clientFeedback: {
+      rating: {
+        type: Number,
+        min: 1,
+        max: 10,
+      },
+      comments: String,
+      agreeWithAnalysis: Boolean,
+      specificFeedback: {
+        strengthsAccurate: Boolean,
+        weaknessesAccurate: Boolean,
+        recommendationsHelpful: Boolean,
+        additionalNotes: String,
+      },
+      submittedAt: Date,
+      submittedBy: String,
+      submitted: {
+        type: Boolean,
+        default: false,
+      },
     },
   },
   {

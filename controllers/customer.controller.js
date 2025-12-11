@@ -835,6 +835,8 @@ exports.createCustomer = async (req, res) => {
       status: "pending", // Set status to pending instead of active
       createdAt: new Date(),
       updatedAt: new Date(),
+      openingTime: req.body.openingTime || "",
+      closingTime: req.body.closingTime || "",
     });
 
     console.log("Creating new customer for approval:", {
@@ -2505,6 +2507,8 @@ exports.updateCustomer = async (req, res) => {
       assignedTo,
       status,
       notes,
+      openingTime,
+      closingTime,
     } = req.body;
 
     // Find customer
@@ -2522,6 +2526,8 @@ exports.updateCustomer = async (req, res) => {
     if (hubspotId !== undefined) updateData.hubspotId = hubspotId;
     if (status) updateData.status = status;
     if (notes !== undefined) updateData.notes = notes;
+    if (openingTime !== undefined) updateData.openingTime = openingTime;
+    if (closingTime !== undefined) updateData.closingTime = closingTime;
 
     // Handle assignedTo separately with permission checks
     if (assignedTo !== undefined) {

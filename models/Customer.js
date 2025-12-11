@@ -157,6 +157,14 @@ const CustomerSchema = new Schema({
     enum: ["marketing-contact", "non-marketing-contact", "unsubscribed"],
     default: "marketing-contact",
   },
+  openingTime: {
+    type: String,
+    trim: true,
+  },
+  closingTime: {
+    type: String,
+    trim: true,
+  },
   notes: {
     type: String,
   },

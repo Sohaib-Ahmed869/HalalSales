@@ -77,38 +77,56 @@ async function processNaturalLanguageRFQ(naturalLanguageInput, userId) {
         }
 
         // Get full vendor details
-        const vendorCodes = vendorAnalysis.map(v => v._id);
-        console.log(`Looking for vendors with CardCodes: ${JSON.stringify(vendorCodes)}`);
+        // CHANGE 1: Split vendor codes by source
+        const sapVendorCodes = vendorAnalysis
+            .filter(v => v.vendorSource === 'SAP' || v.vendorSource === 'EMAIL')
+            .map(v => v._id);
+        const pdaSupplierIds = vendorAnalysis
+            .filter(v => v.vendorSource === 'PDA_SCRAPER')
+            .map(v => v._id);
 
+        console.log(`Looking for ${sapVendorCodes.length} SAP/EMAIL vendors and ${pdaSupplierIds.length} PDA suppliers`);
+
+        // CHANGE 2: Fetch from both collections
         const vendors = await Vendor.find({
-            CardCode: { $in: vendorCodes },
+            CardCode: { $in: sapVendorCodes },
+        });
+
+        const PDA_Supplier = require('../models/PDA_Supplier');
+        const pdaSuppliers = await PDA_Supplier.find({
+            _id: { $in: pdaSupplierIds },
+            isActive: true
         });
 
         console.log(`Vendor.find() returned ${vendors.length} vendors`);
+        console.log(`PDA_Supplier.find() returned ${pdaSuppliers.length} suppliers`);
 
-        // Debug: Check what's actually in Vendor collection
-        const totalVendorsInDb = await Vendor.countDocuments();
-        console.log(`Total vendors in Vendor collection: ${totalVendorsInDb}`);
-        console.log(`Found ${vendors.length} active vendors in Vendor collection`);
-
-        // Merge vendor data with historical analysis
-        // Merge vendor data with historical analysis
+        // CHANGE 3: Merge vendor data with historical analysis
         const enrichedVendors = vendorAnalysis.map(historical => {
-            const vendorDetails = vendors.find(v => v.CardCode === historical._id);
-            return {
-                ...historical,
-                email: vendorDetails?.email,
-                phone: vendorDetails?.phone,
-                productCategories: vendorDetails?.productCategories,
-                certifications: vendorDetails?.certifications,
-                isEmailVendor: vendorDetails?.customFields?.isEmailVendor || false,
-                vendorSource: historical.vendorSource || 'SAP',
-                hasEmail: !!vendorDetails?.email,
-            };
+            // Check if it's a PDA supplier or regular vendor
+            if (historical.vendorSource === 'PDA_SCRAPER') {
+                // PDA supplier - already has all needed data
+                return {
+                    ...historical,
+                    hasEmail: !!historical.email,
+                };
+            } else {
+                // Regular vendor - merge with Vendor collection data
+                const vendorDetails = vendors.find(v => v.CardCode === historical._id);
+                return {
+                    ...historical,
+                    email: vendorDetails?.email,
+                    phone: vendorDetails?.phone,
+                    productCategories: vendorDetails?.productCategories,
+                    certifications: vendorDetails?.certifications,
+                    isEmailVendor: vendorDetails?.customFields?.isEmailVendor || false,
+                    vendorSource: historical.vendorSource || 'SAP',
+                    hasEmail: !!vendorDetails?.email,
+                };
+            }
         }).filter(v => v.hasEmail); // Only include vendors with emails
 
-        console.log(`Final ${enrichedVendors.length} vendors (SAP: ${enrichedVendors.filter(v => v.vendorSource === 'SAP').length}, EMAIL: ${enrichedVendors.filter(v => v.vendorSource === 'EMAIL').length})`);
-
+        console.log(`Final ${enrichedVendors.length} vendors (SAP: ${enrichedVendors.filter(v => v.vendorSource === 'SAP').length}, EMAIL: ${enrichedVendors.filter(v => v.vendorSource === 'EMAIL').length}, PDA: ${enrichedVendors.filter(v => v.vendorSource === 'PDA_SCRAPER').length})`);
         console.log(`Final ${enrichedVendors.length} vendors with email addresses`);
 
         itemsWithVendors.push({
@@ -419,7 +437,7 @@ async function analyzeHistoricalPurchasesMultiKeyword(keywords, quantity) {
                     avgPrice: avgPrice, // NOW HAS REAL DATA
                     minPrice: minPrice, // NOW HAS REAL DATA
                     maxPrice: maxPrice, // NOW HAS REAL DATA
-                
+
                     lastPurchaseDate: vendor.lastContactDate || vendor.customFields?.emailStats?.firstContactDate || new Date(),
                     firstPurchaseDate: vendor.customFields?.emailStats?.firstContactDate || new Date(),
                     totalQuantity: 0,
@@ -458,9 +476,78 @@ async function analyzeHistoricalPurchasesMultiKeyword(keywords, quantity) {
             // Continue with just SAP vendors
         }
 
-        // ====== PART 3: Combine and Score All Vendors ======
-        const allVendors = [...sapVendors, ...emailVendors];
+        // ====== PART 2.5: Get PDA Scraped Suppliers (NEW) ======
+        let pdaSuppliers = [];
 
+        try {
+            const PDA_Supplier = require('../models/PDA_Supplier');
+
+            // Build regex for keyword matching
+            const keywordRegex = new RegExp(keywords.join('|'), 'i');
+
+            // Search PDA suppliers by search term or supplier name
+            const pdaSupplierDetails = await PDA_Supplier.find({
+                isActive: true,
+                $or: [
+                    { searchTerm: { $regex: keywordRegex } },
+                    { supplierName: { $regex: keywordRegex } },
+                    { 'rawData.metadata.products': { $regex: keywordRegex } },
+                    { 'rawData.productname': { $regex: keywordRegex } }
+                ],
+                // Only include suppliers with email
+                'email': { $exists: true, $ne: null, $ne: '' }
+            }).limit(20); // Limit to top 20 to avoid overwhelming results
+
+            console.log(`>> Found ${pdaSupplierDetails.length} PDA suppliers matching keywords`);
+
+            // Build PDA supplier results
+            pdaSuppliers = pdaSupplierDetails.map(supplier => {
+                return {
+                    _id: supplier._id.toString(),
+                    vendorName: supplier.supplierName,
+                    vendorSource: 'PDA_SCRAPER',
+                    totalPurchases: 0,
+                    avgPrice: 0,
+                    minPrice: 0,
+                    maxPrice: 0,
+                    lastPurchaseDate: supplier.createdAt || new Date(),
+                    firstPurchaseDate: supplier.createdAt || new Date(),
+                    totalQuantity: 0,
+                    totalValue: 0,
+                    purchaseHistory: [],
+                    email: supplier.email,  // ✅ CORRECT - email is at root level
+                    phone: supplier.contactInfo?.phone,
+                    country: supplier.country,
+                    scrapedFrom: supplier.scrapedFrom,
+                    isNewSupplier: true,
+                    supplierMetadata: {
+                        searchTerm: supplier.searchTerm,
+                        scrapedFrom: supplier.scrapedFrom,
+                        country: supplier.country,
+                        rawData: supplier.rawData
+                    }
+                };
+            });
+
+            console.log(`>> Found ${pdaSuppliers.length} PDA suppliers`);
+
+            // Debug: Show matched suppliers
+            if (pdaSuppliers.length > 0) {
+                console.log('>> PDA suppliers matched:');
+                pdaSuppliers.forEach(v => {
+                    console.log(`   - ${v.vendorName} (${v.country}) from ${v.scrapedFrom}`);
+                });
+            }
+
+        } catch (pdaError) {
+            console.error('⚠️ Error fetching PDA suppliers:', pdaError.message);
+            // Continue without PDA suppliers
+        }
+
+        // ====== PART 3: Combine and Score All Vendors (MODIFY) ======
+        const allVendors = [...sapVendors, ...emailVendors, ...pdaSuppliers];
+
+        console.log(`>> Combining vendors: ${sapVendors.length} SAP + ${emailVendors.length} EMAIL + ${pdaSuppliers.length} PDA = ${allVendors.length} total`);
         if (allVendors.length === 0) {
             console.log('>> No vendors found from any source');
             return [];
@@ -535,8 +622,15 @@ function calculatePriceScore(price, allVendors) {
 }
 
 function calculateReliabilityScore(totalPurchases, vendorSource = 'SAP') {
-    // Email vendors get slightly lower baseline scores since history is less structured
-    const baseAdjustment = vendorSource === 'EMAIL' ? 0.85 : 1.0;
+    // PDA suppliers get lower baseline since they're new
+    let baseAdjustment;
+    if (vendorSource === 'PDA_SCRAPER') {
+        baseAdjustment = 0.6; // New suppliers, less reliable
+    } else if (vendorSource === 'EMAIL') {
+        baseAdjustment = 0.85;
+    } else {
+        baseAdjustment = 1.0; // SAP vendors, most reliable
+    }
 
     let score;
     if (totalPurchases >= 50) score = 100;
@@ -548,6 +642,7 @@ function calculateReliabilityScore(totalPurchases, vendorSource = 'SAP') {
 
     return score * baseAdjustment;
 }
+
 function calculateVolumeScore(totalHistoricalQuantity, requestedQuantity) {
     if (!requestedQuantity || requestedQuantity === 0) return 50;
 

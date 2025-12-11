@@ -22,7 +22,7 @@ const RFQItemSchema = new Schema({
     unit: {
         type: String,
         required: true,
-        enum: ['kg', 'cartons', 'packs', 'pieces', 'liters', 'boxes', 'pallets','cans'],
+        enum: ['kg', 'cartons', 'packs', 'pieces', 'liters', 'boxes', 'pallets', 'cans'],
     },
     estimatedPrice: {
         type: Number,
@@ -68,7 +68,7 @@ const RFQSchema = new Schema({
     // RFQ Identification
     rfqNumber: {
         type: String,
-      
+
         index: true,
     },
 
@@ -140,6 +140,45 @@ const RFQSchema = new Schema({
         notes: String,
         selectedAt: Date,
     },
+
+    vendorsContacted: [{
+        vendorCode: String,
+        vendorName: String,
+        email: String,
+        status: {
+            type: String,
+            enum: ['draft', 'sent', 'opened', 'responded', 'declined'],
+            default: 'draft',
+        },
+        sentDate: Date,
+        openedDate: Date,
+        responseDate: Date,
+        quotedPrice: Number,
+        quotedTotal: Number,
+        deliveryDate: Date,
+        paymentTerms: String,
+        notes: String,
+
+        // ADD THESE NEW FIELDS:
+        quotationData: {
+            quotedItems: [{
+                productName: String,
+                quantity: Number,
+                unit: String,
+                unitPrice: Number,
+                totalPrice: Number,
+                currency: String,
+            }],
+            totalQuotedAmount: Number,
+            currency: String,
+            deliveryTimeInDays: Number,
+            validityPeriod: String,
+            additionalNotes: String,
+            isValidQuotation: Boolean,
+        },
+        emailMessageId: String,
+        rawEmailData: Object,
+    }],
 
     // User Tracking
     createdBy: {

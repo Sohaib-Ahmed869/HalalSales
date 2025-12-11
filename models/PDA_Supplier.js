@@ -29,10 +29,18 @@ const PDA_SupplierSchema = new Schema({
         enum: ['europages', 'freshdi', 'globalsources', 'alibaba'],
     },
 
+    email: {
+        type: String,
+        trim: true,
+        lowercase: true,
+        index: true,
+    },
+
+
     // Contact Information
     contactInfo: {
         phone: String,
-        email: String,
+
         address: String,
         website: String,
         additionalInfo: Schema.Types.Mixed,

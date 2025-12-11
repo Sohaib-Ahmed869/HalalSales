@@ -141,13 +141,13 @@ exports.createRFQDraft = async (req, res) => {
 };
 
 /**
- * Step 3: Send RFQ to vendors with bilingual support
+ * Step 3: Send RFQ to vendors using Gmail
  * POST /api/rfq/:rfqId/send
  */
 exports.sendRFQToVendors = async (req, res) => {
     try {
         const { rfqId } = req.params;
-        const { vendorCodes, customMessage, language = 'fr' } = req.body; // Default to French
+        const { vendorCodes, customMessage, language = 'fr' } = req.body;
 
         const rfq = await RFQ.findById(rfqId);
 
@@ -158,43 +158,48 @@ exports.sendRFQToVendors = async (req, res) => {
             });
         }
 
-        if (rfq.status === 'cancelled') {
-            return res.status(400).json({
-                success: false,
-                error: 'Cannot send cancelled RFQ',
-            });
-        }
-
         // Get vendor details
         const vendors = await Vendor.find({
             CardCode: { $in: vendorCodes },
         });
 
-        if (vendors.length === 0) {
-            return res.status(400).json({
-                success: false,
-                error: 'No active vendors found',
-            });
-        }
+        const PDA_Supplier = require('../models/PDA_Supplier');
+        const pdaSupplierIds = vendorCodes.filter(code =>
+            !code.startsWith('V') && code.length === 24
+        );
 
-        // Generate bilingual PDFs (both French and English)
-        console.log('Generating bilingual PDF documents...');
-      
-        const pdfEnglishBuffer = await generateRFQPDF(rfq, 'en');
+        const pdaSuppliers = await PDA_Supplier.find({
+            _id: { $in: pdaSupplierIds },
+            isActive: true
+        });
 
-        // Send emails to each vendor
+        const pdaSuppliersAsVendors = pdaSuppliers.map(s => ({
+            CardCode: s._id.toString(),
+            CardName: s.supplierName,
+            email: s.email,
+            phone: s.contactInfo?.phone,
+            vendorSource: 'PDA_SCRAPER',
+        }));
+
+        const allVendors = [...vendors, ...pdaSuppliersAsVendors];
+
+        // Generate PDF
+        const pdfBuffer = await generateRFQPDF(rfq, 'en');
+
+        // Import Gmail service
+        const gmailService = require('../services/gmailService');
+
+        // Send emails
         const sendResults = [];
 
-        for (const vendor of vendors) {
+        for (const vendor of allVendors) {
             try {
-                console.log(`Sending RFQ to ${vendor.CardName} (${vendor.email})`);
+                console.log(`📧 Sending RFQ to ${vendor.CardName} (${vendor.email})`);
 
-                // Find historical relationship data
                 const vendorHistory = rfq.metadata?.suggestedVendors?.find(
                     v => v.vendorCode === vendor.CardCode
                 );
 
-                // Generate personalized bilingual email using AI
                 const emailContent = await generateRFQEmail(
                     {
                         rfqNumber: rfq.rfqNumber,
@@ -212,26 +217,22 @@ exports.sendRFQToVendors = async (req, res) => {
                         vendorName: vendor.CardName,
                         totalPurchases: vendorHistory?.totalPurchases || 0,
                     },
-                    'both' // Generate both French and English
+                    'en'
                 );
 
-                // Prepare attachments with both language versions
-                const attachments = [
-                   
-                    {
-                        filename: `RFQ-${rfq.rfqNumber}-EN.pdf`,
-                        content: pdfEnglishBuffer,
-                        contentType: 'application/pdf',
-                    }
-                ];
-
-                // Send email with enhanced footer and bilingual attachments
-                const emailResult = await sendEmail({
+                // Send via Gmail
+                const emailResult = await gmailService.sendEmail({
                     to: vendor.email,
                     subject: emailContent.subject,
                     text: emailContent.bodyText,
                     html: emailContent.bodyHtml,
-                    attachments,
+                    attachments: [
+                        {
+                            filename: `RFQ-${rfq.rfqNumber}-EN.pdf`,
+                            content: pdfBuffer,
+                            contentType: 'application/pdf',
+                        }
+                    ],
                 });
 
                 // Update RFQ vendor status
@@ -257,10 +258,9 @@ exports.sendRFQToVendors = async (req, res) => {
                     vendorName: vendor.CardName,
                     success: true,
                     messageId: emailResult.messageId,
-                    languagesIncluded: ['French', 'English'],
                 });
 
-                console.log(`✅ Successfully sent to ${vendor.CardName}`);
+                console.log(`✅ Sent to ${vendor.CardName}`);
 
             } catch (error) {
                 console.error(`❌ Failed to send to ${vendor.CardName}:`, error);
@@ -273,12 +273,22 @@ exports.sendRFQToVendors = async (req, res) => {
             }
         }
 
+        return res.json({
+            success: true,
+            message: `RFQ sent to ${allVendors.length} vendors Test via Gmail`,
+            data: {
+                rfqNumber: rfq.rfqNumber,
+                totalVendors: allVendors.length,
+                sendResults,
+                rfq: rfq.toObject(),
+            },
+        });
+
         // Update RFQ status
         rfq.status = 'sent';
         rfq.metadata = {
             ...rfq.metadata,
             sentAt: new Date(),
-            languagesUsed: ['fr', 'en'],
         };
         await rfq.save();
 
@@ -286,12 +296,11 @@ exports.sendRFQToVendors = async (req, res) => {
 
         res.json({
             success: true,
-            message: `RFQ sent successfully to ${successCount} out of ${vendors.length} vendors`,
+            message: `RFQ sent via Gmail to ${successCount} out of ${allVendors.length} vendors`,
             data: {
                 rfqNumber: rfq.rfqNumber,
-                totalVendors: vendors.length,
+                totalVendors: allVendors.length,
                 successfulSends: successCount,
-                failedSends: vendors.length - successCount,
                 sendResults,
                 rfq: rfq.toObject(),
             },

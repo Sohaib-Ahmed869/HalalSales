@@ -75,7 +75,7 @@ class SAPPaymentService {
                 PaymentInvoices: paymentData.PaymentInvoices || [],
             };
 
-            // ✅ Only add payment fields that are actually provided
+            // ✅ Cash payments
             if (paymentData.CashSum) {
                 sapPayment.CashSum = paymentData.CashSum;
                 if (paymentData.CashAccount) {
@@ -83,11 +83,16 @@ class SAPPaymentService {
                 }
             }
 
+            // ✅ Check payments - use CashSum for total, PaymentChecks for details
             if (paymentData.CheckSum) {
-                sapPayment.CheckSum = paymentData.CheckSum;
+                sapPayment.CashSum = paymentData.CheckSum;
                 sapPayment.PaymentChecks = paymentData.PaymentChecks || [];
+                if (paymentData.CheckAccount) {
+                    sapPayment.CheckAccount = paymentData.CheckAccount;
+                }
             }
 
+            // ✅ Bank transfer payments
             if (paymentData.TransferSum) {
                 sapPayment.TransferSum = paymentData.TransferSum;
                 if (paymentData.TransferAccount) {
@@ -95,9 +100,13 @@ class SAPPaymentService {
                 }
             }
 
+            // ✅ Credit card payments - use CashSum for total, PaymentCreditCards for details
             if (paymentData.CreditSum) {
-                sapPayment.CreditSum = paymentData.CreditSum;
+                sapPayment.CashSum = paymentData.CreditSum;  // ← Use CashSum, not CreditSum!
                 sapPayment.PaymentCreditCards = paymentData.PaymentCreditCards || [];
+                if (paymentData.CreditAccount) {
+                    sapPayment.CashAccount = paymentData.CreditAccount;
+                }
             }
 
             console.log('Creating SAP Incoming Payment:', JSON.stringify(sapPayment, null, 2));
