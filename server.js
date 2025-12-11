@@ -54,13 +54,13 @@ const creditNoteRoutes = require('./routes/creditNoteRoutes');
 const superExportRoutes = require('./routes/Sales.export.routes');
 const emailLogRoutes = require('./routes/emailLogRoutes');
 const parserPaymentsRoutes = require('./routes/reconciliationModule/parserPayments.routes');
-const pdaRoutes = require('./routes/pdaRoutes');
+//const pdaRoutes = require('./routes/pdaRoutes');
 const mapRoutes = require("./routes/map.routes");
 const aiSummaryRoutes = require("./routes/aiSummary.routes");
 const areaAnalysisRoutes = require("./routes/areaAnalysis.routes");
 const reportingRoutes = require('./routes/reportingRoutes')
 //const vendorEmailRoutes = require('./routes/vendorEmailRoutes');
-const gmailAuthRoutes = require('./routes/gmailAuth');
+//const gmailAuthRoutes = require('./routes/gmailAuth');
 const config = require("./services/config");
 const desktimeJob = require("./jobs/desktimeJob");
 const { linkDocumentsToAgents } = require("./migrateAgentReferences");
@@ -178,7 +178,7 @@ app.use("/api/restaurant-scraper", restaurantScraperRoutes);
 app.use("/api/conversations", conversationRoutes);
 app.use("/api/call-acceptance", callAcceptanceRoutes);
 app.use("/api/reporting", reportingRoutes);
-app.use('/api/gmail', gmailAuthRoutes);
+//app.use('/api/gmail', gmailAuthRoutes);
 
 // Legacy analytics routes (keep for backward compatibility if needed)
 // app.use("/api/super-chat-analytics-old", superChatAnalyticsRoutes);
@@ -212,7 +212,7 @@ app.use('/api/email-logs', emailLogRoutes);
 app.use('/api/sales-export', superExportRoutes);
 app.use("/api/financial-statements", require('./routes/financialStatements.routes'));
 app.use("/api/reconciliation/parser-payments", parserPaymentsRoutes);
-app.use('/api/pda', pdaRoutes);
+//app.use('/api/pda', pdaRoutes);
 app.use("/api/map", mapRoutes);
 app.use("/api/ai-summary", aiSummaryRoutes);
 app.use("/api/area-analysis", areaAnalysisRoutes);
