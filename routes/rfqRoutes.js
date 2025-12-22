@@ -36,6 +36,27 @@ router.post('/create', rfqController.createRFQDraft);
  */
 router.post('/:rfqId/send', rfqController.sendRFQToVendors);
 
+router.get('/gmail/auth-url', (req, res) => {
+    const gmailService = require('../services/gmailService');
+    const authUrl = gmailService.getAuthUrl();
+    res.json({ authUrl });
+});
+
+// Add this to your routes (temporary)
+router.get('/gmail/get-token', async (req, res) => {
+    const { code } = req.query;
+    const gmailService = require('../services/gmailService');
+
+    try {
+        const tokens = await gmailService.getTokenFromCode(code);
+        res.json({
+            message: 'Add this refresh_token to your .env file',
+            refresh_token: tokens.refresh_token
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 /**
  * @route   POST /api/rfq/:rfqId/vendor-response
  * @desc    Record vendor quotation response

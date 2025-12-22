@@ -1,6 +1,7 @@
 // models/TruckRoute.js
 const mongoose = require("mongoose");
 
+// models/TruckRoute.js
 const truckRouteSchema = new mongoose.Schema({
     deliveryDate: {
         type: Date,
@@ -41,11 +42,29 @@ const truckRouteSchema = new mongoose.Schema({
             type: Date,
             default: Date.now,
         },
+        orderWeightKg: {  // ADD THIS
+            type: Number,
+            default: 0,
+        },
     }],
     totalOrders: {
         type: Number,
         default: 0,
     },
+    // ADD THESE FIELDS
+    totalWeightKg: {
+        type: Number,
+        default: 0,
+    },
+    maxWeightKg: {
+        type: Number,
+        default: 1000, // Default 1000kg capacity
+    },
+    capacityUsedPercent: {
+        type: Number,
+        default: 0,
+    },
+    // END NEW FIELDS
     status: {
         type: String,
         enum: ["planning", "in_progress", "completed"],

@@ -5,7 +5,7 @@ const restaurantScraperController = require('../controllers/restaurantScraper.co
 const { auth } = require('../middleware/auth');
 
 // Apply authentication to all routes
-router.use(auth);
+
 // Add these routes:
 /**
  * @route   POST /api/restaurant-scraper/clean-postal-codes

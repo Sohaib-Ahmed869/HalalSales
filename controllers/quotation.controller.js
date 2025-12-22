@@ -1589,16 +1589,26 @@ exports.convertToOrder = async (req, res) => {
     }));
 
     // Create the sales order from the quotation data
+    // Create the sales order from the quotation data
     const newOrder = new SalesOrder({
       // Copy all fields from quotation except specific fields that need to be fresh
       ...quotationData,
+
+      // Override with request body FIRST (if provided)
+      ...req.body,
+
+      // Then set these fields explicitly (they will override req.body)
       DocEntry: newDocEntry,
       DocNum: newDocEntry,
       CreationDate: new Date(),
       UpdateDate: new Date(),
       DocDate: req.body.DocDate || new Date(),
-      DocDueDate: req.body.DocDueDate || new Date(),
-      RequriedDate: req.body.DocDueDate,
+      DocDueDate: req.body.DocDueDate || quotationData.DocDueDate || new Date(),
+
+      // ✅ CRITICAL FIX: Properly inherit delivery dates from quotation
+      StartDeliveryDate: req.body.StartDeliveryDate || quotationData.StartDeliveryDate || quotationData.DocDueDate || new Date(),
+      RequriedDate: req.body.StartDeliveryDate || quotationData.StartDeliveryDate || quotationData.RequriedDate || quotationData.DocDueDate || new Date(),
+
       SyncedWithSAP: false,
       LocalStatus: "Created",
 
@@ -1607,9 +1617,6 @@ exports.convertToOrder = async (req, res) => {
 
       // CRITICAL FIX: Use processed document lines with price list info
       DocumentLines: processedDocumentLines,
-
-      // Override with any additional data from the request body
-      ...req.body,
 
       // Ensure we keep the original references
       salesAgent: quotation.salesAgent,

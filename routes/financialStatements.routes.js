@@ -42,6 +42,12 @@ router.post(
 );
 
 router.post(
+    "/import-sg-bank-statements",
+    upload.single("file"),
+    financialStatementsController.importSGBankStatements
+);
+
+router.post(
     "/import-paypal-statements",
     upload.single("file"),
     financialStatementsController.importPayPalStatements

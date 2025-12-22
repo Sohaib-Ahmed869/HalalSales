@@ -3,6 +3,7 @@ const TruckSchedule = require("../models/TruckSchedule");
 const TruckRoute = require("../models/TruckRoute");
 const SalesOrder = require("../models/SalesOrder");
 const Customer = require("../models/Customer");
+const Item = require("../models/item");
 
 /**
  * Get all truck schedules (weekly templates)
@@ -131,45 +132,530 @@ exports.deleteSchedule = async (req, res) => {
 exports.getRoutesByDate = async (req, res) => {
     try {
         const { date } = req.params;
-        const deliveryDate = new Date(date);
+        console.log("=== FETCHING TRUCK ROUTES ===");
+        console.log("📅 Requested Date:", date);
 
-        const routes = await TruckRoute.find({ deliveryDate })
+        // Parse the date string directly without timezone conversion
+        const dateStr = date; // e.g., "2025-12-15"
+        const targetDate = new Date(dateStr + "T00:00:00.000Z"); // Force UTC
+
+        const nextDay = new Date(targetDate);
+        nextDay.setDate(nextDay.getDate() + 1);
+
+        console.log("🕐 Date Range:", {
+            from: targetDate.toISOString(),
+            to: nextDay.toISOString()
+        });
+
+        const routes = await TruckRoute.find({
+            deliveryDate: { $gte: targetDate, $lt: nextDay },
+        }).lean();
+
+        console.log(`🚚 Found ${routes.length} truck routes for this date`);
+
+        // Collect all order ObjectIds (not DocNums)
+        const allOrderIds = [];
+        routes.forEach(route => {
+            route.orders.forEach(orderItem => {
+                if (orderItem.order) {
+                    // orderItem.order is an ObjectId
+                    allOrderIds.push(orderItem.order);
+                }
+            });
+        });
+
+        console.log(`📦 Total orders to fetch: ${allOrderIds.length}`);
+
+        // Fetch all orders at once using ObjectIds
+        const allOrders = await SalesOrder.find({
+            _id: { $in: allOrderIds }  // Use _id instead of DocNum
+        }).lean();
+
+        console.log(`✅ Successfully fetched ${allOrders.length} sales orders`);
+
+        // Create order map using ObjectId strings as keys
+        const orderMap = new Map();
+        allOrders.forEach(order => {
+            orderMap.set(order._id.toString(), order);
+        });
+
+        // Collect all unique ItemCodes
+        const allItemCodes = new Set();
+        allOrders.forEach(order => {
+            if (order.DocumentLines && order.DocumentLines.length > 0) {
+                order.DocumentLines.forEach(line => {
+                    if (line.ItemCode) {
+                        allItemCodes.add(line.ItemCode);
+                    }
+                });
+            }
+        });
+
+        console.log(`📊 Fetching ${allItemCodes.size} unique items for weight calculation`);
+
+        const items = await Item.find({
+            ItemCode: { $in: Array.from(allItemCodes) }
+        })
+            .select("ItemCode SalesUnitWeight SalesWeightUnit")
+            .lean();
+
+        console.log(`⚖️  Found ${items.length} items with weight data`);
+
+        // Create item map
+        const itemMap = new Map();
+        items.forEach(item => {
+            itemMap.set(item.ItemCode, item);
+        });
+
+
+        // Collect all unique CardCodes
+        const allCardCodes = new Set();
+        allOrders.forEach(order => {
+            if (order.CardCode) {
+                allCardCodes.add(order.CardCode);
+            }
+        });
+
+        console.log(`👥 Fetching ${allCardCodes.size} unique customers with store hours`);
+
+        // Fetch all customers at once WITH opening and closing times
+        const customers = await Customer.find({
+            CardCode: { $in: Array.from(allCardCodes) }
+        })
+            .select("CardCode coordinates address deliveryAddress openingTime closingTime")
+            .lean();
+
+        console.log(`✅ Found ${customers.length} customers`);
+
+        // Create customer map
+        const customerMap = new Map();
+        customers.forEach(customer => {
+            customerMap.set(customer.CardCode, customer);
+        });
+
+        // Log store hours summary
+        const customersWithHours = customers.filter(c => c.openingTime || c.closingTime);
+        console.log(`🕒 Customers with store hours: ${customersWithHours.length}/${customers.length}`);
+
+        // Helper function to convert time to minutes for comparison
+        const timeToMinutes = (timeString) => {
+            if (!timeString) return 999999; // Put orders without time at the end
+            const [hours, minutes] = timeString.split(':').map(Number);
+            return hours * 60 + minutes;
+        };
+
+        // Helper function to validate store hours
+        const validateStoreHours = (openingTime, closingTime, customerName) => {
+            if (!openingTime || !closingTime) return { valid: true, reason: null };
+
+            const openMinutes = timeToMinutes(openingTime);
+            const closeMinutes = timeToMinutes(closingTime);
+
+            // Check if closing is before opening (invalid unless overnight)
+            if (closeMinutes <= openMinutes && closeMinutes < 999999) {
+                return {
+                    valid: false,
+                    reason: `⚠️  INVALID HOURS: ${customerName} - Closing time (${closingTime}) is before/equal to opening time (${openingTime})`
+                };
+            }
+
+            return { valid: true, reason: null };
+        };
+
+        // Helper function to calculate truck departure time based on earliest opening
+        const calculateDepartureTime = (orders) => {
+            let earliestOpening = null;
+            let earliestCustomer = null;
+
+            orders.forEach(orderItem => {
+                if (orderItem.order && orderItem.order.CardCode) {
+                    const customer = customerMap.get(orderItem.order.CardCode);
+                    if (customer?.openingTime) {
+                        if (earliestOpening === null || customer.openingTime < earliestOpening) {
+                            earliestOpening = customer.openingTime;
+                            earliestCustomer = orderItem.order.CardName;
+                        }
+                    }
+                }
+            });
+
+            if (earliestOpening && earliestCustomer) {
+                console.log(`   🚦 Earliest opening: ${earliestOpening} (${earliestCustomer})`);
+            }
+
+            return earliestOpening || "08:00"; // Default to 8 AM if no opening times
+        };
+
+        console.log("\n🔧 ENRICHING ROUTES WITH DATA...");
+
+        // Enrich routes with full order details and coordinates
+        const enrichedRoutes = routes.map((route, routeIndex) => {
+            console.log(`\n--- Processing Route ${routeIndex + 1}/${routes.length}: ${route.truckName} ---`);
+
+            const enrichedOrders = route.orders.map((orderItem, orderIndex) => {
+                const order = orderMap.get(orderItem.order.toString());
+
+                if (!order) {
+                    console.log(`⚠️  Order ${orderIndex + 1}: Not found in database`);
+                    return orderItem;
+                }
+
+                const customer = customerMap.get(order.CardCode);
+
+                // Validate store hours
+                if (customer?.openingTime && customer?.closingTime) {
+                    const validation = validateStoreHours(customer.openingTime, customer.closingTime, order.CardName);
+                    if (!validation.valid) {
+                        console.log(`   ${validation.reason}`);
+                    }
+                }
+
+                // Calculate weight from items
+                let totalWeight = 0;
+                if (order.DocumentLines && order.DocumentLines.length > 0) {
+                    for (const line of order.DocumentLines) {
+                        if (line.ItemCode && line.Quantity) {
+                            const item = itemMap.get(line.ItemCode);
+
+                            if (item && item.SalesUnitWeight) {
+                                const lineWeight = item.SalesUnitWeight * line.Quantity;
+                                totalWeight += lineWeight;
+                            }
+                        }
+                    }
+                }
+
+                const storeHoursDisplay = customer?.openingTime && customer?.closingTime
+                    ? `${customer.openingTime} - ${customer.closingTime}`
+                    : 'Not set';
+
+                console.log(`   Order ${orderIndex + 1} (DocNum: ${order.DocNum}):`, {
+                    customer: order.CardName,
+                    weight: `${totalWeight.toFixed(2)} kg`,
+                    hasCoordinates: !!customer?.coordinates,
+                    storeHours: storeHoursDisplay
+                });
+
+                return {
+                    ...orderItem,
+                    orderWeightKg: parseFloat(totalWeight.toFixed(2)),
+                    order: {
+                        ...order,
+                        address: customer?.address || customer?.deliveryAddress,
+                        totalWeight: totalWeight,
+                        weightUnit: "kg",
+                    },
+                    coordinates: customer?.coordinates || null,
+                    storeHours: {
+                        openingTime: customer?.openingTime || null,
+                        closingTime: customer?.closingTime || null,
+                    }
+                };
+            });
+
+            // ===== SMART SORTING BY OPENING TIME =====
+            console.log('\n🔄 SORTING ORDERS BY OPENING TIME...');
+
+            const sortedOrders = enrichedOrders.sort((a, b) => {
+                const timeA = timeToMinutes(a.storeHours?.openingTime);
+                const timeB = timeToMinutes(b.storeHours?.openingTime);
+                return timeA - timeB;
+            });
+
+            // Update sequence numbers after sorting
+            sortedOrders.forEach((order, index) => {
+                order.sequenceNumber = index + 1;
+            });
+
+            console.log('📋 Sorted order sequence:');
+            sortedOrders.forEach((orderItem, index) => {
+                const openTime = orderItem.storeHours?.openingTime || 'No time';
+                const closeTime = orderItem.storeHours?.closingTime || 'No time';
+                console.log(`   ${index + 1}. ${orderItem.order?.CardName} - Opens: ${openTime}, Closes: ${closeTime}`);
+            });
+
+            // Calculate total truck weight from sorted orders
+            const calculatedTotalWeight = sortedOrders.reduce((sum, orderItem) => {
+                return sum + (orderItem.orderWeightKg || 0);
+            }, 0);
+
+            const maxWeight = route.maxWeightKg || 1000;
+            const calculatedCapacityPercent = calculatedTotalWeight > 0
+                ? parseFloat(((calculatedTotalWeight / maxWeight) * 100).toFixed(2))
+                : 0;
+
+            // Calculate departure time
+            const departureTime = calculateDepartureTime(sortedOrders);
+
+            const departureReason = departureTime !== "08:00"
+                ? `Truck departs at ${departureTime} (earliest store opening time)`
+                : 'Using default departure time (no store hours defined)';
+
+            console.log(`📊 Route Summary:`, {
+                totalOrders: sortedOrders.length,
+                totalWeight: `${calculatedTotalWeight.toFixed(2)} kg`,
+                capacity: `${calculatedCapacityPercent}%`,
+                departureTime: departureTime,
+                reason: departureReason
+            });
+
+            return {
+                ...route,
+                orders: sortedOrders, // Use sorted orders
+                totalWeightKg: parseFloat(calculatedTotalWeight.toFixed(2)),
+                capacityUsedPercent: calculatedCapacityPercent,
+                departureTime: departureTime,
+            };
+        });
+
+        // Clean up the response - convert to plain objects and ensure all route data is included
+        const cleanRoutes = enrichedRoutes.map(route => ({
+            _id: route._id,
+            deliveryDate: route.deliveryDate,
+            scheduleId: route.scheduleId,
+            dayOfWeek: route.dayOfWeek,
+            region: route.region,
+            departments: route.departments || [],
+            cities: route.cities || [],
+            truckNumber: route.truckNumber,
+            truckName: route.truckName,
+            totalOrders: route.totalOrders || route.orders.length,
+            totalWeightKg: route.totalWeightKg,
+            maxWeightKg: route.maxWeightKg || 1000,
+            capacityUsedPercent: route.capacityUsedPercent,
+            status: route.status || "planning",
+            departureTime: route.departureTime,
+            createdAt: route.createdAt,
+            updatedAt: route.updatedAt,
+            completedAt: route.completedAt,
+            orders: route.orders.map(orderItem => ({
+                _id: orderItem._id,
+                sequenceNumber: orderItem.sequenceNumber, // Now properly sorted
+                assignedAt: orderItem.assignedAt,
+                orderWeightKg: orderItem.orderWeightKg,
+                order: orderItem.order ? {
+                    _id: orderItem.order._id,
+                    DocEntry: orderItem.order.DocEntry,
+                    DocNum: orderItem.order.DocNum,
+                    DocDate: orderItem.order.DocDate,
+                    CardCode: orderItem.order.CardCode,
+                    CardName: orderItem.order.CardName,
+                    DocTotal: orderItem.order.DocTotal,
+                    address: orderItem.order.address,
+                    totalWeight: orderItem.order.totalWeight,
+                    weightUnit: orderItem.order.weightUnit,
+                } : null,
+                coordinates: orderItem.coordinates,
+                storeHours: orderItem.storeHours,
+            })),
+        }));
+
+        console.log("\n✅ ROUTE PROCESSING COMPLETE");
+        console.log(`📤 Sending ${cleanRoutes.length} routes to frontend`);
+        console.log("=== END FETCH TRUCK ROUTES ===\n");
+
+        res.json({
+            success: true,
+            routes: cleanRoutes,
+            totalRoutes: cleanRoutes.length,
+        });
+    } catch (error) {
+        console.error("❌ ERROR FETCHING ROUTES:", error);
+        console.error("Stack trace:", error.stack);
+        res.status(500).json({
+            success: false,
+            message: "Error fetching truck routes",
+            error: error.message,
+        });
+    }
+};
+/**
+ * Optimize route order based on weight, time, and proximity
+ * POST /api/truck-routes/:routeId/optimize
+ * Body: { optimizationStrategy: "weight" | "distance" | "balanced" }
+ */
+exports.optimizeRoute = async (req, res) => {
+    try {
+        const { routeId } = req.params;
+        const { optimizationStrategy = "balanced" } = req.body;
+
+        const route = await TruckRoute.findById(routeId);
+        if (!route) {
+            return res.status(404).json({
+                success: false,
+                message: "Route not found",
+            });
+        }
+
+        if (route.orders.length < 2) {
+            return res.status(400).json({
+                success: false,
+                message: "Need at least 2 orders to optimize",
+            });
+        }
+
+        // Fetch all orders with customer data
+        const orderIds = route.orders.map(o => o.order);
+        const orders = await SalesOrder.find({ _id: { $in: orderIds } })
+            .select("DocNum CardCode DocTotal DocumentLines")
+            .lean();
+
+        const orderMap = new Map(orders.map(o => [o._id.toString(), o]));
+
+        // Get customer coordinates for all orders
+        const cardCodes = orders.map(o => o.CardCode);
+        const customers = await Customer.find({ CardCode: { $in: cardCodes } })
+            .select("CardCode coordinates")
+            .lean();
+
+        const customerMap = new Map(customers.map(c => [c.CardCode, c]));
+
+        // Enrich orders with coordinates and weights
+        const enrichedOrders = route.orders.map(orderItem => {
+            const order = orderMap.get(orderItem.order.toString());
+            const customer = customerMap.get(order?.CardCode);
+
+            return {
+                ...orderItem.toObject(),
+                coordinates: customer?.coordinates,
+                weight: orderItem.orderWeightKg || 0,
+                orderId: orderItem.order.toString(),
+            };
+        }).filter(o => o.coordinates); // Only orders with coordinates
+
+        if (enrichedOrders.length < 2) {
+            return res.status(400).json({
+                success: false,
+                message: "Not enough orders with coordinates to optimize",
+            });
+        }
+
+        // Warehouse starting point
+        const WAREHOUSE = { lat: 48.922385, lng: 2.395789 };
+
+        // Calculate distance between two points (Haversine)
+        const calculateDistance = (coord1, coord2) => {
+            const R = 6371; // Earth radius in km
+            const dLat = (coord2.lat - coord1.lat) * Math.PI / 180;
+            const dLng = (coord2.lng - coord1.lng) * Math.PI / 180;
+            const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(coord1.lat * Math.PI / 180) * Math.cos(coord2.lat * Math.PI / 180) *
+                Math.sin(dLng / 2) * Math.sin(dLng / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        };
+
+        let optimizedOrders = [];
+
+        if (optimizationStrategy === "weight") {
+            // Heaviest first strategy (stability)
+            optimizedOrders = enrichedOrders.sort((a, b) => b.weight - a.weight);
+        }
+        else if (optimizationStrategy === "distance") {
+            // Nearest neighbor algorithm starting from warehouse
+            optimizedOrders = [];
+            const remaining = [...enrichedOrders];
+            let currentPos = WAREHOUSE;
+
+            while (remaining.length > 0) {
+                let nearestIdx = 0;
+                let minDist = calculateDistance(currentPos, remaining[0].coordinates);
+
+                for (let i = 1; i < remaining.length; i++) {
+                    const dist = calculateDistance(currentPos, remaining[i].coordinates);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        nearestIdx = i;
+                    }
+                }
+
+                const nearest = remaining.splice(nearestIdx, 1)[0];
+                optimizedOrders.push(nearest);
+                currentPos = nearest.coordinates;
+            }
+        }
+        else { // "balanced" strategy
+            // Balanced: Sort by distance from warehouse, but consider weight
+            // Calculate a score: distance * (1 + weight/maxWeight * 0.3)
+            const maxWeight = Math.max(...enrichedOrders.map(o => o.weight));
+
+            optimizedOrders = enrichedOrders.map(order => {
+                const distance = calculateDistance(WAREHOUSE, order.coordinates);
+                const weightFactor = maxWeight > 0 ? (order.weight / maxWeight) * 0.3 : 0;
+                const score = distance * (1 + weightFactor);
+                return { ...order, score };
+            }).sort((a, b) => a.score - b.score);
+        }
+
+        // Update sequence numbers
+        route.orders = optimizedOrders.map((order, index) => ({
+            order: order.order,
+            sequenceNumber: index + 1,
+            assignedAt: order.assignedAt,
+            orderWeightKg: order.orderWeightKg,
+        }));
+
+        route.updatedAt = new Date();
+        await route.save();
+
+        // Return populated route
+        const populatedRoute = await TruckRoute.findById(route._id)
             .populate({
                 path: "orders.order",
-                select: "DocNum CardCode CardName DocTotal Address DocumentStatus",
+                select: "DocNum DocEntry CardCode CardName DocTotal DocumentStatus DocDate",
             })
             .lean();
 
-        // Get customer details for each route
-        for (const route of routes) {
-            for (const orderItem of route.orders) {
-                if (orderItem.order) {
-                    const customer = await Customer.findOne({
-                        CardCode: orderItem.order.CardCode,
-                    })
-                        .select("coordinates address deliveryAddress")
-                        .lean();
+        // Add coordinates back
+        for (const orderItem of populatedRoute.orders) {
+            if (orderItem.order) {
+                const customer = await Customer.findOne({
+                    CardCode: orderItem.order.CardCode,
+                })
+                    .select("coordinates address")
+                    .lean();
 
-                    if (customer) {
-                        orderItem.coordinates = customer.coordinates;
-                        orderItem.address = customer.address || customer.deliveryAddress;
-                    }
+                if (customer?.coordinates) {
+                    orderItem.coordinates = customer.coordinates;
+                }
+                if (customer?.address) {
+                    orderItem.order.address = customer.address;
                 }
             }
         }
 
         res.json({
             success: true,
-            date: deliveryDate,
-            routes,
+            message: `Route optimized using ${optimizationStrategy} strategy`,
+            route: populatedRoute,
+            strategy: optimizationStrategy,
         });
     } catch (error) {
-        console.error("Error fetching routes by date:", error);
+        console.error("Error optimizing route:", error);
         res.status(500).json({
             success: false,
-            message: "Error fetching routes",
+            message: "Error optimizing route",
             error: error.message,
         });
+    }
+};
+
+// Add this temporarily to test
+exports.debugRoutes = async (req, res) => {
+    try {
+        const allRoutes = await TruckRoute.find({}).lean();
+
+        res.json({
+            totalRoutes: allRoutes.length,
+            sampleRoute: allRoutes[0] || null,
+            allDates: allRoutes.map(r => ({
+                date: r.date,
+                deliveryDate: r.deliveryDate,
+                truckName: r.truckName
+            }))
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
     }
 };
 
@@ -319,9 +805,6 @@ exports.assignOrderToTruck = async (req, res) => {
         let orderWeightKg = 0;
         if (order.U_ExtraData?.totalWeight) {
             orderWeightKg = parseFloat(order.U_ExtraData.totalWeight);
-        } else if (order.DocTotal) {
-            // Fallback: estimate 1kg per £10
-            orderWeightKg = order.DocTotal / 10;
         }
 
         // Check if adding this order would exceed truck capacity
@@ -557,88 +1040,172 @@ exports.reorderOrders = async (req, res) => {
 exports.getAvailableOrders = async (req, res) => {
     try {
         const { date } = req.params;
-        const deliveryDate = new Date(date);
+        const { region, department } = req.query;
 
-        // Set date range for the entire day
-        const startOfDay = new Date(deliveryDate);
-        startOfDay.setHours(0, 0, 0, 0);
 
-        const endOfDay = new Date(deliveryDate);
-        endOfDay.setHours(23, 59, 59, 999);
+        const dateStr = date;
+        const targetDate = new Date(dateStr + "T00:00:00.000Z");
 
-        // Get all routes for this date
-        const routes = await TruckRoute.find({ deliveryDate }).lean();
+        const nextDay = new Date(targetDate);
+        nextDay.setDate(nextDay.getDate() + 1);
 
-        // Get all assigned order IDs
-        const assignedOrderIds = routes.flatMap((r) =>
-            r.orders.map((o) => o.order.toString())
-        );
 
-        console.log(`Found ${routes.length} routes with ${assignedOrderIds.length} assigned orders`);
+        // Find all routes for this date
+        const routes = await TruckRoute.find({
+            deliveryDate: { $gte: targetDate, $lt: nextDay }, // CHANGED: was 'date', should be 'deliveryDate'
+        }).lean();
 
-        // Find Sales Orders for this date not yet assigned
-        const query = {
-            DocDate: {
-                $gte: startOfDay,
-                $lte: endOfDay,
-            },
-            _id: { $nin: assignedOrderIds },
-            DocumentStatus: { $ne: "Closed" }, // Only open orders
-        };
 
-        const orders = await SalesOrder.find(query)
-            .select("DocEntry DocNum DocDate CardCode CardName DocTotal Address DocumentStatus U_ExtraData")
-            .sort({ DocNum: -1 })
-            .lean();
+        // Get all assigned order DocNums
+        // Get all assigned order ObjectIds (not DocNums)
+        const assignedOrderIds = new Set();
+        routes.forEach(route => {
+            if (route.orders) {
+                route.orders.forEach(orderItem => {
+                    if (orderItem.order) {
+                        // orderItem.order is an ObjectId reference
+                        assignedOrderIds.add(orderItem.order.toString());
+                    }
+                });
+            }
+        });
 
-        console.log(`Found ${orders.length} unassigned sales orders for ${date}`);
 
-        // Get customer details with coordinates and calculate weights
-        const ordersWithDetails = [];
-
-        for (const order of orders) {
-            const customer = await Customer.findOne({ CardCode: order.CardCode })
-                .select("coordinates address deliveryAddress")
+        // Now we need to find the DocNums for these ObjectIds
+        let assignedOrderDocNums = new Set();
+        if (assignedOrderIds.size > 0) {
+            const assignedOrders = await SalesOrder.find({
+                _id: { $in: Array.from(assignedOrderIds) }
+            })
+                .select("DocNum")
                 .lean();
 
-            // Calculate estimated weight from order
-            let estimatedWeightKg = 0;
-            if (order.U_ExtraData?.totalWeight) {
-                estimatedWeightKg = parseFloat(order.U_ExtraData.totalWeight);
-            } else if (order.DocTotal) {
-                // Fallback: estimate 1kg per £10 of order value
-                estimatedWeightKg = order.DocTotal / 10;
-            }
+            assignedOrders.forEach(order => {
+                if (order.DocNum) {
+                    assignedOrderDocNums.add(order.DocNum);
+                }
+            });
 
-            // Only include orders with valid coordinates
-            if (customer && customer.coordinates && customer.coordinates.lat) {
-                ordersWithDetails.push({
-                    DocEntry: order.DocEntry,
-                    DocNum: order.DocNum,
-                    DocDate: order.DocDate,
-                    CardCode: order.CardCode,
-                    CardName: order.CardName,
-                    DocTotal: order.DocTotal,
-                    DocumentStatus: order.DocumentStatus,
-                    coordinates: customer.coordinates,
-                    address: customer.address || customer.deliveryAddress,
-                    estimatedWeightKg: parseFloat(estimatedWeightKg.toFixed(2)),
+        }
+
+
+        // Find orders for this date that aren't assigned
+        const ordersQuery = {
+            StartDeliveryDate: { $gte: targetDate, $lt: nextDay },
+        };
+
+        if (assignedOrderDocNums.size > 0) {
+            ordersQuery.DocNum = { $nin: Array.from(assignedOrderDocNums) };
+        }
+
+
+        const orders = await SalesOrder.find(ordersQuery)
+            .select("DocEntry DocNum DocDate StartDeliveryDate CardCode CardName DocTotal DocumentLines")
+            .lean();
+
+
+        if (orders.length === 0) {
+            return res.json({
+                success: true,
+                orders: [],
+                totalOrders: 0,
+            });
+        }
+
+        // Collect all unique ItemCodes first
+        const allItemCodes = new Set();
+        orders.forEach(order => {
+            if (order.DocumentLines && Array.isArray(order.DocumentLines)) {
+                order.DocumentLines.forEach(line => {
+                    if (line.ItemCode) {
+                        allItemCodes.add(line.ItemCode);
+                    }
                 });
-            } else {
-                console.log(`Order ${order.DocNum} skipped - customer ${order.CardCode} has no coordinates`);
+            }
+        });
+
+
+        // Fetch items
+        let items = [];
+        const itemMap = new Map();
+
+        if (allItemCodes.size > 0) {
+            try {
+                items = await Item.find({
+                    ItemCode: { $in: Array.from(allItemCodes) }
+                })
+                    .select("ItemCode SalesUnitWeight SalesWeightUnit")
+                    .lean();
+
+                // Create item map
+                items.forEach(item => {
+                    itemMap.set(item.ItemCode, item);
+                });
+            } catch (itemError) {
+                console.error("Error fetching items (continuing without weights):", itemError);
             }
         }
 
-        console.log(`Returning ${ordersWithDetails.length} orders with coordinates and weights`);
+        // Enrich with coordinates and calculate weight
+
+        const ordersWithCoordinates = await Promise.all(
+            orders.map(async (order) => {
+                try {
+                    const customer = await Customer.findOne({ CardCode: order.CardCode })
+                        .select("coordinates address deliveryAddress")
+                        .lean();
+
+                    const coordinates = customer?.coordinates;
+                    const address = customer?.address || customer?.deliveryAddress;
+
+                    // Calculate total weight from order lines
+                    let totalWeight = 0;
+                    if (order.DocumentLines && Array.isArray(order.DocumentLines)) {
+                        for (const line of order.DocumentLines) {
+                            if (line.ItemCode && line.Quantity) {
+                                const item = itemMap.get(line.ItemCode);
+
+                                if (item && item.SalesUnitWeight) {
+                                    const lineWeight = item.SalesUnitWeight * line.Quantity;
+                                    totalWeight += lineWeight;
+                                }
+                            }
+                        }
+                    }
+
+                    return {
+                        DocEntry: order.DocEntry,
+                        DocNum: order.DocNum,
+                        DocDate: order.DocDate,
+                        StartDeliveryDate: order.StartDeliveryDate,
+                        CardCode: order.CardCode,
+                        CardName: order.CardName,
+                        DocTotal: order.DocTotal,
+                        coordinates: coordinates || null,
+                        address: address || null,
+                        totalWeight: totalWeight,
+                        weightUnit: "kg",
+                    };
+                } catch (orderError) {
+                    console.error(`Error processing order ${order.DocNum}:`, orderError);
+                    return null;
+                }
+            })
+        );
+
+        // Filter out null values and orders without coordinates
+        const filteredOrders = ordersWithCoordinates.filter(o => o && o.coordinates);
+
 
         res.json({
             success: true,
-            date: deliveryDate,
-            totalOrders: ordersWithDetails.length,
-            orders: ordersWithDetails,
+            orders: filteredOrders,
+            totalOrders: filteredOrders.length,
         });
     } catch (error) {
-        console.error("Error fetching available orders:", error);
+        console.error("=== ERROR in getAvailableOrders ===");
+        console.error("Error:", error);
+        console.error("Stack:", error.stack);
         res.status(500).json({
             success: false,
             message: "Error fetching available orders",
@@ -761,6 +1328,304 @@ exports.getRouteStatistics = async (req, res) => {
         res.status(500).json({
             success: false,
             message: "Error fetching statistics",
+            error: error.message,
+        });
+    }
+};
+
+/**
+ * Auto-generate truck route by intelligently assigning orders
+ * POST /api/truck-routes/:routeId/generate
+ */
+exports.generateTruckRoute = async (req, res) => {
+    try {
+        const { routeId } = req.params;
+        const { strategy = "balanced" } = req.body;
+
+        console.log("=== START AUTO-GENERATE TRUCK ROUTE ===");
+
+        const route = await TruckRoute.findById(routeId);
+        if (!route) {
+            return res.status(404).json({
+                success: false,
+                message: "Route not found",
+            });
+        }
+
+        console.log(`📅 Truck: ${route.truckName}, Region: ${route.region}`);
+
+        // Get available orders for this date
+        const dateStr = route.deliveryDate.toISOString().split("T")[0];
+        const targetDate = new Date(dateStr + "T00:00:00.000Z");
+        const nextDay = new Date(targetDate);
+        nextDay.setDate(nextDay.getDate() + 1);
+
+        // Find already assigned order IDs
+        const allRoutes = await TruckRoute.find({
+            deliveryDate: { $gte: targetDate, $lt: nextDay },
+        }).lean();
+
+        const assignedOrderIds = new Set();
+        allRoutes.forEach(r => {
+            r.orders.forEach(orderItem => {
+                if (orderItem.order) {
+                    assignedOrderIds.add(orderItem.order.toString());
+                }
+            });
+        });
+
+        // Get assigned DocNums
+        let assignedOrderDocNums = new Set();
+        if (assignedOrderIds.size > 0) {
+            const assignedOrders = await SalesOrder.find({
+                _id: { $in: Array.from(assignedOrderIds) }
+            }).select("DocNum").lean();
+
+            assignedOrders.forEach(order => {
+                if (order.DocNum) {
+                    assignedOrderDocNums.add(order.DocNum);
+                }
+            });
+        }
+
+        // Find available orders
+        const ordersQuery = {
+            StartDeliveryDate: { $gte: targetDate, $lt: nextDay },
+        };
+
+        if (assignedOrderDocNums.size > 0) {
+            ordersQuery.DocNum = { $nin: Array.from(assignedOrderDocNums) };
+        }
+
+        const availableOrders = await SalesOrder.find(ordersQuery)
+            .select("DocEntry DocNum CardCode CardName DocTotal DocumentLines StartDeliveryDate")
+            .lean();
+
+        console.log(`📦 Found ${availableOrders.length} available orders`);
+
+        if (availableOrders.length === 0) {
+            return res.json({
+                success: true,
+                message: "No available orders to assign",
+                route: route,
+                ordersAdded: 0,
+            });
+        }
+
+        // Get all ItemCodes for weight calculation
+        const allItemCodes = new Set();
+        availableOrders.forEach(order => {
+            if (order.DocumentLines && Array.isArray(order.DocumentLines)) {
+                order.DocumentLines.forEach(line => {
+                    if (line.ItemCode) {
+                        allItemCodes.add(line.ItemCode);
+                    }
+                });
+            }
+        });
+
+        // Fetch items with weights
+        const items = await Item.find({
+            ItemCode: { $in: Array.from(allItemCodes) }
+        }).select("ItemCode SalesUnitWeight SalesWeightUnit").lean();
+
+        const itemMap = new Map();
+        items.forEach(item => {
+            itemMap.set(item.ItemCode, item);
+        });
+
+        // Get customers with addresses for region filtering
+        const cardCodes = availableOrders.map(o => o.CardCode);
+        const customers = await Customer.find({
+            CardCode: { $in: cardCodes }
+        }).select("CardCode coordinates address openingTime closingTime").lean();
+
+        const customerMap = new Map();
+        customers.forEach(customer => {
+            customerMap.set(customer.CardCode, customer);
+        });
+
+        // Calculate weight and enrich orders
+        const enrichedOrders = availableOrders.map(order => {
+            let totalWeight = 0;
+            if (order.DocumentLines && Array.isArray(order.DocumentLines)) {
+                for (const line of order.DocumentLines) {
+                    if (line.ItemCode && line.Quantity) {
+                        const item = itemMap.get(line.ItemCode);
+                        if (item && item.SalesUnitWeight) {
+                            totalWeight += item.SalesUnitWeight * line.Quantity;
+                        }
+                    }
+                }
+            }
+
+            const customer = customerMap.get(order.CardCode);
+
+            return {
+                ...order,
+                totalWeight,
+                coordinates: customer?.coordinates,
+                address: customer?.address,
+                openingTime: customer?.openingTime,
+            };
+        }).filter(o => o.coordinates); // Only orders with coordinates
+
+        console.log(`📍 ${enrichedOrders.length} orders have coordinates`);
+
+        // Filter by region if truck has a region
+        let filteredOrders = enrichedOrders;
+        if (route.region) {
+            const FRENCH_DEPARTMENTS = {
+                "75": { region: "Île-de-France" },
+                "77": { region: "Île-de-France" },
+                "78": { region: "Île-de-France" },
+                "91": { region: "Île-de-France" },
+                "92": { region: "Île-de-France" },
+                "93": { region: "Île-de-France" },
+                "94": { region: "Île-de-France" },
+                "95": { region: "Île-de-France" },
+                // Add all other departments from your existing FRENCH_DEPARTMENTS object
+            };
+
+            filteredOrders = enrichedOrders.filter(order => {
+                if (!order.address || !order.address.zipCode) return false;
+
+                const zipCode = order.address.zipCode.toString();
+                const deptCode = zipCode.startsWith("97") || zipCode.startsWith("98")
+                    ? zipCode.substring(0, 3)
+                    : zipCode.substring(0, 2);
+
+                const dept = FRENCH_DEPARTMENTS[deptCode];
+                return dept && dept.region === route.region;
+            });
+
+            console.log(`🌍 ${filteredOrders.length} orders match region: ${route.region}`);
+        }
+
+        if (filteredOrders.length === 0) {
+            return res.json({
+                success: true,
+                message: `No available orders found for region: ${route.region}`,
+                route: route,
+                ordersAdded: 0,
+            });
+        }
+
+        // Sort orders based on strategy
+        let sortedOrders = [];
+        const WAREHOUSE = { lat: 48.922385, lng: 2.395789 };
+
+        const calculateDistance = (coord1, coord2) => {
+            const R = 6371;
+            const dLat = (coord2.lat - coord1.lat) * Math.PI / 180;
+            const dLng = (coord2.lng - coord1.lng) * Math.PI / 180;
+            const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(coord1.lat * Math.PI / 180) * Math.cos(coord2.lat * Math.PI / 180) *
+                Math.sin(dLng / 2) * Math.sin(dLng / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        };
+
+        if (strategy === "weight") {
+            sortedOrders = filteredOrders.sort((a, b) => b.totalWeight - a.totalWeight);
+        } else if (strategy === "distance") {
+            sortedOrders = filteredOrders.sort((a, b) => {
+                const distA = calculateDistance(WAREHOUSE, a.coordinates);
+                const distB = calculateDistance(WAREHOUSE, b.coordinates);
+                return distA - distB;
+            });
+        } else { // balanced
+            const maxWeight = Math.max(...filteredOrders.map(o => o.totalWeight || 0));
+            sortedOrders = filteredOrders.map(order => {
+                const distance = calculateDistance(WAREHOUSE, order.coordinates);
+                const weightFactor = maxWeight > 0 ? (order.totalWeight / maxWeight) * 0.3 : 0;
+                const score = distance * (1 + weightFactor);
+                return { ...order, score };
+            }).sort((a, b) => a.score - b.score);
+        }
+
+        // Add orders to truck until capacity is reached
+        const maxWeight = route.maxWeightKg || 1000;
+        let currentWeight = route.totalWeightKg || 0;
+        let ordersAdded = 0;
+
+        for (const order of sortedOrders) {
+            const orderWeight = order.totalWeight || 0;
+
+            if (currentWeight + orderWeight <= maxWeight) {
+                // Add order to route
+                route.orders.push({
+                    order: order._id,
+                    sequenceNumber: route.orders.length + 1,
+                    assignedAt: new Date(),
+                    orderWeightKg: parseFloat(orderWeight.toFixed(2)),
+                });
+
+                currentWeight += orderWeight;
+                ordersAdded++;
+                console.log(`✅ Added order #${order.DocNum} (${orderWeight.toFixed(2)}kg)`);
+            } else {
+                console.log(`⚠️ Capacity reached. Cannot add order #${order.DocNum}`);
+                break;
+            }
+        }
+
+        // Update route totals
+        route.totalOrders = route.orders.length;
+        route.totalWeightKg = parseFloat(currentWeight.toFixed(2));
+        route.capacityUsedPercent = parseFloat(((currentWeight / maxWeight) * 100).toFixed(2));
+        route.updatedAt = new Date();
+
+        await route.save();
+
+        console.log(`🎉 Added ${ordersAdded} orders to ${route.truckName}`);
+        console.log(`📊 Capacity: ${route.capacityUsedPercent}% (${route.totalWeightKg}/${maxWeight}kg)`);
+        console.log("=== END AUTO-GENERATE TRUCK ROUTE ===\n");
+
+        // Return populated route
+        const populatedRoute = await TruckRoute.findById(route._id)
+            .populate({
+                path: "orders.order",
+                select: "DocNum DocEntry CardCode CardName DocTotal DocumentStatus DocDate",
+            })
+            .lean();
+
+        // Add coordinates
+        for (const orderItem of populatedRoute.orders) {
+            if (orderItem.order) {
+                const customer = await Customer.findOne({
+                    CardCode: orderItem.order.CardCode,
+                }).select("coordinates address openingTime closingTime").lean();
+
+                if (customer?.coordinates) {
+                    orderItem.coordinates = customer.coordinates;
+                }
+                if (customer?.address) {
+                    orderItem.order.address = customer.address;
+                }
+                if (customer) {
+                    orderItem.storeHours = {
+                        openingTime: customer.openingTime || null,
+                        closingTime: customer.closingTime || null,
+                    };
+                }
+            }
+        }
+
+        res.json({
+            success: true,
+            message: `Successfully added ${ordersAdded} orders to ${route.truckName}`,
+            route: populatedRoute,
+            ordersAdded,
+            capacityUsed: route.capacityUsedPercent,
+            strategy,
+        });
+
+    } catch (error) {
+        console.error("❌ ERROR GENERATING ROUTE:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error generating truck route",
             error: error.message,
         });
     }

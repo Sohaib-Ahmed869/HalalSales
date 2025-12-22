@@ -1429,17 +1429,7 @@ exports.importSalarySheet = async (req, res) => {
         // Process unpaid deliveries
         parsedData.deliveries.unpaid.forEach(payment => {
             if (payment.amount) {
-                paymentsToCreate.push({
-                    cardCode: payment.cardCode || "UNMATCHED",
-                    cardName: payment.client,
-                    amount: payment.amount,
-                    paymentDate: sheetDate,
-                    reference: `UNPAID-${payment.client}`,
-                    paymentMethod: "unpaid",
-                    sap: payment.sap,
-                    remarks: payment.remarks,
-                    sheetDate: sheetDate,
-                });
+               //skipping unpaid deliveries for payment creation
             }
         });
 
@@ -1662,7 +1652,7 @@ exports.flattenBankStatements = async (req, res) => {
                 cardName: cardName,
                 amount: statement.amount,
                 reference: statement.operationReference,
-                source: "bred_bank",
+                source: statement.bankSource === "SG" ? "sg_bank" : "bred_bank",
                 paymentDate: statement.operationDate,
                 sourceDocument: {
                     sourceType: "BankStatement",

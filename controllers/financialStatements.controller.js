@@ -5,7 +5,7 @@ const Invoice = require("../models/Invoice");
 const Customer = require("../models/Customer");
 const syncMetadata = require("../models/SyncMetadata");
 const XLSX = require("xlsx");
-
+const pdfjsLib = require('pdfjs-dist');
 /**
  * Parse French number format (e.g., "461,52" -> 461.52)
  */
@@ -264,6 +264,401 @@ exports.importBankStatements = async (req, res) => {
     }
 };
 
+/**
+ * Import SG Bank statements from PDF file - DIRECTLY TO FLATTENED PAYMENTS
+ */
+exports.importSGBankStatements = async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                message: "PDF file is required",
+            });
+        }
+
+        console.log("Starting SG Bank statement import (PDF)...");
+
+        // Parse PDF using pdfjs-dist
+        const data = new Uint8Array(req.file.buffer);
+        const loadingTask = pdfjsLib.getDocument({ data });
+        const pdfDocument = await loadingTask.promise;
+
+        let fullText = '';
+
+        // Extract text from all pages
+        for (let pageNum = 1; pageNum <= pdfDocument.numPages; pageNum++) {
+            const page = await pdfDocument.getPage(pageNum);
+            const textContent = await page.getTextContent();
+
+            let lastY = null;
+            textContent.items.forEach(item => {
+                if (lastY !== null && Math.abs(item.transform[5] - lastY) > 5) {
+                    fullText += '\n';
+                }
+                fullText += item.str + ' ';
+                lastY = item.transform[5];
+            });
+            fullText += '\n\n';
+        }
+
+        console.log('Extracted text length:', fullText.length);
+
+        const paymentsToCreate = [];
+        const errors = [];
+        const skippedReasons = {
+            debit: 0,
+            noAmount: 0,
+            invalidAmount: 0,
+            unknown: 0,
+            noKeywords: 0
+        };
+
+        const lines = fullText.split('\n');
+        let transactionCount = 0;
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+
+            const dateMatch = line.match(/(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})/);
+
+            if (!dateMatch) continue;
+
+            transactionCount++;
+            const operationDate = parseDate(dateMatch[1]);
+            const valueDate = parseDate(dateMatch[2]);
+
+            // Get more context
+            const contextLines = [];
+            for (let j = i; j < Math.min(i + 6, lines.length); j++) {
+                contextLines.push(lines[j]);
+            }
+            const textAfterDates = contextLines.join(' ');
+            const upperText = textAfterDates.toUpperCase();
+
+            // Look for amounts
+            const amountPattern = /(?:^|\s)([\d\s\.]+),(\d{2})(?:\s|$|\*)/g;
+            const amounts = [];
+            let amountMatch;
+
+            while ((amountMatch = amountPattern.exec(textAfterDates)) !== null) {
+                const amountStr = amountMatch[1].replace(/\s/g, '').replace(/\./g, '');
+                const amount = parseFloat(`${amountStr}.${amountMatch[2]}`);
+
+                if (!isNaN(amount) && amount > 0 && amount < 10000000) {
+                    amounts.push({
+                        value: amount,
+                        position: amountMatch.index,
+                        text: amountMatch[0].trim()
+                    });
+                }
+            }
+
+            // Remove duplicates
+            const uniqueAmounts = [];
+            const seenValues = new Set();
+            for (const amt of amounts) {
+                if (!seenValues.has(amt.value)) {
+                    seenValues.add(amt.value);
+                    uniqueAmounts.push(amt);
+                }
+            }
+
+            // ✅ Determine if this is a credit or debit
+            const isCreditKeyword =
+                upperText.match(/VIR\s+(RECU|INST\s+RE)/) ||
+                (upperText.includes('REMISE CB') && upperText.includes('REM.ACH.CB')) ||
+                upperText.includes('DEBLOCAGE PROVISION') ||
+                upperText.includes('VIREMENT RECU');
+
+            const isDebitKeyword = !isCreditKeyword && (
+                upperText.includes('VIR INSTANTANE EMIS') ||
+                upperText.includes('VIR EUROPEEN EMIS') ||
+                upperText.includes('PRELEVEMENT') ||
+                upperText.includes('ECHEANCE PRET') ||
+                upperText.match(/FRAIS\s+(VIR|SUR|VIREMENT)/) ||
+                upperText.includes('CIONS TENUE') ||
+                upperText.includes('ABONNT') ||
+                upperText.includes('RELEVE DE COMMISSIONS') ||
+                upperText.includes('INT DEBITEURS') ||
+                upperText.includes('BLOCAGE PROVISION') ||
+                upperText.includes('COTISATION') ||
+                (upperText.includes('COM CB') && !upperText.includes('REM.ACH.CB'))
+            );
+
+            const shouldLogDetail = transactionCount <= 5 ||
+                transactionCount % 10 === 0 ||
+                i > lines.length - 100;
+
+            if (shouldLogDetail) {
+                console.log(`\n--- Transaction ${transactionCount} ---`);
+                console.log(`Dates: ${dateMatch[1]} / ${dateMatch[2]}`);
+                console.log(`Text: "${textAfterDates.substring(0, 200)}"`);
+                console.log(`Amounts: ${uniqueAmounts.map(a => `€${a.value}`).join(', ')}`);
+                console.log(`Credit: ${!!isCreditKeyword}, Debit: ${!!isDebitKeyword}`);
+            }
+
+            // Skip if no amount
+            if (uniqueAmounts.length === 0) {
+                skippedReasons.noAmount++;
+                if (shouldLogDetail) console.log(`⏭️  SKIPPED: No amount`);
+                continue;
+            }
+
+            // Skip if no keywords
+            if (!isCreditKeyword && !isDebitKeyword) {
+                skippedReasons.noKeywords++;
+                if (shouldLogDetail) console.log(`⏭️  SKIPPED: No keywords`);
+                continue;
+            }
+
+            // ✅ ONLY PROCESS CREDITS
+            if (!isCreditKeyword) {
+                skippedReasons.debit++;
+                if (shouldLogDetail) console.log(`⏭️  SKIPPED: Debit`);
+                continue;
+            }
+
+            // Get the transaction amount
+            let amount = 0;
+            if (uniqueAmounts.length === 1) {
+                amount = uniqueAmounts[0].value;
+            } else {
+                const reasonableAmounts = uniqueAmounts.filter(a => a.value < 100000);
+                if (reasonableAmounts.length > 0) {
+                    amount = reasonableAmounts[reasonableAmounts.length - 1].value;
+                } else {
+                    amount = uniqueAmounts[0].value;
+                }
+            }
+
+            if (amount <= 0 || isNaN(amount) || amount >= 1000000) {
+                skippedReasons.invalidAmount++;
+                if (shouldLogDetail) console.log(`⚠️  Invalid amount: ${amount}`);
+                continue;
+            }
+
+            // ✅ EXTRACT DETAILED INFORMATION
+            let operationType = 'CREDIT';
+            let reference = '';
+            let senderName = '';
+            let paymentMethod = 'bank_transfer';
+            let sourceDetails = {};
+
+            // Parse VIR RECU (Wire Transfer Received)
+            if (textAfterDates.includes('VIR RECU')) {
+                operationType = 'VIR RECU';
+                paymentMethod = 'wire_transfer';
+
+                // Extract reference (transaction ID)
+                const refMatch = textAfterDates.match(/VIR RECU\s+(\d+S?)/i);
+                reference = refMatch ? refMatch[1] : '';
+
+                // Extract sender (DE: ...)
+                const senderMatch = textAfterDates.match(/DE[:\s]*([^\n]+?)(?:MOTIF|REF|PROVENANCE|$)/i);
+                senderName = senderMatch ? senderMatch[1].trim() : '';
+
+                // Extract MOTIF/REF
+                const motifMatch = textAfterDates.match(/MOTIF[:\s]*([^\n]+?)(?:REF|PROVENANCE|$)/i);
+                const refMatch2 = textAfterDates.match(/REF[:\s]*([A-Z0-9\/]+)/i);
+                const provenanceMatch = textAfterDates.match(/PROVENANCE[:\s]*([A-Z\s]+?)(?:\s|$)/i);
+
+                sourceDetails = {
+                    transactionId: reference,
+                    sender: senderName,
+                    motif: motifMatch ? motifMatch[1].trim() : '',
+                    reference: refMatch2 ? refMatch2[1] : '',
+                    provenance: provenanceMatch ? provenanceMatch[1].trim() : '',
+                };
+            }
+
+            // Parse VIR INST RE (Instant Wire Received)
+            else if (textAfterDates.includes('VIR INST RE')) {
+                operationType = 'VIR INST RE';
+                paymentMethod = 'instant_wire';
+
+                const refMatch = textAfterDates.match(/VIR INST RE\s+(\d+)/);
+                reference = refMatch ? refMatch[1] : '';
+
+                const senderMatch = textAfterDates.match(/DE[:\s]*([^\n]+?)(?:DATE|MOTIF|$)/i);
+                senderName = senderMatch ? senderMatch[1].trim() : '';
+
+                const dateMatch = textAfterDates.match(/DATE[:\s]*(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2})/i);
+                const motifMatch = textAfterDates.match(/MOTIF[:\s]*([^\n]+?)(?:REF|$)/i);
+
+                sourceDetails = {
+                    transactionId: reference,
+                    sender: senderName,
+                    date: dateMatch ? dateMatch[1] : '',
+                    motif: motifMatch ? motifMatch[1].trim() : '',
+                };
+            }
+
+            // Parse REMISE CB (Card Payment)
+            else if (textAfterDates.includes('REMISE CB')) {
+                operationType = 'REMISE CB';
+                paymentMethod = 'card_payment';
+
+                const refMatch = textAfterDates.match(/REM\.ACH\.CB(\d+)/);
+                reference = refMatch ? refMatch[1] : '';
+
+                const nameMatch = textAfterDates.match(/REMISE CB[^A-Z]*([A-Z][A-Z\s]+?)(?:\d|$)/);
+                senderName = nameMatch ? nameMatch[1].trim() : 'Card Payment';
+
+                const dateMatch = textAfterDates.match(/\/(\d{2}\/\d{2})\s+/);
+
+                sourceDetails = {
+                    cardReference: reference,
+                    merchant: senderName,
+                    date: dateMatch ? dateMatch[1] : '',
+                };
+            }
+
+            // Parse DEBLOCAGE PROVISION
+            else if (textAfterDates.includes('DEBLOCAGE')) {
+                operationType = 'DEBLOCAGE PROVISION';
+                paymentMethod = 'provision_unblock';
+                senderName = 'Unblocked Provision';
+
+                const amountMatch = textAfterDates.match(/de\s+([\d\s\.]+),(\d{2})\s+euros/i);
+                if (amountMatch) {
+                    sourceDetails.provisionAmount = amountMatch[0];
+                }
+            }
+
+            // ✅ CREATE FLATTENED PAYMENT
+            const payment = {
+                cardCode: null, // Will be matched later
+                cardName: senderName || null,
+                amount: amount,
+                reference: reference || null,
+                source: 'sg_bank',
+                paymentDate: operationDate,
+                sourceDocument: {
+                    sourceType: 'SG_Bank_Statement',
+                    sourceId: null, // No intermediate BankStatement
+                },
+                reconciliationStatus: 'Unmatched',
+                paymentMethod: paymentMethod,
+                sourceDetails: {
+                    operationType: operationType,
+                    valueDate: valueDate,
+                    senderName: senderName,
+                    ...sourceDetails,
+                    rawText: textAfterDates.substring(0, 300),
+                },
+                remainingAmount: amount,
+                importedBy: req.user?._id,
+            };
+
+            paymentsToCreate.push(payment);
+
+            if (shouldLogDetail) {
+                console.log(`✅ ADDED: ${operationType} - €${amount.toFixed(2)} - ${senderName}`);
+            }
+        }
+
+        console.log(`\n${'='.repeat(60)}`);
+        console.log(`📊 SUMMARY`);
+        console.log(`${'='.repeat(60)}`);
+        console.log(`Total transactions found: ${transactionCount}`);
+        console.log(`Credits to import: ${paymentsToCreate.length}`);
+        console.log(`\nSkipped breakdown:`);
+        console.log(`  - Debits: ${skippedReasons.debit}`);
+        console.log(`  - No amount: ${skippedReasons.noAmount}`);
+        console.log(`  - Invalid amount: ${skippedReasons.invalidAmount}`);
+        console.log(`  - No keywords: ${skippedReasons.noKeywords}`);
+        console.log(`  - Unknown: ${skippedReasons.unknown}`);
+        console.log(`${'='.repeat(60)}\n`);
+
+        if (paymentsToCreate.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "No valid credit transactions found in PDF.",
+                data: {
+                    totalRows: transactionCount,
+                    inserted: 0,
+                    skipped: transactionCount,
+                    errors: [{
+                        error: `No credits found. Breakdown: ${JSON.stringify(skippedReasons)}`
+                    }],
+                },
+            });
+        }
+
+        // ✅ CHECK FOR DUPLICATES
+        const existingPayments = await FlattenedPayment.find({
+            source: 'sg_bank',
+            paymentDate: {
+                $in: paymentsToCreate.map(p => p.paymentDate),
+            },
+        }).lean();
+
+        const existingKeys = new Set(
+            existingPayments.map(
+                p => `${p.paymentDate.toISOString()}-${p.amount}-${p.reference}`
+            )
+        );
+
+        const newPayments = paymentsToCreate.filter(p => {
+            const key = `${p.paymentDate.toISOString()}-${p.amount}-${p.reference}`;
+            return !existingKeys.has(key);
+        });
+
+        console.log(`✨ ${newPayments.length} new payments (${paymentsToCreate.length - newPayments.length} duplicates skipped)`);
+
+        // ✅ INSERT INTO FLATTENED PAYMENTS
+        let inserted = 0;
+        if (newPayments.length > 0) {
+            const result = await FlattenedPayment.insertMany(newPayments);
+            inserted = result.length;
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: `Imported ${inserted} SG Bank payments`,
+            data: {
+                totalRows: paymentsToCreate.length,
+                inserted: inserted,
+                skipped: paymentsToCreate.length - inserted,
+                errors: errors,
+            },
+        });
+
+    } catch (error) {
+        console.error("❌ Error importing SG Bank statements:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to import SG Bank statements",
+            error: error.message,
+        });
+    }
+};
+
+// Helper function to parse dates
+function parseDate(dateStr) {
+    const [day, month, year] = dateStr.split('/');
+    return new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+}
+
+// Helper function to parse Excel dates
+function parseExcelDate(excelDate) {
+    if (excelDate instanceof Date) {
+        return excelDate;
+    }
+
+    if (typeof excelDate === "number") {
+        const epoch = new Date(1900, 0, 1);
+        return new Date(epoch.getTime() + (excelDate - 2) * 86400000);
+    }
+
+    // Try to parse string date
+    const date = new Date(excelDate);
+    if (!isNaN(date.getTime())) {
+        return date;
+    }
+
+    throw new Error(`Invalid date format: ${excelDate}`);
+}
 /**
  * Import and flatten PayPal statements (CSV format)
  */
@@ -756,7 +1151,7 @@ exports.getFinancialSummary = async (req, res) => {
             data: {
                 bank: bankSummary[0] || {},
                 paypal: paypalSummary[0] || {},
-                lastInvoiceStatusSyncTime : lastSync ? lastSync.lastSyncDate : null,
+                lastInvoiceStatusSyncTime: lastSync ? lastSync.lastSyncDate : null,
             },
         });
     } catch (error) {

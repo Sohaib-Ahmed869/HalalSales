@@ -28,6 +28,13 @@ const bankStatementSchema = new mongoose.Schema(
             required: true,
             index: true,
         },
+        bankSource: {
+            type: String,
+            enum: ["BRED", "SG"],
+            default: "BRED",
+            required: true,
+            index: true,
+        },
 
         // Comment
         comment: {

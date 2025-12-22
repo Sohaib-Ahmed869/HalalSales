@@ -24,10 +24,14 @@ class GmailService {
      * Get OAuth2 URL for initial authentication
      */
     getAuthUrl() {
-        const scopes = ['https://www.googleapis.com/auth/gmail.modify'];
+        const scopes = [
+            'https://www.googleapis.com/auth/gmail.send',
+            'https://www.googleapis.com/auth/gmail.modify'
+        ];
         return this.oauth2Client.generateAuthUrl({
-            access_type: 'offline',
+            access_type: 'offline',  // CRITICAL: Must be 'offline'
             scope: scopes,
+            prompt: 'consent'  // CRITICAL: Force consent screen
         });
     }
 
@@ -36,45 +40,73 @@ class GmailService {
      */
     async getTokenFromCode(code) {
         const { tokens } = await this.oauth2Client.getToken(code);
+
+        console.log('🔑 Tokens received:', tokens);
+
+        if (!tokens.refresh_token) {
+            console.warn('⚠️ No refresh token received. You may need to revoke access and try again.');
+        }
+
         console.log('🔑 Refresh Token:', tokens.refresh_token);
         console.log('Add this to your .env file as GMAIL_REFRESH_TOKEN');
+
         return tokens;
     }
-
     /**
      * Send email via Gmail
      */
+    /**
+ * Send email via Gmail API (more reliable than SMTP)
+ */
     async sendEmail({ to, subject, html, text, attachments = [] }) {
         try {
-            const accessToken = await this.oauth2Client.getAccessToken();
+            const email_lines = [];
+            const boundary = "boundary_string";
 
-            const transporter = nodemailer.createTransport({
-                service: 'gmail',
-                auth: {
-                    type: 'OAuth2',
-                    user: process.env.RFQ_EMAIL_FROM,
-                    clientId: process.env.GMAIL_CLIENT_ID,
-                    clientSecret: process.env.GMAIL_CLIENT_SECRET,
-                    refreshToken: process.env.GMAIL_REFRESH_TOKEN,
-                    accessToken: accessToken.token,
+            email_lines.push(`From: ${process.env.RFQ_EMAIL_FROM}`);
+            email_lines.push(`To: ${to}`);
+            email_lines.push(`Subject: ${subject}`);
+            email_lines.push('MIME-Version: 1.0');
+            email_lines.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
+            email_lines.push('');
+            email_lines.push(`--${boundary}`);
+            email_lines.push('Content-Type: text/html; charset=UTF-8');
+            email_lines.push('');
+            email_lines.push(html || text);
+
+            // Add attachments
+            if (attachments && attachments.length > 0) {
+                for (const attachment of attachments) {
+                    email_lines.push(`--${boundary}`);
+                    email_lines.push(`Content-Type: ${attachment.contentType}`);
+                    email_lines.push('Content-Transfer-Encoding: base64');
+                    email_lines.push(`Content-Disposition: attachment; filename="${attachment.filename}"`);
+                    email_lines.push('');
+                    email_lines.push(attachment.content.toString('base64'));
+                }
+            }
+
+            email_lines.push(`--${boundary}--`);
+
+            const email = email_lines.join('\r\n');
+            const encodedEmail = Buffer.from(email)
+                .toString('base64')
+                .replace(/\+/g, '-')
+                .replace(/\//g, '_')
+                .replace(/=+$/, '');
+
+            const response = await this.gmail.users.messages.send({
+                userId: 'me',
+                requestBody: {
+                    raw: encodedEmail,
                 },
             });
 
-            const mailOptions = {
-                from: process.env.RFQ_EMAIL_FROM,
-                to,
-                subject,
-                text,
-                html,
-                attachments,
-            };
-
-            const result = await transporter.sendMail(mailOptions);
-            console.log(`✅ Email sent to ${to}:`, result.messageId);
+            console.log(`✅ Email sent to ${to}:`, response.data.id);
 
             return {
                 success: true,
-                messageId: result.messageId,
+                messageId: response.data.id,
             };
         } catch (error) {
             console.error('❌ Error sending email:', error);

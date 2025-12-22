@@ -30,45 +30,11 @@ const RFQItemSchema = new Schema({
     },
 }, { _id: true });
 
-// Vendor Response Schema
-const RFQVendorResponseSchema = new Schema({
-    vendorCode: {
-        type: String,
-        required: true,
-    },
-    vendorName: {
-        type: String,
-        required: true,
-    },
-    email: {
-        type: String,
-        required: true,
-    },
-    status: {
-        type: String,
-        enum: ['sent', 'opened', 'responded', 'declined', 'expired'],
-        default: 'sent',
-    },
-    quotedPrice: {
-        type: Number,
-        min: 0,
-    },
-    quotedTotal: {
-        type: Number,
-        min: 0,
-    },
-    deliveryDate: Date,
-    paymentTerms: String,
-    responseDate: Date,
-    notes: String,
-}, { _id: true });
-
 // Main RFQ Schema
 const RFQSchema = new Schema({
     // RFQ Identification
     rfqNumber: {
         type: String,
-
         index: true,
     },
 
@@ -121,8 +87,60 @@ const RFQSchema = new Schema({
     },
     otherNotes: String,
 
-    // Vendors
-    vendorsContacted: [RFQVendorResponseSchema],
+    // ⚠️ SINGLE DEFINITION OF vendorsContacted - THIS IS THE ONLY ONE
+    vendorsContacted: [{
+        vendorCode: String,
+        vendorName: String,
+        email: String,
+        status: {
+            type: String,
+            enum: ['pending', 'draft', 'sent', 'opened', 'responded', 'declined'],
+            default: 'draft',
+        },
+        sentDate: Date,
+        openedDate: Date,
+        responseDate: Date,
+        quotedPrice: Number,
+        quotedTotal: Number,
+        deliveryDate: Date,
+        paymentTerms: String,
+        notes: String,
+        emailMessageId: String,
+
+        // RAW EMAIL CONTENT - CRITICAL FOR STORING FULL EMAILS
+        rawEmailContent: {
+            subject: String,
+            body: String,
+            htmlBody: String,
+            receivedDate: Date,
+            attachments: [String]
+        },
+
+        // QUOTATION DATA - PARSED INFORMATION
+        quotationData: {
+            quotedItems: [{
+                productName: String,
+                quantity: Number,
+                unit: String,
+                unitPrice: Number,
+                totalPrice: Number,
+                currency: String,
+            }],
+            totalQuotedAmount: Number,
+            currency: String,
+            deliveryTimeInDays: Number,
+            deliveryDate: Date,
+            paymentTerms: String,
+            validityPeriod: String,
+            additionalNotes: String,
+            isValidQuotation: Boolean,
+            parsingStatus: {
+                type: String,
+                enum: ['success', 'partial', 'failed'],
+                default: 'failed'
+            }
+        }
+    }],
 
     // Status Tracking
     status: {
@@ -140,45 +158,6 @@ const RFQSchema = new Schema({
         notes: String,
         selectedAt: Date,
     },
-
-    vendorsContacted: [{
-        vendorCode: String,
-        vendorName: String,
-        email: String,
-        status: {
-            type: String,
-            enum: ['draft', 'sent', 'opened', 'responded', 'declined'],
-            default: 'draft',
-        },
-        sentDate: Date,
-        openedDate: Date,
-        responseDate: Date,
-        quotedPrice: Number,
-        quotedTotal: Number,
-        deliveryDate: Date,
-        paymentTerms: String,
-        notes: String,
-
-        // ADD THESE NEW FIELDS:
-        quotationData: {
-            quotedItems: [{
-                productName: String,
-                quantity: Number,
-                unit: String,
-                unitPrice: Number,
-                totalPrice: Number,
-                currency: String,
-            }],
-            totalQuotedAmount: Number,
-            currency: String,
-            deliveryTimeInDays: Number,
-            validityPeriod: String,
-            additionalNotes: String,
-            isValidQuotation: Boolean,
-        },
-        emailMessageId: String,
-        rawEmailData: Object,
-    }],
 
     // User Tracking
     createdBy: {

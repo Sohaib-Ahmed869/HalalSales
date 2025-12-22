@@ -6,56 +6,47 @@ class RFQResponseParser {
      * Parse vendor response email and extract quotation data
      */
     async parseVendorResponse(email, rfq) {
-        console.log(`\n📧 Parsing response from: ${email.from}`);
-
         try {
-            // Extract vendor email
-            const vendorEmail = this.extractEmail(email.from);
+            const aiService = require('./aiService');
+
+            // Parse with AI
+            const parsedData = await aiService.parseRFQResponseWithAI({
+                rfqNumber: rfq.rfqNumber,
+                vendorName: email.from,
+                vendorEmail: email.fromEmail,
+                emailSubject: email.subject,
+                emailBody: email.body,
+                date: email.date,
+                pdfContent: email.pdfContent || null
+            });
 
             // Find vendor in RFQ
             const vendor = rfq.vendorsContacted.find(
-                v => v.email.toLowerCase() === vendorEmail.toLowerCase()
+                v => v.email.toLowerCase() === email.fromEmail.toLowerCase()
             );
 
-            if (!vendor) {
-                console.log(`⚠️ Email ${vendorEmail} not in RFQ vendor list`);
-                return null;
-            }
-
-            // Combine body text with PDF attachments
-            let fullText = email.body;
-
-            // Extract text from PDF attachments
-            for (const attachment of email.attachments) {
-                if (attachment.mimeType === 'application/pdf') {
-                    console.log(`📄 Extracting text from PDF: ${attachment.filename}`);
-                    const pdfText = await gmailService.extractTextFromPDF(attachment.data);
-                    fullText += '\n\n' + pdfText;
-                }
-            }
-
-            // Use AI to extract structured quotation data
-            const quotationData = await parseQuotationFromText(fullText, rfq.items);
-
             return {
-                vendorCode: vendor.vendorCode,
-                vendorName: vendor.vendorName,
-                vendorEmail,
+                vendorCode: vendor?.vendorCode,
+                vendorName: vendor?.vendorName || email.from,
                 messageId: email.messageId,
-                receivedDate: email.date,
-                quotationData,
-                rawEmail: {
+                receivedDate: new Date(email.date),
+
+                // INCLUDE RAW EMAIL CONTENT
+                rawEmailContent: {
                     subject: email.subject,
                     body: email.body,
-                    attachments: email.attachments.map(a => ({
-                        filename: a.filename,
-                        mimeType: a.mimeType,
-                        size: a.size,
-                    })),
+                    htmlBody: email.htmlBody || '',
+                    receivedDate: new Date(email.date),
+                    attachments: email.attachments || []
                 },
+
+                quotationData: {
+                    ...parsedData,
+                    parsingStatus: parsedData.isValidResponse ? 'success' : 'failed'
+                }
             };
         } catch (error) {
-            console.error('❌ Error parsing vendor response:', error);
+            console.error('Error parsing vendor response:', error);
             return null;
         }
     }

@@ -784,62 +784,86 @@ ${data.emailBody}
 
 ${data.pdfContent ? `PDF Attachment Content:\n${data.pdfContent}` : ''}
 
+IMPORTANT: Extract pricing information even from conversational text. Look for:
+- Numbers followed by currency words (Pounds, Euros, Dollars, GBP, EUR, USD, £, €, $)
+- Phrases like "my price is", "cost is", "charge", "quote"
+- Dates for delivery (including informal formats like "26th December 2025")
+
 Extract and return JSON:
 {
-    "isValidResponse": true/false,
+    "isValidResponse": true/false (true if ANY price or delivery info found),
     "responseType": "quotation" or "decline" or "question",
     "quotedItems": [
         {
-            "productName": "name",
-            "quantity": number,
-            "unit": "kg/cartons/etc",
-            "unitPrice": number,
-            "totalPrice": number,
-            "currency": "EUR/USD/etc"
+            "productName": "name or 'Full Order' if not specified",
+            "quantity": number or null,
+            "unit": "kg/cartons/etc or 'order' if not specified",
+            "unitPrice": number or null,
+            "totalPrice": number (REQUIRED if this is a quotation),
+            "currency": "GBP/EUR/USD/etc"
         }
     ],
-    "totalQuotedAmount": number,
-    "deliveryTimeInDays": number,
+    "totalQuotedAmount": number (REQUIRED - extract from text),
+    "deliveryTimeInDays": number or null,
     "deliveryDate": "YYYY-MM-DD or null",
-    "paymentTerms": "terms mentioned",
-    "minimumOrder": "if mentioned",
-    "notes": "any special conditions or notes",
+    "paymentTerms": "terms mentioned or null",
+    "minimumOrder": "if mentioned or null",
+    "notes": "any special conditions or the full message if unclear",
     "certifications": ["any certifications mentioned"],
     "contactPerson": "name if mentioned",
     "contactPhone": "phone if mentioned"
 }
 
-Return only valid JSON.
+Examples of conversational pricing to extract:
+- "my price is 900 Pounds" → totalQuotedAmount: 900, currency: "GBP"
+- "I can do it for €1,200" → totalQuotedAmount: 1200, currency: "EUR"
+- "The cost would be $500" → totalQuotedAmount: 500, currency: "USD"
+
+Return ONLY valid JSON, no markdown.
 `;
 
         const response = await openai.chat.completions.create({
-            model: 'gpt-4',
+            model: 'gpt-4o',
             messages: [
                 {
                     role: 'system',
-                    content: 'You are an RFQ response analyzer. Parse vendor quotations from emails and PDFs. Extract all pricing and delivery information. Return only valid JSON.',
+                    content: 'You are an RFQ response analyzer. Extract pricing from ANY format - structured quotes, conversational emails, or informal messages. Always look for numbers with currency. Return only valid JSON.',
                 },
                 {
                     role: 'user',
                     content: prompt,
                 },
             ],
-            temperature: 0.2,
+            temperature: 0.1, // Lower temperature for more accurate extraction
         });
 
         const content = response.choices[0].message.content.trim();
+
+        // Remove markdown code blocks if present
         const jsonMatch = content.match(/\{[\s\S]*\}/);
 
         if (jsonMatch) {
-            return JSON.parse(jsonMatch[0]);
+            const parsed = JSON.parse(jsonMatch[0]);
+
+            // Extra validation: if we found ANY price, mark as valid
+            if (parsed.totalQuotedAmount && parsed.totalQuotedAmount > 0) {
+                parsed.isValidResponse = true;
+                parsed.responseType = 'quotation';
+            }
+
+            return parsed;
         }
 
         return { isValidResponse: false };
     } catch (error) {
         console.error('Error parsing RFQ response with AI:', error);
-        return { isValidResponse: false, error: error.message };
+        return {
+            isValidResponse: false,
+            error: error.message,
+            notes: 'AI parsing failed - please review the raw email content'
+        };
     }
-};
+}
 
 /**
  * Parse quotation data from email text using AI

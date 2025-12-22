@@ -7158,7 +7158,10 @@ exports.searchCustomers = async (req, res) => {
     const { search } = req.query;
     console.log(`Searching customers with CardCode: ${search}`);
     const customers = await Customer.find({
-      CardCode: { $regex: `^${search}`, $options: "i" },
+      $or: [
+        { CardCode: { $regex: `^${search}`, $options: "i" } }, // Starts with
+        { CardName: { $regex: search, $options: "i" } }         // Contains
+      ]
     })
       .limit(50)
       .select("CardCode CardName Email phoneNumber");

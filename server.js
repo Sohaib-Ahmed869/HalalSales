@@ -54,13 +54,13 @@ const creditNoteRoutes = require('./routes/creditNoteRoutes');
 const superExportRoutes = require('./routes/Sales.export.routes');
 const emailLogRoutes = require('./routes/emailLogRoutes');
 const parserPaymentsRoutes = require('./routes/reconciliationModule/parserPayments.routes');
-//const pdaRoutes = require('./routes/pdaRoutes');
+const pdaRoutes = require('./routes/pdaRoutes');
 const mapRoutes = require("./routes/map.routes");
 const aiSummaryRoutes = require("./routes/aiSummary.routes");
 const areaAnalysisRoutes = require("./routes/areaAnalysis.routes");
 const reportingRoutes = require('./routes/reportingRoutes')
-//const vendorEmailRoutes = require('./routes/vendorEmailRoutes');
-//const gmailAuthRoutes = require('./routes/gmailAuth');
+const vendorEmailRoutes = require('./routes/vendorEmailRoutes');
+const gmailAuthRoutes = require('./routes/gmailAuth');
 const config = require("./services/config");
 const desktimeJob = require("./jobs/desktimeJob");
 const { linkDocumentsToAgents } = require("./migrateAgentReferences");
@@ -69,9 +69,10 @@ const { fetchCallsFromMay2UntilToday } = require("./jobs/mayScript");
 const targetScheduler = require("./services/targetScheduler");
 const truckRouteRoutes = require('./routes/truckRoute.routes');
 const callAcceptanceRoutes = require('./routes/callAcceptance.routes');
+const rfqResponsePoller = require('./services/rfqResponsePoller');
 require('./jobs/updateRestaurantAnalysis');
 const SuperChatCronService = require('./services/superChatCronService');
-//const rfqRoutes = require('./routes/rfqRoutes'); // RFQ routes
+const rfqRoutes = require('./routes/rfqRoutes'); // RFQ routes
 // Initialize express app
 const app = express();
 
@@ -178,7 +179,7 @@ app.use("/api/restaurant-scraper", restaurantScraperRoutes);
 app.use("/api/conversations", conversationRoutes);
 app.use("/api/call-acceptance", callAcceptanceRoutes);
 app.use("/api/reporting", reportingRoutes);
-//app.use('/api/gmail', gmailAuthRoutes);
+app.use('/api/gmail', gmailAuthRoutes);
 
 // Legacy analytics routes (keep for backward compatibility if needed)
 // app.use("/api/super-chat-analytics-old", superChatAnalyticsRoutes);
@@ -212,13 +213,13 @@ app.use('/api/email-logs', emailLogRoutes);
 app.use('/api/sales-export', superExportRoutes);
 app.use("/api/financial-statements", require('./routes/financialStatements.routes'));
 app.use("/api/reconciliation/parser-payments", parserPaymentsRoutes);
-//app.use('/api/pda', pdaRoutes);
+app.use('/api/pda', pdaRoutes);
 app.use("/api/map", mapRoutes);
 app.use("/api/ai-summary", aiSummaryRoutes);
 app.use("/api/area-analysis", areaAnalysisRoutes);
 app.use('/api/truck-routes', truckRouteRoutes);
-//app.use('/api/rfq', rfqRoutes); // RFQ routes
-//app.use('/api/vendor-email', vendorEmailRoutes);
+app.use('/api/rfq', rfqRoutes); // RFQ routes
+app.use('/api/vendor-email', vendorEmailRoutes);
 // Health check route
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });
@@ -233,9 +234,14 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Start server
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
+// After your server starts
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+
+  // Start RFQ response polling
+  rfqResponsePoller.start();
+});
 // Handle unhandled promise rejections
 process.on("unhandledRejection", (err) => {
   console.error("Unhandled Promise Rejection:", err);

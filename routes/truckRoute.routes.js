@@ -13,8 +13,12 @@ const {
     removeOrderFromTruck,
     reorderOrders,
     updateRouteStatus,
+    debugRoutes,
+    optimizeRoute,
+    generateTruckRoute,
 } = require('../controllers/truckRoute.controller');
 
+router.get("/debug", debugRoutes);
 // Truck Schedules (Templates) - Define weekly delivery schedules
 router.get('/schedules', getTruckSchedules);
 router.post('/schedules', createOrUpdateSchedule);
@@ -33,5 +37,8 @@ router.put('/:routeId/reorder', reorderOrders);
 
 // Route Management - Update route status
 router.patch('/:routeId/status', updateRouteStatus);
+router.post('/:routeId/optimize', optimizeRoute);
+router.post('/:routeId/generate', generateTruckRoute);
+
 
 module.exports = router;

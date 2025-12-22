@@ -114,7 +114,23 @@ exports.createRFQDraft = async (req, res) => {
                 CardCode: { $in: selectedVendorCodes }
             });
 
-            rfq.vendorsContacted = vendors.map(v => ({
+            // Add PDA_Supplier model vendors if any
+            const PDA_Supplier = require('../models/PDA_Supplier');
+            const pdaSuppliers = await PDA_Supplier.find({
+                _id: { $in: selectedVendorCodes }
+            });
+
+            const pdaSuppliersAsVendors = pdaSuppliers.map(s => ({
+                CardCode: s._id.toString(),
+                CardName: s.supplierName,
+                email: s.email,
+                phone: s.contactInfo?.phone,
+                vendorSource: 'PDA_SCRAPER',
+            }));
+
+            const allSelectedVendors = [...vendors, ...pdaSuppliersAsVendors];
+
+            rfq.vendorsContacted = allSelectedVendors.map(v => ({
                 vendorCode: v.CardCode,
                 vendorName: v.CardName,
                 email: v.email,
@@ -149,6 +165,7 @@ exports.sendRFQToVendors = async (req, res) => {
         const { rfqId } = req.params;
         const { vendorCodes, customMessage, language = 'fr' } = req.body;
 
+        console.log(`Sending RFQ ${rfqId} to vendors:`, vendorCodes);
         const rfq = await RFQ.findById(rfqId);
 
         if (!rfq) {
@@ -164,14 +181,13 @@ exports.sendRFQToVendors = async (req, res) => {
         });
 
         const PDA_Supplier = require('../models/PDA_Supplier');
-        const pdaSupplierIds = vendorCodes.filter(code =>
-            !code.startsWith('V') && code.length === 24
-        );
+        const pdaSupplierIds = vendorCodes;
 
         const pdaSuppliers = await PDA_Supplier.find({
-            _id: { $in: pdaSupplierIds },
-            isActive: true
+            _id: { $in: pdaSupplierIds }
         });
+
+        console.log(`Found ${vendors.length} vendors and ${pdaSuppliers.length} PDA suppliers to send RFQ to.`, pdaSuppliers);
 
         const pdaSuppliersAsVendors = pdaSuppliers.map(s => ({
             CardCode: s._id.toString(),
@@ -260,6 +276,8 @@ exports.sendRFQToVendors = async (req, res) => {
                     messageId: emailResult.messageId,
                 });
 
+              
+
                 console.log(`✅ Sent to ${vendor.CardName}`);
 
             } catch (error) {
@@ -272,17 +290,6 @@ exports.sendRFQToVendors = async (req, res) => {
                 });
             }
         }
-
-        return res.json({
-            success: true,
-            message: `RFQ sent to ${allVendors.length} vendors Test via Gmail`,
-            data: {
-                rfqNumber: rfq.rfqNumber,
-                totalVendors: allVendors.length,
-                sendResults,
-                rfq: rfq.toObject(),
-            },
-        });
 
         // Update RFQ status
         rfq.status = 'sent';

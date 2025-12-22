@@ -33,7 +33,7 @@ const flattenedPaymentSchema = new mongoose.Schema(
         // Source of payment
         source: {
             type: String,
-            enum: ["salary_sheet", "bred_bank", "paypal"],
+            enum: ["salary_sheet", "bred_bank", "sg_bank", "paypal"],
             required: true,
             index: true,
         },
@@ -49,7 +49,7 @@ const flattenedPaymentSchema = new mongoose.Schema(
         sourceDocument: {
             sourceType: {
                 type: String,
-                enum: ["BankStatement", "PayPalStatement", "SalarySheetPayment"],
+                enum: ["BankStatement", "PayPalStatement", "SalarySheetPayment","SG_Bank_Statement"],
             },
             sourceId: {
                 type: mongoose.Schema.Types.ObjectId,

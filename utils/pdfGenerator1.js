@@ -149,13 +149,13 @@ async function generateRFQPDF(rfq) {
 
             detailY = cardY + 38;
 
-            drawDetailRow(doc, rightCardX + 15, detailY, '📧 Email', rfq.contactEmail || 'N/A', colors, false);
+            drawDetailRow(doc, rightCardX + 15, detailY, 'Email', rfq.contactEmail || 'N/A', colors, false);
             detailY += lineSpacing;
 
-            drawDetailRow(doc, rightCardX + 15, detailY, '📞 Phone', rfq.contactPhone || 'N/A', colors, false);
+            drawDetailRow(doc, rightCardX + 15, detailY, 'Phone', rfq.contactPhone || 'N/A', colors, false);
             detailY += lineSpacing;
 
-            drawDetailRow(doc, rightCardX + 15, detailY, '📍 Location', rfq.location || 'Paris, France', colors, false);
+            drawDetailRow(doc, rightCardX + 15, detailY, 'Location', rfq.location || 'Paris, France', colors, false);
 
             doc.y = cardY + cardHeight + 25;
 

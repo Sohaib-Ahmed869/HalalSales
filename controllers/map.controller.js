@@ -126,9 +126,9 @@ exports.getDocumentsByDateRange = async (req, res) => {
         // Fetch Sales Orders
         if (type === "all" || type === "order") {
             orders = await SalesOrder.find({
-                DocDate: { $gte: start, $lte: end },
+                StartDeliveryDate: { $gte: start, $lte: end },
             })
-                .select("DocEntry DocNum DocDate CardCode CardName DocTotal DocumentStatus")
+                .select("DocEntry DocNum DocDate StartDeliveryDate DocDueDate CardCode CardName DocTotal DocumentStatus")
                 .lean();
 
             for (const order of orders) {
@@ -152,11 +152,12 @@ exports.getDocumentsByDateRange = async (req, res) => {
         }
 
         // Fetch Quotations
+        // Line ~170: Fetch Quotations - CHANGE THIS
         if (type === "all" || type === "quotation") {
             const quotations = await Quotation.find({
-                DocDate: { $gte: start, $lte: end },
+                DocDueDate: { $gte: start, $lte: end }, // CHANGED from DocDate
             })
-                .select("DocEntry DocNum DocDate CardCode CardName DocTotal DocumentStatus approvalStatus")
+                .select("DocEntry DocNum DocDate DocDueDate CardCode CardName DocTotal DocumentStatus approvalStatus") // ADDED DocDueDate
                 .lean();
 
             for (const quotation of quotations) {
@@ -181,22 +182,44 @@ exports.getDocumentsByDateRange = async (req, res) => {
         }
 
         // Get customers who placed orders in date range
+        // Get customers who placed orders in date range WITH KPIS
         if (type === "all" || type === "customer") {
             const uniqueCustomerCodes = new Set();
             for (const order of orders) {
                 uniqueCustomerCodes.add(order.CardCode);
             }
 
+            // CHANGED: Fetch customer KPIs
             for (const cardCode of uniqueCustomerCodes) {
                 const customer = customerMap.get(cardCode);
                 if (customer && customer.coordinates) {
+                    // Calculate customer KPIs
+                    const customerInvoices = await Invoice.find({ CardCode: cardCode })
+                        .select("DocTotal DocDate")
+                        .lean();
+
+                    const totalSales = customerInvoices.reduce((sum, inv) => sum + (inv.DocTotal || 0), 0);
+                    const lastInvoice = customerInvoices.length > 0
+                        ? customerInvoices.sort((a, b) => new Date(b.DocDate) - new Date(a.DocDate))[0]
+                        : null;
+
+                    const avgOrderValue = customerInvoices.length > 0
+                        ? totalSales / customerInvoices.length
+                        : 0;
+
                     results.customers.push({
                         type: "customer",
                         cardCode: customer.CardCode,
                         cardName: customer.CardName,
                         address: customer.address || customer.deliveryAddress,
                         coordinates: customer.coordinates,
-                        color: "#f39c12", // Orange for active customers
+                        color: "#f39c12",
+                        kpis: {
+                            totalSales: totalSales,
+                            totalInvoices: customerInvoices.length,
+                            lastInvoiceDate: lastInvoice ? lastInvoice.DocDate : null,
+                            avgOrderValue: avgOrderValue,
+                        },
                     });
                 }
             }
@@ -322,14 +345,14 @@ exports.getCustomerDocumentsForMap = async (req, res) => {
 
         const baseQuery = { CardCode: cardCode };
         if (Object.keys(dateFilter).length > 0) {
-            baseQuery.DocDate = dateFilter;
+            baseQuery.DocDueDate = dateFilter; // CHANGED from DocDate
         }
 
         // Fetch documents based on type
         if (type === "all" || type === "invoice") {
             const invoices = await Invoice.find(baseQuery)
-                .select("DocEntry DocNum DocDate DocTotal DocumentStatus")
-                .sort({ DocDate: -1 })
+                .select("DocEntry DocNum DocDate DocDueDate DocTotal DocumentStatus") // ADDED DocDueDate
+                .sort({ DocDueDate: -1 }) // CHANGED from DocDate
                 .lean();
 
             // Calculate color range
