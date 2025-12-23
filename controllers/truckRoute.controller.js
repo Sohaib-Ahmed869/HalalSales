@@ -1630,3 +1630,365 @@ exports.generateTruckRoute = async (req, res) => {
         });
     }
 };
+
+/**
+ * Get available orders for a specific truck based on its region
+ * GET /api/truck-route/:truckId/available-orders?date=YYYY-MM-DD
+ * Returns unassigned orders that match the truck's region
+ */
+exports.getAvailableOrdersByTruckRegion = async (req, res) => {
+    try {
+        const { truckId } = req.params;
+        const { date } = req.query;
+
+        if (!date) {
+            return res.status(400).json({
+                status: "error",
+                message: "date query parameter is required (format: YYYY-MM-DD)",
+            });
+        }
+
+        if (!truckId) {
+            return res.status(400).json({
+                status: "error",
+                message: "truckId is required",
+            });
+        }
+
+        // Find the truck
+        const truck = await TruckRoute.findById(truckId).lean();
+        if (!truck) {
+            return res.status(404).json({
+                status: "error",
+                message: "Truck not found",
+            });
+        }
+
+        const truckRegion = truck.region;
+
+        console.log(`\n=== FETCHING ORDERS FOR TRUCK REGION ===`);
+        console.log(`🚚 Truck: ${truck.truckName} (ID: ${truckId})`);
+        console.log(`🌍 Region: ${truckRegion}`);
+        console.log(`📅 Date: ${date}`);
+
+        // Parse date
+        const dateStr = date;
+        const targetDate = new Date(dateStr + "T00:00:00.000Z");
+        const nextDay = new Date(targetDate);
+        nextDay.setDate(nextDay.getDate() + 1);
+
+        // Find all routes for this date to get assigned orders
+        const allRoutes = await TruckRoute.find({
+            deliveryDate: { $gte: targetDate, $lt: nextDay },
+        }).lean();
+
+        console.log(`📍 Total truck routes for this date: ${allRoutes.length}`);
+
+        // Get all assigned order IDs
+        const assignedOrderIds = new Set();
+        allRoutes.forEach(route => {
+            if (route.orders) {
+                route.orders.forEach(orderItem => {
+                    if (orderItem.order) {
+                        assignedOrderIds.add(orderItem.order.toString());
+                    }
+                });
+            }
+        });
+
+        console.log(`📌 Already assigned order IDs: ${assignedOrderIds.size}`);
+
+        // Get assigned DocNums
+        let assignedOrderDocNums = new Set();
+        if (assignedOrderIds.size > 0) {
+            const assignedOrders = await SalesOrder.find({
+                _id: { $in: Array.from(assignedOrderIds) }
+            }).select("DocNum").lean();
+
+            assignedOrders.forEach(order => {
+                if (order.DocNum) {
+                    assignedOrderDocNums.add(order.DocNum);
+                }
+            });
+        }
+
+        console.log(`📍 Already assigned orders: ${assignedOrderDocNums.size}`);
+
+        // Find unassigned orders for this date
+        const ordersQuery = {
+            StartDeliveryDate: { $gte: targetDate, $lt: nextDay },
+        };
+
+        if (assignedOrderDocNums.size > 0) {
+            ordersQuery.DocNum = { $nin: Array.from(assignedOrderDocNums) };
+        }
+
+        const availableOrders = await SalesOrder.find(ordersQuery)
+            .select("DocEntry DocNum DocDate CardCode CardName DocTotal DocumentLines")
+            .lean();
+
+        console.log(`📦 Unassigned orders for date: ${availableOrders.length}`);
+
+        if (availableOrders.length === 0) {
+            return res.json({
+                status: "success",
+                data: {
+                    truckId: truckId,
+                    truckName: truck.truckName,
+                    region: truckRegion,
+                    availableOrders: [],
+                    totalCount: 0,
+                    totalWeight: 0,
+                    totalValue: 0,
+                },
+                message: "No orders available for this truck region",
+            });
+        }
+
+        // Get all ItemCodes for weight calculation
+        const allItemCodes = new Set();
+        availableOrders.forEach(order => {
+            if (order.DocumentLines && Array.isArray(order.DocumentLines)) {
+                order.DocumentLines.forEach(line => {
+                    if (line.ItemCode) {
+                        allItemCodes.add(line.ItemCode);
+                    }
+                });
+            }
+        });
+
+        // Fetch items with weights
+        const items = await Item.find({
+            ItemCode: { $in: Array.from(allItemCodes) }
+        }).select("ItemCode SalesUnitWeight SalesWeightUnit").lean();
+
+        const itemMap = new Map();
+        items.forEach(item => {
+            itemMap.set(item.ItemCode, item);
+        });
+
+        // Get customers for address and coordinates
+        const cardCodes = availableOrders.map(o => o.CardCode);
+        const customers = await Customer.find({
+            CardCode: { $in: cardCodes }
+        }).select("CardCode coordinates address deliveryAddress").lean();
+
+        const customerMap = new Map();
+        customers.forEach(customer => {
+            customerMap.set(customer.CardCode, customer);
+        });
+
+        // Region department mapping (French postal codes) - Complete mapping
+        const FRENCH_DEPARTMENTS = {
+            // Île-de-France
+            "75": { region: "Île-de-France" },
+            "77": { region: "Île-de-France" },
+            "78": { region: "Île-de-France" },
+            "91": { region: "Île-de-France" },
+            "92": { region: "Île-de-France" },
+            "93": { region: "Île-de-France" },
+            "94": { region: "Île-de-France" },
+            "95": { region: "Île-de-France" },
+            // Normandie
+            "14": { region: "Normandie" },
+            "27": { region: "Normandie" },
+            "50": { region: "Normandie" },
+            "61": { region: "Normandie" },
+            "76": { region: "Normandie" },
+            // Bretagne
+            "22": { region: "Bretagne" },
+            "29": { region: "Bretagne" },
+            "35": { region: "Bretagne" },
+            "56": { region: "Bretagne" },
+            // Nouvelle-Aquitaine
+            "16": { region: "Nouvelle-Aquitaine" },
+            "17": { region: "Nouvelle-Aquitaine" },
+            "19": { region: "Nouvelle-Aquitaine" },
+            "23": { region: "Nouvelle-Aquitaine" },
+            "24": { region: "Nouvelle-Aquitaine" },
+            "33": { region: "Nouvelle-Aquitaine" },
+            "40": { region: "Nouvelle-Aquitaine" },
+            "47": { region: "Nouvelle-Aquitaine" },
+            "64": { region: "Nouvelle-Aquitaine" },
+            "79": { region: "Nouvelle-Aquitaine" },
+            "86": { region: "Nouvelle-Aquitaine" },
+            "87": { region: "Nouvelle-Aquitaine" },
+            // Occitanie
+            "09": { region: "Occitanie" },
+            "11": { region: "Occitanie" },
+            "12": { region: "Occitanie" },
+            "30": { region: "Occitanie" },
+            "31": { region: "Occitanie" },
+            "32": { region: "Occitanie" },
+            "34": { region: "Occitanie" },
+            "46": { region: "Occitanie" },
+            "48": { region: "Occitanie" },
+            "65": { region: "Occitanie" },
+            "66": { region: "Occitanie" },
+            "81": { region: "Occitanie" },
+            "82": { region: "Occitanie" },
+            // Auvergne-Rhône-Alpes
+            "01": { region: "Auvergne-Rhône-Alpes" },
+            "03": { region: "Auvergne-Rhône-Alpes" },
+            "07": { region: "Auvergne-Rhône-Alpes" },
+            "15": { region: "Auvergne-Rhône-Alpes" },
+            "26": { region: "Auvergne-Rhône-Alpes" },
+            "38": { region: "Auvergne-Rhône-Alpes" },
+            "42": { region: "Auvergne-Rhône-Alpes" },
+            "43": { region: "Auvergne-Rhône-Alpes" },
+            "63": { region: "Auvergne-Rhône-Alpes" },
+            "69": { region: "Auvergne-Rhône-Alpes" },
+            "73": { region: "Auvergne-Rhône-Alpes" },
+            "74": { region: "Auvergne-Rhône-Alpes" },
+            // Provence-Alpes-Côte d'Azur
+            "04": { region: "Provence-Alpes-Côte d'Azur" },
+            "05": { region: "Provence-Alpes-Côte d'Azur" },
+            "06": { region: "Provence-Alpes-Côte d'Azur" },
+            "13": { region: "Provence-Alpes-Côte d'Azur" },
+            "83": { region: "Provence-Alpes-Côte d'Azur" },
+            "84": { region: "Provence-Alpes-Côte d'Azur" },
+            // Pays de la Loire
+            "44": { region: "Pays de la Loire" },
+            "49": { region: "Pays de la Loire" },
+            "53": { region: "Pays de la Loire" },
+            "72": { region: "Pays de la Loire" },
+            "85": { region: "Pays de la Loire" },
+            // Centre-Val de Loire
+            "18": { region: "Centre-Val de Loire" },
+            "28": { region: "Centre-Val de Loire" },
+            "36": { region: "Centre-Val de Loire" },
+            "37": { region: "Centre-Val de Loire" },
+            "41": { region: "Centre-Val de Loire" },
+            "45": { region: "Centre-Val de Loire" },
+            // Bourgogne-Franche-Comté
+            "21": { region: "Bourgogne-Franche-Comté" },
+            "25": { region: "Bourgogne-Franche-Comté" },
+            "39": { region: "Bourgogne-Franche-Comté" },
+            "58": { region: "Bourgogne-Franche-Comté" },
+            "70": { region: "Bourgogne-Franche-Comté" },
+            "71": { region: "Bourgogne-Franche-Comté" },
+            "89": { region: "Bourgogne-Franche-Comté" },
+            "90": { region: "Bourgogne-Franche-Comté" },
+            // Hauts-de-France
+            "02": { region: "Hauts-de-France" },
+            "59": { region: "Hauts-de-France" },
+            "60": { region: "Hauts-de-France" },
+            "62": { region: "Hauts-de-France" },
+            "80": { region: "Hauts-de-France" },
+            // Grand Est
+            "08": { region: "Grand Est" },
+            "10": { region: "Grand Est" },
+            "51": { region: "Grand Est" },
+            "52": { region: "Grand Est" },
+            "54": { region: "Grand Est" },
+            "55": { region: "Grand Est" },
+            "57": { region: "Grand Est" },
+            "67": { region: "Grand Est" },
+            "68": { region: "Grand Est" },
+            "88": { region: "Grand Est" },
+        };
+
+        // Filter orders by truck region (matching original frontend logic)
+        const filteredOrders = availableOrders
+            .map(order => {
+                const customer = customerMap.get(order.CardCode);
+                
+                // Step 1: Check if order exists with address & zipCode
+                if (!customer) {
+                    return null;
+                }
+
+                // Get address
+                const address = customer.address || customer.deliveryAddress;
+                if (!address || !address.zipCode) {
+                    return null;
+                }
+
+                // Step 2: Extract department code from zipCode
+                const zipCode = address.zipCode.toString();
+                const deptCode = zipCode.startsWith("97") || zipCode.startsWith("98")
+                    ? zipCode.substring(0, 3)
+                    : zipCode.substring(0, 2);
+
+                // Step 3: Lookup department in FRENCH_DEPARTMENTS dict
+                const dept = FRENCH_DEPARTMENTS[deptCode];
+                if (!dept) {
+                    return null;
+                }
+
+                // Step 4: Compare regions (truck.region === dept.region)
+                if (dept.region !== truckRegion) {
+                    return null;
+                }
+
+                // Calculate total weight from order lines
+                let totalWeight = 0;
+                if (order.DocumentLines && Array.isArray(order.DocumentLines)) {
+                    for (const line of order.DocumentLines) {
+                        if (line.ItemCode && line.Quantity) {
+                            const item = itemMap.get(line.ItemCode);
+                            if (item && item.SalesUnitWeight) {
+                                totalWeight += item.SalesUnitWeight * line.Quantity;
+                            }
+                        }
+                    }
+                }
+
+                // Return order with coordinates if available
+                return {
+                    DocEntry: order.DocEntry,
+                    DocNum: order.DocNum,
+                    DocDate: order.DocDate,
+                    CardCode: order.CardCode,
+                    CardName: order.CardName,
+                    DocTotal: order.DocTotal,
+                    address: {
+                        street: address.street || "",
+                        city: address.city || "",
+                        zipCode: address.zipCode,
+                        country: address.country || "France",
+                    },
+                    coordinates: customer?.coordinates || null,  // Optional, can be null
+                    totalWeight: parseFloat(totalWeight.toFixed(2)),
+                    weightUnit: "kg",
+                };
+            })
+            .filter(o => o !== null);
+
+        console.log(`✅ Orders matching region "${truckRegion}": ${filteredOrders.length}`);
+
+        // Calculate totals
+        const totalWeight = filteredOrders.reduce((sum, o) => sum + o.totalWeight, 0);
+        const totalValue = filteredOrders.reduce((sum, o) => sum + o.DocTotal, 0);
+
+        console.log(`📊 Summary:`, {
+            count: filteredOrders.length,
+            totalWeight: totalWeight.toFixed(2),
+            totalValue: totalValue.toFixed(2),
+        });
+
+        console.log(`=== END FETCH ORDERS BY TRUCK REGION ===\n`);
+
+        res.json({
+            status: "success",
+            data: {
+                truckId: truckId,
+                truckName: truck.truckName,
+                region: truckRegion,
+                availableOrders: filteredOrders,
+                totalCount: filteredOrders.length,
+                totalWeight: parseFloat(totalWeight.toFixed(2)),
+                totalValue: parseFloat(totalValue.toFixed(2)),
+            },
+            message: "Orders retrieved successfully",
+        });
+    } catch (error) {
+        console.error("❌ ERROR FETCHING ORDERS BY TRUCK REGION:", error);
+        console.error("Stack trace:", error.stack);
+        res.status(500).json({
+            status: "error",
+            message: "Error fetching orders by truck region",
+            error: error.message,
+        });
+    }
+};

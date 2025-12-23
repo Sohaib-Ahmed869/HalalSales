@@ -8,6 +8,7 @@ const {
     getRoutesByDate,
     initializeTrucksForDate,
     getAvailableOrders,
+    getAvailableOrdersByTruckRegion,
     getRouteStatistics,
     assignOrderToTruck,
     removeOrderFromTruck,
@@ -25,10 +26,12 @@ router.post('/schedules', createOrUpdateSchedule);
 router.delete('/schedules/:id', deleteSchedule);
 
 // Truck Routes (Actual Deliveries) - Manage daily truck routes
+// More specific routes first
 router.get('/date/:date', getRoutesByDate);
 router.post('/initialize-date', initializeTrucksForDate);
-router.get('/available-orders/:date', getAvailableOrders);
 router.get('/stats', getRouteStatistics);
+router.get('/available-orders/:date', getAvailableOrders);
+router.get('/:truckId/available-orders', getAvailableOrdersByTruckRegion);
 
 // Order Assignment - Assign orders to trucks
 router.post('/:routeId/assign-order', assignOrderToTruck);
