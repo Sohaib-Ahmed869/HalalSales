@@ -4,6 +4,7 @@ const TruckRoute = require("../models/TruckRoute");
 const SalesOrder = require("../models/SalesOrder");
 const Customer = require("../models/Customer");
 const Item = require("../models/item");
+const { getRegionFromPostalCode } = require("../utils/nominatimGeocoding");
 
 /**
  * Get all truck schedules (weekly templates)
@@ -1472,33 +1473,28 @@ exports.generateTruckRoute = async (req, res) => {
 
         console.log(`📍 ${enrichedOrders.length} orders have coordinates`);
 
-        // Filter by region if truck has a region
+        // Filter by region if truck has a region (using Nominatim for dynamic region lookup)
         let filteredOrders = enrichedOrders;
         if (route.region) {
-            const FRENCH_DEPARTMENTS = {
-                "75": { region: "Île-de-France" },
-                "77": { region: "Île-de-France" },
-                "78": { region: "Île-de-France" },
-                "91": { region: "Île-de-France" },
-                "92": { region: "Île-de-France" },
-                "93": { region: "Île-de-France" },
-                "94": { region: "Île-de-France" },
-                "95": { region: "Île-de-France" },
-                // Add all other departments from your existing FRENCH_DEPARTMENTS object
-            };
+            const regionFilteredOrders = [];
+            for (const order of enrichedOrders) {
+                if (!order.address || !order.address.zipCode) continue;
 
-            filteredOrders = enrichedOrders.filter(order => {
-                if (!order.address || !order.address.zipCode) return false;
+                try {
+                    const postalCode = order.address.zipCode.toString();
+                    const countryCode = order.address?.country && order.address.country.length === 2
+                        ? order.address.country.toUpperCase()
+                        : "FR";
 
-                const zipCode = order.address.zipCode.toString();
-                const deptCode = zipCode.startsWith("97") || zipCode.startsWith("98")
-                    ? zipCode.substring(0, 3)
-                    : zipCode.substring(0, 2);
-
-                const dept = FRENCH_DEPARTMENTS[deptCode];
-                return dept && dept.region === route.region;
-            });
-
+                    const orderRegion = await getRegionFromPostalCode(postalCode, countryCode);
+                    if (orderRegion && orderRegion === route.region) {
+                        regionFilteredOrders.push(order);
+                    }
+                } catch (error) {
+                    console.warn(`Region lookup failed for postal code ${order.address.zipCode}:`, error.message);
+                }
+            }
+            filteredOrders = regionFilteredOrders;
             console.log(`🌍 ${filteredOrders.length} orders match region: ${route.region}`);
         }
 
@@ -1778,147 +1774,40 @@ exports.getAvailableOrdersByTruckRegion = async (req, res) => {
             customerMap.set(customer.CardCode, customer);
         });
 
-        // Region department mapping (French postal codes) - Complete mapping
-        const FRENCH_DEPARTMENTS = {
-            // Île-de-France
-            "75": { region: "Île-de-France" },
-            "77": { region: "Île-de-France" },
-            "78": { region: "Île-de-France" },
-            "91": { region: "Île-de-France" },
-            "92": { region: "Île-de-France" },
-            "93": { region: "Île-de-France" },
-            "94": { region: "Île-de-France" },
-            "95": { region: "Île-de-France" },
-            // Normandie
-            "14": { region: "Normandie" },
-            "27": { region: "Normandie" },
-            "50": { region: "Normandie" },
-            "61": { region: "Normandie" },
-            "76": { region: "Normandie" },
-            // Bretagne
-            "22": { region: "Bretagne" },
-            "29": { region: "Bretagne" },
-            "35": { region: "Bretagne" },
-            "56": { region: "Bretagne" },
-            // Nouvelle-Aquitaine
-            "16": { region: "Nouvelle-Aquitaine" },
-            "17": { region: "Nouvelle-Aquitaine" },
-            "19": { region: "Nouvelle-Aquitaine" },
-            "23": { region: "Nouvelle-Aquitaine" },
-            "24": { region: "Nouvelle-Aquitaine" },
-            "33": { region: "Nouvelle-Aquitaine" },
-            "40": { region: "Nouvelle-Aquitaine" },
-            "47": { region: "Nouvelle-Aquitaine" },
-            "64": { region: "Nouvelle-Aquitaine" },
-            "79": { region: "Nouvelle-Aquitaine" },
-            "86": { region: "Nouvelle-Aquitaine" },
-            "87": { region: "Nouvelle-Aquitaine" },
-            // Occitanie
-            "09": { region: "Occitanie" },
-            "11": { region: "Occitanie" },
-            "12": { region: "Occitanie" },
-            "30": { region: "Occitanie" },
-            "31": { region: "Occitanie" },
-            "32": { region: "Occitanie" },
-            "34": { region: "Occitanie" },
-            "46": { region: "Occitanie" },
-            "48": { region: "Occitanie" },
-            "65": { region: "Occitanie" },
-            "66": { region: "Occitanie" },
-            "81": { region: "Occitanie" },
-            "82": { region: "Occitanie" },
-            // Auvergne-Rhône-Alpes
-            "01": { region: "Auvergne-Rhône-Alpes" },
-            "03": { region: "Auvergne-Rhône-Alpes" },
-            "07": { region: "Auvergne-Rhône-Alpes" },
-            "15": { region: "Auvergne-Rhône-Alpes" },
-            "26": { region: "Auvergne-Rhône-Alpes" },
-            "38": { region: "Auvergne-Rhône-Alpes" },
-            "42": { region: "Auvergne-Rhône-Alpes" },
-            "43": { region: "Auvergne-Rhône-Alpes" },
-            "63": { region: "Auvergne-Rhône-Alpes" },
-            "69": { region: "Auvergne-Rhône-Alpes" },
-            "73": { region: "Auvergne-Rhône-Alpes" },
-            "74": { region: "Auvergne-Rhône-Alpes" },
-            // Provence-Alpes-Côte d'Azur
-            "04": { region: "Provence-Alpes-Côte d'Azur" },
-            "05": { region: "Provence-Alpes-Côte d'Azur" },
-            "06": { region: "Provence-Alpes-Côte d'Azur" },
-            "13": { region: "Provence-Alpes-Côte d'Azur" },
-            "83": { region: "Provence-Alpes-Côte d'Azur" },
-            "84": { region: "Provence-Alpes-Côte d'Azur" },
-            // Pays de la Loire
-            "44": { region: "Pays de la Loire" },
-            "49": { region: "Pays de la Loire" },
-            "53": { region: "Pays de la Loire" },
-            "72": { region: "Pays de la Loire" },
-            "85": { region: "Pays de la Loire" },
-            // Centre-Val de Loire
-            "18": { region: "Centre-Val de Loire" },
-            "28": { region: "Centre-Val de Loire" },
-            "36": { region: "Centre-Val de Loire" },
-            "37": { region: "Centre-Val de Loire" },
-            "41": { region: "Centre-Val de Loire" },
-            "45": { region: "Centre-Val de Loire" },
-            // Bourgogne-Franche-Comté
-            "21": { region: "Bourgogne-Franche-Comté" },
-            "25": { region: "Bourgogne-Franche-Comté" },
-            "39": { region: "Bourgogne-Franche-Comté" },
-            "58": { region: "Bourgogne-Franche-Comté" },
-            "70": { region: "Bourgogne-Franche-Comté" },
-            "71": { region: "Bourgogne-Franche-Comté" },
-            "89": { region: "Bourgogne-Franche-Comté" },
-            "90": { region: "Bourgogne-Franche-Comté" },
-            // Hauts-de-France
-            "02": { region: "Hauts-de-France" },
-            "59": { region: "Hauts-de-France" },
-            "60": { region: "Hauts-de-France" },
-            "62": { region: "Hauts-de-France" },
-            "80": { region: "Hauts-de-France" },
-            // Grand Est
-            "08": { region: "Grand Est" },
-            "10": { region: "Grand Est" },
-            "51": { region: "Grand Est" },
-            "52": { region: "Grand Est" },
-            "54": { region: "Grand Est" },
-            "55": { region: "Grand Est" },
-            "57": { region: "Grand Est" },
-            "67": { region: "Grand Est" },
-            "68": { region: "Grand Est" },
-            "88": { region: "Grand Est" },
-        };
+        // Filter orders by truck region using Nominatim API for dynamic region lookup
+        // This works for all European countries, not just France
+        const filteredOrders = [];
 
-        // Filter orders by truck region (matching original frontend logic)
-        const filteredOrders = availableOrders
-            .map(order => {
-                const customer = customerMap.get(order.CardCode);
+        for (const order of availableOrders) {
+            const customer = customerMap.get(order.CardCode);
+            
+            // Check if order exists with address & zipCode
+            if (!customer) {
+                continue;
+            }
+
+            // Get address
+            const address = customer.address || customer.deliveryAddress;
+            if (!address || !address.zipCode) {
+                continue;
+            }
+
+            try {
+                // Get region from postal code using Nominatim API
+                // Detect country code from address if available, default to France
+                const countryCode = address.country && address.country.length === 2 
+                    ? address.country.toUpperCase() 
+                    : "FR";
                 
-                // Step 1: Check if order exists with address & zipCode
-                if (!customer) {
-                    return null;
+                const orderRegion = await getRegionFromPostalCode(address.zipCode.toString(), countryCode);
+                
+                if (!orderRegion) {
+                    continue; // Skip if region lookup failed
                 }
 
-                // Get address
-                const address = customer.address || customer.deliveryAddress;
-                if (!address || !address.zipCode) {
-                    return null;
-                }
-
-                // Step 2: Extract department code from zipCode
-                const zipCode = address.zipCode.toString();
-                const deptCode = zipCode.startsWith("97") || zipCode.startsWith("98")
-                    ? zipCode.substring(0, 3)
-                    : zipCode.substring(0, 2);
-
-                // Step 3: Lookup department in FRENCH_DEPARTMENTS dict
-                const dept = FRENCH_DEPARTMENTS[deptCode];
-                if (!dept) {
-                    return null;
-                }
-
-                // Step 4: Compare regions (truck.region === dept.region)
-                if (dept.region !== truckRegion) {
-                    return null;
+                // Compare regions (truck.region === orderRegion)
+                if (orderRegion !== truckRegion) {
+                    continue; // Skip if regions don't match
                 }
 
                 // Calculate total weight from order lines
@@ -1935,7 +1824,7 @@ exports.getAvailableOrdersByTruckRegion = async (req, res) => {
                 }
 
                 // Return order with coordinates if available
-                return {
+                filteredOrders.push({
                     DocEntry: order.DocEntry,
                     DocNum: order.DocNum,
                     DocDate: order.DocDate,
@@ -1951,9 +1840,13 @@ exports.getAvailableOrdersByTruckRegion = async (req, res) => {
                     coordinates: customer?.coordinates || null,  // Optional, can be null
                     totalWeight: parseFloat(totalWeight.toFixed(2)),
                     weightUnit: "kg",
-                };
-            })
-            .filter(o => o !== null);
+                });
+            } catch (error) {
+                console.warn(`Region lookup failed for order ${order.DocNum} with postal code ${order.address?.zipCode}:`, error.message);
+                // Skip this order if region lookup fails
+                continue;
+            }
+        }
 
         console.log(`✅ Orders matching region "${truckRegion}": ${filteredOrders.length}`);
 
