@@ -1,10 +1,17 @@
-// services/vendorEmailService.js
 const Imap = require('imap');
 const { simpleParser } = require('mailparser');
 const { parseVendorInfoFromEmail, parseRFQResponseWithAI } = require('./aiService');
 const Vendor = require('../models/Vendor');
 const EmailVendorHistory = require('../models/EmailVendorHistory');
-const pdfParse = require('pdf-parse');
+
+// Conditional import of pdf-parse (may not work on all systems)
+let pdfParse = null;
+try {
+    pdfParse = require('pdf-parse');
+    console.log('✅ pdf-parse loaded successfully');
+} catch (error) {
+    console.warn('⚠️ pdf-parse not available - PDF processing will be disabled:', error.message);
+}
 
 // Gmail IMAP Configuration
 const gmailImapConfig = {
