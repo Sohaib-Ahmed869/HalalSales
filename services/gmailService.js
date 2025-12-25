@@ -1,7 +1,15 @@
 const { google } = require('googleapis');
 const nodemailer = require('nodemailer');
 const { simpleParser } = require('mailparser');
-const pdfParse = require('pdf-parse');
+
+// Conditional import of pdf-parse (may not work on all systems)
+let pdfParse = null;
+try {
+    pdfParse = require('pdf-parse');
+    console.log('✅ pdf-parse loaded successfully in gmailService');
+} catch (error) {
+    console.warn('⚠️ pdf-parse not available in gmailService - PDF processing will be disabled:', error.message);
+}
 
 class GmailService {
     constructor() {
@@ -278,6 +286,11 @@ class GmailService {
      * Extract text from PDF attachment
      */
     async extractTextFromPDF(pdfBuffer) {
+        if (!pdfParse) {
+            console.warn('⚠️ PDF parsing skipped - pdf-parse module not available');
+            return '';
+        }
+
         try {
             const data = await pdfParse(pdfBuffer);
             return data.text;
