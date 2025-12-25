@@ -145,6 +145,9 @@ class GmailService {
     /**
      * Get full email details including attachments
      */
+    /**
+  * Get full email details including attachments
+  */
     async getEmailDetails(messageId) {
         try {
             const message = await this.gmail.users.messages.get({
@@ -158,18 +161,48 @@ class GmailService {
             const subject = headers.find(h => h.name === 'Subject')?.value || '';
             const date = headers.find(h => h.name === 'Date')?.value || '';
 
-            // Extract email body
+            // FIXED: Properly extract email body
             let body = '';
-            if (message.data.payload.body.data) {
-                body = Buffer.from(message.data.payload.body.data, 'base64').toString('utf-8');
-            } else if (message.data.payload.parts) {
-                const textPart = message.data.payload.parts.find(
-                    part => part.mimeType === 'text/plain' || part.mimeType === 'text/html'
-                );
-                if (textPart?.body?.data) {
-                    body = Buffer.from(textPart.body.data, 'base64').toString('utf-8');
+            let htmlBody = '';
+
+            const extractBody = (parts) => {
+                if (!parts) return;
+
+                for (const part of parts) {
+                    // Extract text/plain
+                    if (part.mimeType === 'text/plain' && part.body?.data) {
+                        body += Buffer.from(part.body.data, 'base64').toString('utf-8') + '\n\n';
+                    }
+                    // Extract text/html
+                    if (part.mimeType === 'text/html' && part.body?.data) {
+                        htmlBody += Buffer.from(part.body.data, 'base64').toString('utf-8') + '\n\n';
+                    }
+                    // Recurse into nested parts
+                    if (part.parts) {
+                        extractBody(part.parts);
+                    }
+                }
+            };
+
+            // Handle both simple and multipart messages
+            if (message.data.payload.parts) {
+                extractBody(message.data.payload.parts);
+            } else if (message.data.payload.body?.data) {
+                // Single-part message
+                const mimeType = message.data.payload.mimeType;
+                const decoded = Buffer.from(message.data.payload.body.data, 'base64').toString('utf-8');
+
+                if (mimeType === 'text/plain') {
+                    body = decoded;
+                } else if (mimeType === 'text/html') {
+                    htmlBody = decoded;
+                } else {
+                    body = decoded; // Fallback
                 }
             }
+
+            // Use text body if available, otherwise use HTML
+            const finalBody = body.trim() || htmlBody.trim() || 'No email body content';
 
             // Extract attachments
             const attachments = await this.extractAttachments(message.data);
@@ -179,7 +212,8 @@ class GmailService {
                 from,
                 subject,
                 date: new Date(date),
-                body,
+                body: finalBody,
+                htmlBody: htmlBody.trim(),
                 attachments,
             };
         } catch (error) {

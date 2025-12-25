@@ -70,8 +70,8 @@ class RFQResponsePoller {
     }
 
     /**
-     * Check responses for a specific RFQ
-     */
+  * Check responses for a specific RFQ
+  */
     async checkRFQResponses(rfq) {
         try {
             console.log(`🔍 Checking responses for RFQ ${rfq.rfqNumber}`);
@@ -87,6 +87,43 @@ class RFQResponsePoller {
             console.log(`   📧 Found ${emails.length} new response(s) for ${rfq.rfqNumber}`);
 
             for (const email of emails) {
+                // ========================================
+                // EXTRACT PDF CONTENT HERE
+                // ========================================
+                let pdfContent = '';
+
+                if (email.attachments && email.attachments.length > 0) {
+                    console.log(`\n📎 Found ${email.attachments.length} attachment(s)`);
+
+                    const pdfAttachments = email.attachments.filter(a =>
+                        a.mimeType === 'application/pdf' && a.size < 10485760 // Max 10MB
+                    );
+
+                    if (pdfAttachments.length > 0) {
+                        console.log(`📄 Processing ${pdfAttachments.length} PDF attachment(s)...`);
+
+                        const { extractTextFromMultiplePDFs } = require('../utils/pdfExtractor');
+
+                        try {
+                            // PDFs are already downloaded in email.attachments with .data property
+                            const pdfBuffers = pdfAttachments.map(pdf => ({
+                                buffer: pdf.data,
+                                filename: pdf.filename
+                            }));
+
+                            pdfContent = await extractTextFromMultiplePDFs(pdfBuffers);
+                            console.log(`✅ Extracted ${pdfContent.length} characters from PDF(s)`);
+                            console.log(`📝 PDF Preview: "${pdfContent.substring(0, 200)}..."`);
+                        } catch (pdfError) {
+                            console.error(`❌ PDF extraction failed:`, pdfError.message);
+                            pdfContent = `\n\n=== PDF EXTRACTION FAILED ===\nError: ${pdfError.message}\n`;
+                        }
+                    }
+                }
+
+                // FIXED: Add PDF content to email object
+                email.pdfContent = pdfContent;
+
                 await this.processVendorResponse(rfq, email);
             }
 
@@ -96,18 +133,28 @@ class RFQResponsePoller {
     }
 
     /**
-     * Process a vendor email response
-     */
-    /**
-  * Process a vendor email response - FIXED VERSION
-  */
+ * Process a vendor email response - FIXED VERSION
+ */
     async processVendorResponse(rfq, email) {
         try {
             console.log(`\n${'='.repeat(60)}`);
             console.log(`📨 Processing response from: ${email.from}`);
             console.log(`Subject: ${email.subject}`);
-            console.log(`Body preview: "${email.body.substring(0, 150)}..."`);
+            console.log(`Body length: ${email.body?.length || 0} chars`);
             console.log(`${'='.repeat(60)}`);
+
+            // CRITICAL: Check if body is empty
+            if (!email.body || email.body.trim().length === 0) {
+                console.error('❌ EMAIL BODY IS EMPTY! Raw email data:');
+                console.error('From:', email.from);
+                console.error('Subject:', email.subject);
+                console.error('Body preview:', email.body);
+                console.error('HTML Body length:', email.htmlBody?.length || 0);
+
+                // Try to use HTML body as fallback
+                email.body = email.htmlBody || 'No email content available';
+                console.log(`⚠️ Using HTML body as fallback (${email.body.length} chars)`);
+            }
 
             // Extract vendor email address
             const extractEmailAddress = (emailString) => {
@@ -144,18 +191,22 @@ class RFQResponsePoller {
             // ============================================
             console.log('\n📝 STEP 1: Storing raw email content...');
 
+            // FIXED: Ensure we're storing the actual body content
+            const emailBodyContent = email.body?.trim() || email.htmlBody?.trim() || 'No content';
+
             vendor.rawEmailContent = {
-                subject: email.subject,
-                body: email.body,
-                htmlBody: '',
+                subject: email.subject || 'No subject',
+                body: emailBodyContent,
+                htmlBody: email.htmlBody?.trim() || '',
+                pdfContent: email.pdfContent || '', // FIXED: Include PDF content
                 receivedDate: email.date,
-                attachments: email.attachments.map(a => a.filename)
+                attachments: (email.attachments || []).map(a => a.filename)
             };
 
             vendor.status = 'responded';
             vendor.responseDate = email.date;
             vendor.emailMessageId = email.messageId;
-            vendor.notes = `Email response received: ${email.subject.substring(0, 50)}...`;
+            vendor.notes = `Email response received: ${(email.subject || '').substring(0, 50)}...`;
 
             // CRITICAL: Mark as modified for Mongoose
             rfq.markModified('vendorsContacted');
@@ -171,9 +222,16 @@ class RFQResponsePoller {
             console.log(`   - Has rawEmailContent: ${!!verifyVendor.rawEmailContent}`);
             console.log(`   - Has body: ${!!verifyVendor.rawEmailContent?.body}`);
             console.log(`   - Body length: ${verifyVendor.rawEmailContent?.body?.length || 0} chars`);
+            console.log(`   - PDF length: ${verifyVendor.rawEmailContent?.pdfContent?.length || 0} chars`);
+            console.log(`   - Body preview: "${(verifyVendor.rawEmailContent?.body || '').substring(0, 100)}..."`);
 
-            if (!verifyVendor.rawEmailContent?.body) {
-                console.error('❌ RAW EMAIL NOT SAVED!');
+            if (!verifyVendor.rawEmailContent?.body || verifyVendor.rawEmailContent.body.length === 0) {
+                console.error('❌ RAW EMAIL STILL NOT SAVED!');
+                console.error('Debug info:');
+                console.error('  - Original email.body length:', email.body?.length || 0);
+                console.error('  - Original email.htmlBody length:', email.htmlBody?.length || 0);
+                console.error('  - Original email.pdfContent length:', email.pdfContent?.length || 0);
+                console.error('  - Saved body length:', verifyVendor.rawEmailContent?.body?.length || 0);
                 return;
             }
 
@@ -185,12 +243,22 @@ class RFQResponsePoller {
             try {
                 const aiService = require('./aiService');
 
+                // FIXED: COMBINE email body + PDF content for AI analysis
+                const fullContent = [emailBodyContent, email.pdfContent]
+                    .filter(Boolean)
+                    .join('\n\n=== PDF ATTACHMENT CONTENT ===\n\n');
+
+                console.log(`📊 Sending to AI: ${fullContent.length} total characters`);
+                console.log(`   - Email: ${emailBodyContent.length} chars`);
+                console.log(`   - PDF: ${(email.pdfContent || '').length} chars`);
+
                 const parsedData = await aiService.parseRFQResponseWithAI({
                     rfqNumber: rfq.rfqNumber,
                     vendorName: vendor.vendorName,
                     vendorEmail: vendor.email,
                     emailSubject: email.subject,
-                    emailBody: email.body,
+                    emailBody: fullContent, // FIXED: Use combined content
+                    pdfContent: email.pdfContent || '', // Also send PDF separately
                     date: email.date.toISOString(),
                 });
 
@@ -225,7 +293,7 @@ class RFQResponsePoller {
 
                     vendor.quotationData = {
                         isValidQuotation: false,
-                        additionalNotes: `Response received. Manual review required.`,
+                        additionalNotes: `Response received. ${email.pdfContent ? `PDF content extracted (${(email.pdfContent.length / 1024).toFixed(2)} KB) but no pricing found.` : 'No PDF attachments.'} Manual review required.`,
                         parsingStatus: 'failed'
                     };
                     vendor.notes = `Response received - manual review required`;
@@ -235,7 +303,7 @@ class RFQResponsePoller {
 
                 vendor.quotationData = {
                     isValidQuotation: false,
-                    additionalNotes: `AI error: ${aiError.message}. Email content available.`,
+                    additionalNotes: `AI error: ${aiError.message}. Email content (including ${(email.pdfContent || '').length} chars of PDF text) available in rawEmailContent.`,
                     parsingStatus: 'failed'
                 };
                 vendor.notes = `Response received - AI failed - manual review required`;
@@ -261,7 +329,8 @@ class RFQResponsePoller {
             await gmailService.markAsRead(email.messageId);
 
             console.log(`\n✅ Successfully processed response from ${vendor.vendorName}`);
-            console.log(`   - Raw email: SAVED`);
+            console.log(`   - Raw email: SAVED (${emailBodyContent.length} chars)`);
+            console.log(`   - PDF content: ${(email.pdfContent || '').length} chars`);
             console.log(`   - AI parsing: ${vendor.quotationData?.parsingStatus || 'N/A'}`);
             console.log(`   - Has price: ${!!vendor.quotationData?.totalQuotedAmount}\n`);
 

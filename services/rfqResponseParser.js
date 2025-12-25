@@ -9,15 +9,25 @@ class RFQResponseParser {
         try {
             const aiService = require('./aiService');
 
-            // Parse with AI
+            // Combine email body with PDF content for AI analysis
+            const fullContent = [emailBodyContent, email.pdfContent]
+                .filter(Boolean)
+                .join('\n\n=== PDF ATTACHMENT CONTENT ===\n\n');
+
+            console.log(`📊 Sending to AI: ${fullContent.length} total characters`);
+            if (email.pdfContent) {
+                console.log(`   - Email: ${emailBodyContent.length} chars`);
+                console.log(`   - PDF: ${email.pdfContent.length} chars`);
+            }
+
             const parsedData = await aiService.parseRFQResponseWithAI({
                 rfqNumber: rfq.rfqNumber,
-                vendorName: email.from,
-                vendorEmail: email.fromEmail,
+                vendorName: vendor.vendorName,
+                vendorEmail: vendor.email,
                 emailSubject: email.subject,
-                emailBody: email.body,
-                date: email.date,
-                pdfContent: email.pdfContent || null
+                emailBody: fullContent, // Send combined content
+                pdfContent: email.pdfContent || '', // Also send PDF separately
+                date: email.date.toISOString(),
             });
 
             // Find vendor in RFQ

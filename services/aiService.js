@@ -773,8 +773,9 @@ Focus on extracting actual structured data. Return only the JSON.
 async function parseRFQResponseWithAI(data) {
     try {
         const prompt = `
-Analyze this RFQ response for RFQ Number: ${data.rfqNumber}
+You are analyzing an RFQ response. Extract ALL pricing information, even from casual conversational text.
 
+RFQ Number: ${data.rfqNumber}
 Vendor: ${data.vendorName} (${data.vendorEmail})
 Date: ${data.date}
 Subject: ${data.emailSubject}
@@ -784,42 +785,60 @@ ${data.emailBody}
 
 ${data.pdfContent ? `PDF Attachment Content:\n${data.pdfContent}` : ''}
 
-IMPORTANT: Extract pricing information even from conversational text. Look for:
-- Numbers followed by currency words (Pounds, Euros, Dollars, GBP, EUR, USD, £, €, $)
-- Phrases like "my price is", "cost is", "charge", "quote"
-- Dates for delivery (including informal formats like "26th December 2025")
+CRITICAL INSTRUCTIONS FOR PRICE EXTRACTION:
+1. Look for ANY mention of price, cost, or monetary value
+2. Common formats to extract:
+   - "The price is 9000 euros"
+   - "9000 euros for the items"
+   - "I can do it for €9,000"
+   - "Total cost: 9000 EUR"
+   - "900 Pounds"
+   - "$500"
+   - "Price: 9000"
+3. Extract numbers followed by: euros, euro, EUR, €, pounds, GBP, £, dollars, USD, $
+4. If you find ANY price mention, set isValidResponse to TRUE
+5. Delivery dates can be informal: "26th December", "next week", "in 5 days"
 
-Extract and return JSON:
+Extract and return ONLY this JSON structure (no markdown, no extra text):
 {
-    "isValidResponse": true/false (true if ANY price or delivery info found),
-    "responseType": "quotation" or "decline" or "question",
+    "isValidResponse": true,
+    "responseType": "quotation",
     "quotedItems": [
         {
-            "productName": "name or 'Full Order' if not specified",
-            "quantity": number or null,
-            "unit": "kg/cartons/etc or 'order' if not specified",
-            "unitPrice": number or null,
-            "totalPrice": number (REQUIRED if this is a quotation),
-            "currency": "GBP/EUR/USD/etc"
+            "productName": "Full Order",
+            "quantity": null,
+            "unit": "order",
+            "unitPrice": null,
+            "totalPrice": 9000,
+            "currency": "EUR"
         }
     ],
-    "totalQuotedAmount": number (REQUIRED - extract from text),
-    "deliveryTimeInDays": number or null,
-    "deliveryDate": "YYYY-MM-DD or null",
-    "paymentTerms": "terms mentioned or null",
-    "minimumOrder": "if mentioned or null",
-    "notes": "any special conditions or the full message if unclear",
-    "certifications": ["any certifications mentioned"],
-    "contactPerson": "name if mentioned",
-    "contactPhone": "phone if mentioned"
+    "totalQuotedAmount": 9000,
+    "currency": "EUR",
+    "deliveryTimeInDays": null,
+    "deliveryDate": null,
+    "paymentTerms": null,
+    "validityPeriod": null,
+    "additionalNotes": "any relevant notes from the message",
+    "certifications": [],
+    "contactPerson": null,
+    "contactPhone": null
 }
 
-Examples of conversational pricing to extract:
-- "my price is 900 Pounds" → totalQuotedAmount: 900, currency: "GBP"
-- "I can do it for €1,200" → totalQuotedAmount: 1200, currency: "EUR"
-- "The cost would be $500" → totalQuotedAmount: 500, currency: "USD"
+EXAMPLES OF WHAT TO EXTRACT:
+Input: "The price for the quoted items is 9000 euros this is very good"
+Output: {"isValidResponse": true, "totalQuotedAmount": 9000, "currency": "EUR", ...}
 
-Return ONLY valid JSON, no markdown.
+Input: "my price is 900 Pounds"
+Output: {"isValidResponse": true, "totalQuotedAmount": 900, "currency": "GBP", ...}
+
+Input: "I can supply for $1,200"
+Output: {"isValidResponse": true, "totalQuotedAmount": 1200, "currency": "USD", ...}
+
+Input: "Looking forward to your order!"
+Output: {"isValidResponse": false, "responseType": "question", ...}
+
+NOW EXTRACT FROM THE CONTENT ABOVE. Return ONLY valid JSON, no markdown, no code blocks.
 `;
 
         const response = await openai.chat.completions.create({
@@ -827,40 +846,73 @@ Return ONLY valid JSON, no markdown.
             messages: [
                 {
                     role: 'system',
-                    content: 'You are an RFQ response analyzer. Extract pricing from ANY format - structured quotes, conversational emails, or informal messages. Always look for numbers with currency. Return only valid JSON.',
+                    content: `You are an expert at extracting pricing information from vendor responses. 
+You MUST find prices even in casual conversational text like "the price is 9000 euros".
+Extract ANY mention of monetary amounts with their currency.
+Return ONLY valid JSON with no markdown formatting.`
                 },
                 {
                     role: 'user',
                     content: prompt,
                 },
             ],
-            temperature: 0.1, // Lower temperature for more accurate extraction
+            temperature: 0.1, // Very low for accurate extraction
+            response_format: { type: "json_object" } // Force JSON response
         });
 
         const content = response.choices[0].message.content.trim();
 
-        // Remove markdown code blocks if present
-        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        console.log('🤖 Raw AI Response:', content);
 
-        if (jsonMatch) {
-            const parsed = JSON.parse(jsonMatch[0]);
+        // Parse the JSON response
+        let parsed;
+        try {
+            // Remove any markdown code blocks if present
+            const cleanContent = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+            parsed = JSON.parse(cleanContent);
+        } catch (parseError) {
+            console.error('❌ Failed to parse AI JSON response:', parseError);
+            console.error('Raw content:', content);
 
-            // Extra validation: if we found ANY price, mark as valid
-            if (parsed.totalQuotedAmount && parsed.totalQuotedAmount > 0) {
-                parsed.isValidResponse = true;
-                parsed.responseType = 'quotation';
+            // Try to extract just the JSON object
+            const jsonMatch = content.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                parsed = JSON.parse(jsonMatch[0]);
+            } else {
+                throw new Error('Could not extract valid JSON from AI response');
             }
-
-            return parsed;
         }
 
-        return { isValidResponse: false };
+        // Extra validation: if we found ANY price, mark as valid
+        if (parsed.totalQuotedAmount && parsed.totalQuotedAmount > 0) {
+            parsed.isValidResponse = true;
+            parsed.responseType = 'quotation';
+
+            // Ensure we have at least one quoted item
+            if (!parsed.quotedItems || parsed.quotedItems.length === 0) {
+                parsed.quotedItems = [{
+                    productName: "Full Order",
+                    quantity: null,
+                    unit: "order",
+                    unitPrice: null,
+                    totalPrice: parsed.totalQuotedAmount,
+                    currency: parsed.currency || 'EUR'
+                }];
+            }
+        }
+
+        console.log('✅ Parsed AI Response:', JSON.stringify(parsed, null, 2));
+
+        return parsed;
     } catch (error) {
-        console.error('Error parsing RFQ response with AI:', error);
+        console.error('❌ Error parsing RFQ response with AI:', error);
+        console.error('Error stack:', error.stack);
+
         return {
             isValidResponse: false,
+            responseType: 'error',
             error: error.message,
-            notes: 'AI parsing failed - please review the raw email content'
+            additionalNotes: 'AI parsing failed - please review the raw email content'
         };
     }
 }

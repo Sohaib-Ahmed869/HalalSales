@@ -1,4 +1,3 @@
-// models/TruckSchedule.js
 const mongoose = require("mongoose");
 
 const truckScheduleSchema = new mongoose.Schema({
@@ -7,21 +6,33 @@ const truckScheduleSchema = new mongoose.Schema({
         required: true,
         enum: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
     },
-    region: {
-        type: String,
-        required: false, // Can be null for generic schedules
-    },
-    departments: [{
-        type: String, // Department codes like "75", "92", etc.
-    }],
-    cities: [{
-        type: String, // City names
-    }],
+    region: String,
+    departments: [String],
+    cities: [String],
     numberOfTrucks: {
         type: Number,
         required: true,
         min: 1,
     },
+    // REPLACE maxWeightKg with trucks array
+    trucks: [{
+        truckNumber: {
+            type: Number,
+            required: true,
+        },
+        truckName: String,
+        maxWeightKg: {
+            type: Number,
+            default: 1000,
+            min: 100,
+        },
+        // Optional: Add truck type/model
+        truckType: {
+            type: String,
+            enum: ["small", "medium", "large", "custom"],
+            default: "medium",
+        },
+    }],
     isActive: {
         type: Boolean,
         default: true,

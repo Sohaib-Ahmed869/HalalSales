@@ -2,7 +2,7 @@ const { google } = require('googleapis');
 const gmailService = require('./gmailService');
 const rfqResponseParser = require('./rfqResponseParser');
 const RFQ = require('../models/RFQ');
-
+const { extractTextFromMultiplePDFs } = require('../utils/pdfExtractor');
 class RFQEmailMonitor {
     constructor() {
         this.isMonitoring = false;
@@ -66,11 +66,10 @@ class RFQEmailMonitor {
     }
 
     /**
-     * Process responses for a specific RFQ
-     */
+ * Process responses for a specific RFQ
+ */
     async processRFQResponses() {
         try {
-            // Use existing gmailService OAuth
             const gmail = gmailService.gmail;
 
             const response = await gmail.users.messages.list({
@@ -95,7 +94,9 @@ class RFQEmailMonitor {
                     const from = headers.find(h => h.name === 'From')?.value || '';
                     const date = headers.find(h => h.name === 'Date')?.value || '';
 
-                    // Extract email body
+                    // ========================================
+                    // FIXED: Extract email body properly
+                    // ========================================
                     let emailBody = '';
                     let htmlBody = '';
                     const attachments = [];
@@ -103,17 +104,19 @@ class RFQEmailMonitor {
                     const extractBody = (parts) => {
                         if (!parts) return;
                         for (const part of parts) {
-                            if (part.mimeType === 'text/plain' && part.body.data) {
+                            // FIXED: Check if body exists
+                            if (part.mimeType === 'text/plain' && part.body && part.body.data) {
                                 emailBody += Buffer.from(part.body.data, 'base64').toString('utf-8') + '\n\n';
                             }
-                            if (part.mimeType === 'text/html' && part.body.data) {
+                            if (part.mimeType === 'text/html' && part.body && part.body.data) {
                                 htmlBody += Buffer.from(part.body.data, 'base64').toString('utf-8') + '\n\n';
                             }
-                            if (part.filename && part.body.attachmentId) {
+                            if (part.filename && part.body && part.body.attachmentId) {
                                 attachments.push({
                                     filename: part.filename,
                                     mimeType: part.mimeType,
-                                    attachmentId: part.body.attachmentId
+                                    attachmentId: part.body.attachmentId,
+                                    size: part.body.size
                                 });
                             }
                             if (part.parts) {
@@ -124,18 +127,88 @@ class RFQEmailMonitor {
 
                     if (fullMessage.data.payload.parts) {
                         extractBody(fullMessage.data.payload.parts);
-                    } else if (fullMessage.data.payload.body.data) {
-                        emailBody = Buffer.from(fullMessage.data.payload.body.data, 'base64').toString('utf-8');
+                    } else if (fullMessage.data.payload.body && fullMessage.data.payload.body.data) {
+                        // ADDED: Handle single-part message
+                        const decoded = Buffer.from(fullMessage.data.payload.body.data, 'base64').toString('utf-8');
+                        const mimeType = fullMessage.data.payload.mimeType;
+
+                        if (mimeType === 'text/plain') {
+                            emailBody = decoded;
+                        } else if (mimeType === 'text/html') {
+                            htmlBody = decoded;
+                        } else {
+                            emailBody = decoded;
+                        }
                     }
+
+                    // Use text body if available, otherwise HTML
+                    const finalEmailBody = emailBody.trim() || htmlBody.trim() || 'No email body content';
 
                     console.log(`\n📧 Processing email from: ${from}`);
                     console.log(`📝 Subject: ${subject}`);
-                    console.log(`📄 Body length: ${emailBody.length} chars`);
+                    console.log(`📄 Body length: ${finalEmailBody.length} chars`);
+                    console.log(`📎 Attachments: ${attachments.length}`);
+
+                    // ========================================
+                    // EXTRACT PDF CONTENT USING PDF.js
+                    // ========================================
+                    let pdfContent = '';
+                    const pdfAttachments = attachments.filter(a =>
+                        a.mimeType === 'application/pdf' && a.size < 10485760 // Max 10MB
+                    );
+
+                    if (pdfAttachments.length > 0) {
+                        console.log(`\n📄 Found ${pdfAttachments.length} PDF attachment(s), extracting text...`);
+
+                        const pdfBuffers = [];
+
+                        for (const pdfAttachment of pdfAttachments) {
+                            try {
+                                console.log(`📥 Downloading PDF: ${pdfAttachment.filename}`);
+
+                                // Download attachment
+                                const attachmentData = await gmail.users.messages.attachments.get({
+                                    userId: 'me',
+                                    messageId: message.id,
+                                    id: pdfAttachment.attachmentId,
+                                });
+
+                                // Decode base64 to buffer
+                                const pdfBuffer = Buffer.from(attachmentData.data.data, 'base64');
+
+                                pdfBuffers.push({
+                                    buffer: pdfBuffer,
+                                    filename: pdfAttachment.filename
+                                });
+
+                                console.log(`✅ Downloaded ${pdfAttachment.filename} (${(pdfBuffer.length / 1024).toFixed(2)} KB)`);
+                            } catch (downloadError) {
+                                console.error(`❌ Failed to download PDF ${pdfAttachment.filename}:`, downloadError.message);
+                            }
+                        }
+
+                        // Extract text from all PDFs
+                        if (pdfBuffers.length > 0) {
+                            try {
+                                const { extractTextFromMultiplePDFs } = require('../utils/pdfExtractor');
+                                pdfContent = await extractTextFromMultiplePDFs(pdfBuffers);
+                                console.log(`✅ Successfully extracted ${pdfContent.length} characters from ${pdfBuffers.length} PDF(s)`);
+                            } catch (extractError) {
+                                console.error(`❌ Failed to extract PDF content:`, extractError.message);
+                                pdfContent = `\n\n=== PDF EXTRACTION FAILED ===\nError: ${extractError.message}\n`;
+                            }
+                        }
+                    }
 
                     // Extract RFQ number
                     const rfqMatch = subject.match(/RFQ[- ]?(\d{6,8})/i);
                     if (!rfqMatch) {
                         console.log(`⚠️ No valid RFQ number in subject`);
+                        await gmail.users.messages.modify({
+                            userId: 'me',
+                            id: message.id,
+                            requestBody: { removeLabelIds: ['UNREAD'] },
+                        });
                         continue;
                     }
 
@@ -144,6 +217,11 @@ class RFQEmailMonitor {
 
                     if (!rfq) {
                         console.log(`⚠️ RFQ not found: ${rfqNumber}`);
+                        await gmail.users.messages.modify({
+                            userId: 'me',
+                            id: message.id,
+                            requestBody: { removeLabelIds: ['UNREAD'] },
+                        });
                         continue;
                     }
 
@@ -157,6 +235,11 @@ class RFQEmailMonitor {
 
                     if (!vendor) {
                         console.log(`⚠️ Vendor not found: ${vendorEmail}`);
+                        await gmail.users.messages.modify({
+                            userId: 'me',
+                            id: message.id,
+                            requestBody: { removeLabelIds: ['UNREAD'] },
+                        });
                         continue;
                     }
 
@@ -165,10 +248,13 @@ class RFQEmailMonitor {
                     // ========================================
                     // STEP 1: ALWAYS STORE RAW EMAIL FIRST
                     // ========================================
+                    console.log('\n📝 STEP 1: Storing raw email content...');
+
                     vendor.rawEmailContent = {
                         subject: subject,
-                        body: emailBody,
-                        htmlBody: htmlBody,
+                        body: finalEmailBody,
+                        htmlBody: htmlBody.trim(),
+                        pdfContent: pdfContent,  // FIXED: Include PDF content
                         receivedDate: new Date(date),
                         attachments: attachments.map(a => a.filename)
                     };
@@ -176,9 +262,21 @@ class RFQEmailMonitor {
                     vendor.responseDate = new Date();
                     vendor.emailMessageId = message.id;
 
-                    // Save immediately so raw email is preserved
+                    rfq.markModified('vendorsContacted');
                     await rfq.save();
+
                     console.log(`✅ Raw email saved for ${vendor.vendorName}`);
+                    console.log(`   - Email body: ${finalEmailBody.length} chars`);
+                    console.log(`   - PDF content: ${pdfContent.length} chars`);
+
+                    // Verify save
+                    const verifyRfq = await RFQ.findById(rfq._id);
+                    const verifyVendor = verifyRfq.vendorsContacted.find(v => v.email === vendor.email);
+
+                    console.log('\n🔍 Verification after save:');
+                    console.log(`   - Has rawEmailContent: ${!!verifyVendor.rawEmailContent}`);
+                    console.log(`   - Body length: ${verifyVendor.rawEmailContent?.body?.length || 0} chars`);
+                    console.log(`   - PDF length: ${verifyVendor.rawEmailContent?.pdfContent?.length || 0} chars`);
 
                     // ========================================
                     // STEP 2: TRY AI PARSING (non-critical)
@@ -186,14 +284,24 @@ class RFQEmailMonitor {
                     try {
                         const aiService = require('./aiService');
 
-                        console.log(`🤖 Attempting AI parsing...`);
+                        console.log(`\n🤖 STEP 2: Attempting AI parsing...`);
+
+                        // FIXED: COMBINE email body + PDF content for AI analysis
+                        const fullContent = [finalEmailBody, pdfContent]
+                            .filter(Boolean)
+                            .join('\n\n=== PDF ATTACHMENT CONTENT ===\n\n');
+
+                        console.log(`📊 Sending to AI: ${fullContent.length} total characters`);
+                        console.log(`   - Email: ${finalEmailBody.length} chars`);
+                        console.log(`   - PDF: ${pdfContent.length} chars`);
 
                         const parsedData = await aiService.parseRFQResponseWithAI({
                             rfqNumber: rfq.rfqNumber,
                             vendorName: vendor.vendorName,
                             vendorEmail: vendor.email,
                             emailSubject: subject,
-                            emailBody: emailBody || htmlBody,
+                            emailBody: fullContent, // FIXED: Send combined content
+                            pdfContent: pdfContent, // Also send PDF separately for context
                             date: date,
                         });
 
@@ -220,36 +328,39 @@ class RFQEmailMonitor {
                                 vendor.deliveryDate = new Date(parsedData.deliveryDate);
                             }
 
+                            rfq.markModified('vendorsContacted');
                             await rfq.save();
                             console.log(`✅ AI parsing successful: ${parsedData.currency} ${parsedData.totalQuotedAmount}`);
                         } else {
-                            // AI couldn't extract pricing
                             vendor.quotationData = {
                                 isValidQuotation: false,
-                                additionalNotes: `Response received. Please review manually. Preview: "${emailBody.substring(0, 200)}..."`,
+                                additionalNotes: `Response received. ${pdfContent ? `PDF content extracted (${(pdfContent.length / 1024).toFixed(2)} KB) but no pricing found.` : 'No PDF attachments.'} Please review manually.`,
                                 parsingStatus: 'failed'
                             };
                             vendor.notes = 'Response received - manual review required';
 
+                            rfq.markModified('vendorsContacted');
                             await rfq.save();
                             console.log(`⚠️ AI parsing incomplete - manual review needed`);
                         }
                     } catch (aiError) {
                         console.error(`❌ AI parsing error:`, aiError.message);
 
-                        // Even if AI fails completely, we still have the raw email
                         vendor.quotationData = {
                             isValidQuotation: false,
-                            additionalNotes: `AI parsing error: ${aiError.message}. Full email content available in rawEmailContent.`,
+                            additionalNotes: `AI parsing error: ${aiError.message}. Full email content (including ${pdfContent.length} chars of PDF text) available in rawEmailContent.`,
                             parsingStatus: 'failed'
                         };
                         vendor.notes = 'Response received - AI failed - manual review required';
 
+                        rfq.markModified('vendorsContacted');
                         await rfq.save();
                     }
 
                     console.log(`\n📊 FINAL STATUS for ${vendor.vendorName}:`);
                     console.log(`   - Raw email stored: ${vendor.rawEmailContent ? 'YES' : 'NO'}`);
+                    console.log(`   - Email body: ${vendor.rawEmailContent?.body?.length || 0} chars`);
+                    console.log(`   - PDF content: ${vendor.rawEmailContent?.pdfContent?.length || 0} chars`);
                     console.log(`   - Parsing status: ${vendor.quotationData?.parsingStatus || 'N/A'}`);
                     console.log(`   - Has quotation: ${vendor.quotationData?.isValidQuotation || false}`);
 
@@ -264,12 +375,14 @@ class RFQEmailMonitor {
 
                 } catch (error) {
                     console.error(`❌ Error processing message ${message.id}:`, error);
+                    console.error(error.stack);
                 }
             }
 
             console.log('\n✅ Finished processing RFQ responses\n');
         } catch (error) {
             console.error('❌ Error in processRFQResponses:', error);
+            console.error(error.stack);
         }
     }
 

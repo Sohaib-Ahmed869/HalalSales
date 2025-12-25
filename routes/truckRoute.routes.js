@@ -16,6 +16,8 @@ const {
     debugRoutes,
     optimizeRoute,
     generateTruckRoute,
+    autoFillAllTrucks,
+    getSingleRoute
 } = require('../controllers/truckRoute.controller');
 
 router.get("/debug", debugRoutes);
@@ -39,6 +41,8 @@ router.put('/:routeId/reorder', reorderOrders);
 router.patch('/:routeId/status', updateRouteStatus);
 router.post('/:routeId/optimize', optimizeRoute);
 router.post('/:routeId/generate', generateTruckRoute);
-
+// Auto-fill all trucks for a date
+router.post("/auto-fill-all/:date", autoFillAllTrucks);
+router.get("/single/:routeId", getSingleRoute);
 
 module.exports = router;
