@@ -612,10 +612,10 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, customer,
             const lineTotal = netQty * (line.Price || line.UnitPrice || 0);
             const vatAmount = lineTotal * (line.VatGroup === "C3" ? 0.055 : line.VatGroup === "C4" ? 0.20 : 0);
 
-            doc.font("Helvetica").fontSize(7.5).fillColor("#000000");  // FIXED: Slightly smaller font for compactness
+            doc.font("Helvetica").fontSize(7.5).fillColor("#000000");
             doc.text(line.ItemCode || "", col1, currentY, { continued: false });
-            doc.text((line.ItemDescription || "").substring(0, 45), col2, currentY, { continued: false });  // FIXED: More chars
-            doc.text(netQty.toString(), col3 + 15, currentY, { continued: false });  // FIXED: Adjusted spacing
+            doc.text((line.ItemDescription || "").substring(0, 45), col2, currentY, { continued: false });
+            doc.text(netQty.toString(), col3 + 15, currentY, { continued: false });
             doc.text(formatCurrency(line.Price || line.UnitPrice || 0, deliveryNote.DocCurrency), col4 + 15, currentY, { continued: false });
             doc.text(formatCurrency(lineTotal, deliveryNote.DocCurrency), col5 + 10, currentY, { continued: false });
             doc.text(formatCurrency(vatAmount, deliveryNote.DocCurrency), col6 + 5, currentY, { continued: false });
