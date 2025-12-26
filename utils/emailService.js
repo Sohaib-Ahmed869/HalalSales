@@ -5,17 +5,47 @@ const { logEmail } = require("./emailLogger");
 const fs = require("fs");
 const path = require("path");
 
-// Create reusable transporter with configuration from environment variables
+// Validate configuration
+if (!config.email.user || !config.email.password) {
+  console.error('❌ EMAIL CONFIGURATION ERROR: Missing EMAIL_USER or EMAIL_PASSWORD');
+  throw new Error('Email configuration is incomplete. Please check your .env file.');
+}
+
+// Create reusable transporter with connection pooling
 const transporter = nodemailer.createTransport({
   host: config.email.host,
   port: config.email.port,
-  secure: config.email.secure, // true for 465, false for other ports
+  secure: config.email.secure,
   auth: {
     user: config.email.user,
     pass: config.email.password,
   },
-  debug: true, // Enable debugging
-  logger: true, // Log to console
+  // Connection pooling
+  pool: true,
+  maxConnections: 5,      // Allow up to 5 concurrent connections
+  maxMessages: 100,       // Max messages per connection
+  rateDelta: 1000,        // 1 second between messages
+  rateLimit: 3,           // 3 emails per second max
+
+  // Timeouts
+  connectionTimeout: 10000,
+  greetingTimeout: 5000,
+  socketTimeout: 15000,
+
+  // Debugging (only in development)
+  debug: process.env.NODE_ENV === 'development',
+  logger: process.env.NODE_ENV === 'development',
+});
+
+// Verify transporter on startup
+transporter.verify(function (error, success) {
+  if (error) {
+    console.error('❌ SMTP connection verification failed:', error.message);
+  } else {
+    console.log('✅ SMTP server is ready to send emails');
+    console.log(`   Host: ${config.email.host}:${config.email.port}`);
+    console.log(`   User: ${config.email.user}`);
+  }
 });
 
 /**
@@ -45,7 +75,6 @@ async function sendEmail({
   text,
   html,
   attachments,
-  // Email logging parameters (optional - for backward compatibility)
   emailType = "general",
   relatedInvoice = null,
   relatedCustomer = null,
@@ -54,51 +83,40 @@ async function sendEmail({
   sentByName = null,
   metadata = {}
 }) {
-  try {
-    console.log("Preparing to send email...");
+  const maxRetries = 3;
+  let lastError = null;
+  let info = null;
 
-    // Check attachment size and validity
+  try {
+    console.log(`📧 Sending email to: ${to}`);
+
+    // Validate attachments
     if (attachments && Array.isArray(attachments)) {
       for (let i = 0; i < attachments.length; i++) {
         const attachment = attachments[i];
 
         if (attachment.content && Buffer.isBuffer(attachment.content)) {
-          console.log(
-            `Attachment ${i + 1} size: ${attachment.content.length} bytes`
-          );
+          console.log(`   Attachment ${i + 1}: ${attachment.filename} (${attachment.content.length} bytes)`);
 
           // Validate PDF
           if (attachment.contentType === "application/pdf") {
             if (attachment.content.length < 1000) {
-              console.warn(
-                `Warning: PDF attachment ${i + 1} is very small (${attachment.content.length} bytes)`
-              );
+              console.warn(`⚠ Warning: PDF attachment ${i + 1} is very small (${attachment.content.length} bytes)`);
             }
 
-            // Check for PDF header
             const header = attachment.content.slice(0, 4).toString();
             if (header !== "%PDF") {
-              console.warn(
-                `Warning: PDF attachment ${i + 1} doesn't start with %PDF header!`
-              );
-
-              // Save invalid attachment for inspection
-              const debugPath = path.join(
-                __dirname,
-                `../invalid-attachment-${Date.now()}.bin`
-              );
+              console.warn(`⚠ Warning: PDF attachment ${i + 1} doesn't have valid PDF header`);
+              const debugPath = path.join(__dirname, `../invalid-attachment-${Date.now()}.bin`);
               fs.writeFileSync(debugPath, attachment.content);
-              console.log(`Saved invalid attachment to ${debugPath}`);
+              console.log(`   Saved invalid attachment to ${debugPath}`);
             }
           }
-        } else {
-          console.warn(
-            `Warning: Attachment ${i + 1} doesn't have a valid buffer content`
-          );
         }
       }
     }
 
+    // Prepare mail options
     const mailOptions = {
       from: `"${config.email.senderName}" <${config.email.user}>`,
       to,
@@ -106,43 +124,49 @@ async function sendEmail({
       text,
     };
 
-    // Add optional fields if provided
     if (cc) mailOptions.cc = cc;
     if (bcc) mailOptions.bcc = bcc;
     if (html) mailOptions.html = html;
 
-    // Process attachments
     if (attachments && Array.isArray(attachments)) {
-      // Properly format attachments for nodemailer
-      mailOptions.attachments = attachments.map((attachment) => {
-        // Ensure proper content-type is set
-        return {
-          filename: attachment.filename || "document.pdf",
-          content: attachment.content,
-          contentType: attachment.contentType || "application/pdf",
-          encoding: "binary",
-        };
-      });
+      mailOptions.attachments = attachments.map((attachment) => ({
+        filename: attachment.filename || "document.pdf",
+        content: attachment.content,
+        contentType: attachment.contentType || "application/pdf",
+        encoding: "binary",
+      }));
     }
 
-    console.log("Sending email with options:", {
-      to: mailOptions.to,
-      cc: mailOptions.cc,
-      bcc: mailOptions.bcc,
-      subject: mailOptions.subject,
-      hasAttachments: !!mailOptions.attachments,
-      attachmentsCount: mailOptions.attachments
-        ? mailOptions.attachments.length
-        : 0,
-      emailType: emailType,
-    });
+    // Retry logic - use the SHARED transporter
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`   [Attempt ${attempt}/${maxRetries}] Sending...`);
 
-    // Send mail with defined transport object
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`✓ Email sent: ${info.messageId}`);
+        // Use the shared transporter (with connection pooling)
+        info = await transporter.sendMail(mailOptions);
+
+        console.log(`   ✅ Sent successfully: ${info.messageId}`);
+        lastError = null;
+        break; // Success - exit retry loop
+
+      } catch (sendError) {
+        lastError = sendError;
+        console.error(`   ❌ Attempt ${attempt}/${maxRetries} failed: ${sendError.message}`);
+
+        if (attempt < maxRetries) {
+          const waitTime = attempt * 2000; // 2s, 4s, 6s
+          console.log(`   ⏳ Waiting ${waitTime}ms before retry...`);
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
+      }
+    }
+
+    // If all retries failed, throw
+    if (lastError) {
+      throw lastError;
+    }
 
     // Log email to database and S3 (async, non-blocking)
-    // This won't break existing functionality if it fails
     logEmail({
       to: Array.isArray(to) ? to : [to],
       cc: cc ? (Array.isArray(cc) ? cc : [cc]) : [],
@@ -161,13 +185,13 @@ async function sendEmail({
       sentByName,
       metadata,
     }).catch((logError) => {
-      // Log error but don't throw - email was sent successfully
       console.error("⚠ Error logging email (non-blocking):", logError.message);
     });
 
     return info;
+
   } catch (error) {
-    console.error("✗ Error sending email:", error);
+    console.error(`❌ Failed to send email to ${to}:`, error.message);
 
     // Log failed email attempt (async, non-blocking)
     logEmail({
@@ -191,7 +215,7 @@ async function sendEmail({
       console.error("⚠ Error logging failed email (non-blocking):", logError.message);
     });
 
-    throw new Error(`Failed to send email: ${error.message}`);
+    throw new Error(`Failed to send email after ${maxRetries} attempts: ${error.message}`);
   }
 }
 

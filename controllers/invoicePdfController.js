@@ -473,7 +473,7 @@ const generateInvoicePage = async (doc, invoice, logoBuffer, isFirstInvoice = fa
 // Bulk email invoices grouped by customer
 exports.bulkEmailInvoicesByCustomer = async (req, res) => {
     try {
-        const { invoiceIds } = req.body;
+        const { invoiceIds, emailOverrides = {} } = req.body;
 
         if (!invoiceIds || !Array.isArray(invoiceIds) || invoiceIds.length === 0) {
             return res.status(400).json({
@@ -500,8 +500,7 @@ exports.bulkEmailInvoicesByCustomer = async (req, res) => {
         const Customer = require("../models/Customer");
         const cardCodes = [...new Set(invoices.map(inv => inv.CardCode))];
         const customers = await Customer.find({
-            CardCode: { $in: cardCodes },
-            Email: { $exists: true, $ne: "" }
+            CardCode: { $in: cardCodes }
         }).lean();
 
         const customerEmailMap = {};
@@ -514,11 +513,17 @@ exports.bulkEmailInvoicesByCustomer = async (req, res) => {
         invoices.forEach(invoice => {
             const cardCode = invoice.CardCode;
             if (!invoicesByCustomer[cardCode]) {
+                // CRITICAL FIX: Use emailOverrides first, then fall back to customer email
+                const overrideEmail = emailOverrides[cardCode];
+                const customerEmail = customerEmailMap[cardCode];
+
                 invoicesByCustomer[cardCode] = {
                     customerName: invoice.CardName,
-                    email: customerEmailMap[cardCode],
+                    email: overrideEmail || customerEmail, // Priority: override > customer email
                     invoices: []
                 };
+
+                console.log(`📧 Customer ${cardCode}: Override=${overrideEmail}, Customer=${customerEmail}, Using=${overrideEmail || customerEmail}`);
             }
             invoicesByCustomer[cardCode].invoices.push(invoice);
         });
@@ -538,12 +543,24 @@ exports.bulkEmailInvoicesByCustomer = async (req, res) => {
         // Process each customer
         for (const [cardCode, data] of Object.entries(invoicesByCustomer)) {
             try {
-                if (!data.email) {
+                if (!data.email || !data.email.trim()) {
                     results.skipped.push({
                         cardCode,
                         customerName: data.customerName,
                         invoiceCount: data.invoices.length,
-                        reason: "No email address found"
+                        reason: "No email address provided"
+                    });
+                    continue;
+                }
+
+                // Validate email format
+                const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+                if (!emailRegex.test(data.email)) {
+                    results.skipped.push({
+                        cardCode,
+                        customerName: data.customerName,
+                        invoiceCount: data.invoices.length,
+                        reason: "Invalid email format"
                     });
                     continue;
                 }
