@@ -1951,10 +1951,11 @@ exports.autoFillAllTrucks = async (req, res) => {
                 console.log(`      Current capacity: ${modifiedTruck.totalWeight.toFixed(1)}/${maxWeight}kg`);
 
                 // NEAREST NEIGHBOR LOOP
+                // NEAREST NEIGHBOR LOOP - Enhanced with opening time consideration
                 while (remainingOrders.length > 0) {
                     // Find nearest order to current position that fits in truck
                     let nearestOrder = null;
-                    let nearestDistance = Infinity;
+                    let nearestScore = Infinity;
                     let nearestIndex = -1;
 
                     for (let i = 0; i < remainingOrders.length; i++) {
@@ -1969,8 +1970,21 @@ exports.autoFillAllTrucks = async (req, res) => {
                         // Calculate distance from current position
                         const distance = calculateDistance(currentPosition, order.coordinates);
 
-                        if (distance < nearestDistance) {
-                            nearestDistance = distance;
+                        // Calculate opening time penalty
+                        // Orders that open soon get lower penalty (preferred)
+                        let timePenalty = 0;
+                        if (order.openingMinutes) {
+                            // Normalize opening time to 0-1 range (9am = 540min, 5pm = 1020min)
+                            const normalizedTime = (order.openingMinutes - 540) / 480;
+                            timePenalty = normalizedTime * 5; // Max 5km penalty for late opening
+                        }
+
+                        // Combined score: 70% distance, 30% time
+                        // This keeps stops geographically tight while respecting opening times
+                        const score = (distance * 0.7) + (timePenalty * 0.3);
+
+                        if (score < nearestScore) {
+                            nearestScore = score;
                             nearestOrder = order;
                             nearestIndex = i;
                         }
@@ -1994,8 +2008,7 @@ exports.autoFillAllTrucks = async (req, res) => {
                     modifiedTruck.ordersAdded++;
                     assignmentResults.ordersAssigned++;
 
-                    console.log(`      ✅ Added order #${nearestOrder.DocNum} (${nearestOrder.totalWeight.toFixed(1)}kg, ${nearestDistance.toFixed(1)}km away)`);
-                    console.log(`         Opens: ${nearestOrder.openingTime || 'N/A'}`);
+                    console.log(`      ✅ Added order #${nearestOrder.DocNum} (${nearestOrder.totalWeight.toFixed(1)}kg, ${calculateDistance(currentPosition, nearestOrder.coordinates).toFixed(1)}km away, opens: ${nearestOrder.openingTime || 'N/A'})`);
 
                     // Update current position to this order's location
                     currentPosition = nearestOrder.coordinates;

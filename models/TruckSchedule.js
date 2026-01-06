@@ -29,7 +29,7 @@ const truckScheduleSchema = new mongoose.Schema({
         // Optional: Add truck type/model
         truckType: {
             type: String,
-            enum: ["small", "medium", "large", "custom"],
+            enum: ["small", "medium", "large", "xlarge", "custom"],
             default: "medium",
         },
     }],

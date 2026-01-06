@@ -242,6 +242,41 @@ exports.syncPendingC7000Customers = async (req, res) => {
   }
 };
 
+exports.getAllCustomerEmails = async (req, res) => {
+  try {
+    console.log("Fetching all customer emails...");
+    const { cardCodes } = req.body;
+    const query = {};
+    if (cardCodes && Array.isArray(cardCodes) && cardCodes.length > 0) {
+      query.CardCode = { $in: cardCodes };
+    }
+    const customers = await Customer.find
+      (query)
+      .select('CardCode Email CardName')
+      .lean();
+    const emails = customers
+      .filter(c => c.Email)
+      .map(c => ({
+        CardCode: c.CardCode,
+        CardName: c.CardName,
+        Email: c.Email
+      }));
+    console.log(`Found ${emails.length} customers with emails`);
+    res.json({
+      success: true,
+      data: emails
+    });
+  } catch (error) {
+    console.error("Error fetching customer emails:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching customer emails",
+      error: error.message
+    });
+  }
+};
+
+
 // Alternative HTTP method (if you prefer to use axios instead of Lambda SDK)
 exports.getPersonalizedRecommendationsHTTP = async (req, res) => {
   try {

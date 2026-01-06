@@ -336,11 +336,16 @@ exports.allocatePaymentToInvoice = async (req, res) => {
                 paymentMethod.TransferAccount = process.env.SAP_BANK_ACCOUNT || '_SYS00000000001';
             }
 
+            const invoiceDate = new Date(invoice.DocDate);
+            const paymentDate = new Date(payment.paymentDate);
+            const reconciliationDate = invoiceDate > paymentDate ? invoiceDate : paymentDate;
+
+
             const sapPaymentData = {
                 CardCode: invoice.CardCode,
-                DocDate: new Date().toISOString().split('T')[0], // ✅ Always use today's date
-                TaxDate: new Date().toISOString().split('T')[0],
-                Remarks: notes || `Payment from ${payment.source} (${new Date(payment.paymentDate).toLocaleDateString('fr-FR')}) - Ref: ${payment.reference || 'N/A'}`, // ✅ Keep original date in remarks
+                DocDate: reconciliationDate.toISOString().split('T')[0], // ✅ USE reconciliationDate
+                TaxDate: reconciliationDate.toISOString().split('T')[0], // ✅ USE reconciliationDate
+                Remarks: notes || `Payment from ${payment.source} - Ref: ${payment.reference || 'N/A'} (Payment date: ${paymentDate.toISOString().split('T')[0]})`,
                 ...paymentMethod,
                 PaymentInvoices: [{
                     DocEntry: invoice.DocEntry,
@@ -570,6 +575,7 @@ exports.allocateOutstandingBalanceToInvoice = async (req, res) => {
         }
 
         if (availableBalance < amountToAllocate) {
+            console.log(`Insufficient prepaid balance. Available: €${availableBalance.toFixed(2)}, Requested: €${amountToAllocate.toFixed(2)}`)
             return res.status(400).json({
                 success: false,
                 message: `Insufficient prepaid balance. Available: €${availableBalance.toFixed(2)}, Requested: €${amountToAllocate.toFixed(2)}`,
@@ -860,7 +866,8 @@ exports.retrySAPSync = async (req, res) => {
 };
 
 /**
- * Allocate credit note to invoice
+ * ✅ CORRECTED FINAL VERSION: Allocate credit note to invoice
+ * Uses customer's on-account balance (credit note creates credit balance)
  */
 exports.allocateCreditNoteToInvoice = async (req, res) => {
     try {
@@ -875,7 +882,7 @@ exports.allocateCreditNoteToInvoice = async (req, res) => {
 
         console.log(`Allocating ${amountToAllocate} from credit note ${creditNoteDocNum} to invoice ${invoiceDocNum}`);
 
-        // Find credit note (using existing CreditNotes model)
+        // Find credit note
         const CreditNotes = require("../../models/CreditNotes");
         const creditNote = await CreditNotes.findOne({ DocNum: creditNoteDocNum });
 
@@ -938,14 +945,112 @@ exports.allocateCreditNoteToInvoice = async (req, res) => {
         const totalAllocated = (invoice.allocatedPayments || []).reduce((sum, alloc) => sum + alloc.amountAllocated, 0);
         const invoiceRemaining = invoice.DocTotal - totalPaid - totalAllocated;
 
-        if (amountToAllocate > invoiceRemaining + 1) { // Allow 1 euro tolerance
+        if (amountToAllocate > invoiceRemaining + 1) {
             return res.status(400).json({
                 success: false,
                 message: `Cannot allocate more than invoice balance. Invoice needs: €${invoiceRemaining.toFixed(2)}, Requested: €${amountToAllocate.toFixed(2)}`,
             });
         }
 
-        // Add allocation to invoice
+        // ✅ Calculate newRemainingAmount early
+        const newRemainingAmount = creditNoteRemaining - amountToAllocate;
+
+        // ✅ CORRECTED APPROACH: Create payment using on-account balance
+        let sapPaymentDocEntry = null;
+        let sapError = null;
+        let creditNoteUpdateSuccess = false;
+
+        try {
+            const invoiceDate = new Date(invoice.DocDate);
+            const creditNoteDate = new Date(creditNote.DocDate);
+            const reconciliationDate = invoiceDate > creditNoteDate ? invoiceDate : creditNoteDate;
+
+            // ✅ ONLY include the invoice, use CashAccount as "on account" payment
+            const sapPaymentData = {
+                CardCode: invoice.CardCode,
+                DocDate: reconciliationDate.toISOString().split('T')[0],
+                TaxDate: reconciliationDate.toISOString().split('T')[0],
+                Remarks: notes || `Applied Credit Note ${creditNoteDocNum} (DocEntry: ${creditNote.DocEntry}) to Invoice ${invoiceDocNum}`,
+                // ✅ Use CashSum with on-account clearing - represents using customer's credit balance
+                CashSum: amountToAllocate,
+                CashAccount: process.env.SAP_ON_ACCOUNT_CLEARING || '_SYS00000000099', // On Account clearing
+                // ✅ ONLY include the invoice being paid
+                PaymentInvoices: [
+                    {
+                        DocEntry: invoice.DocEntry,
+                        InvoiceType: 'it_Invoice',
+                        SumApplied: amountToAllocate,
+                    }
+                ],
+            };
+
+            console.log('Creating SAP payment using credit note balance:', JSON.stringify(sapPaymentData, null, 2));
+
+            const sapResponse = await sapPaymentService.createIncomingPayment(sapPaymentData);
+            sapPaymentDocEntry = sapResponse.DocEntry;
+
+            console.log(`✅ SAP Payment created: DocEntry ${sapPaymentDocEntry}`);
+
+            // ✅ NOW manually link the credit note by updating it in SAP
+            // This closes the credit note by marking it as applied
+            try {
+                console.log(`Attempting to update SAP Credit Note ${creditNote.DocEntry}...`);
+                console.log(`New remaining amount: ${newRemainingAmount}`);
+                console.log(`Should close? ${newRemainingAmount <= 0.01}`);
+
+                const updatePayload = {
+                    U_AppliedToInvoice: invoiceDocNum.toString(),
+                    U_AppliedAmount: amountToAllocate,
+                    U_PaymentDocEntry: sapPaymentDocEntry,
+                };
+
+                // Only update DocumentStatus if fully consumed
+                if (newRemainingAmount <= 0.01) {
+                    updatePayload.DocumentStatus = 'bost_Close';
+                }
+
+                console.log('Credit Note Update Payload:', JSON.stringify(updatePayload, null, 2));
+
+                await sapPaymentService.patch(`/CreditNotes(${creditNote.DocEntry})`, updatePayload);
+
+                creditNoteUpdateSuccess = true;
+                console.log(`✅ Updated credit note ${creditNoteDocNum} in SAP`);
+
+            } catch (cnError) {
+                console.error('❌ Failed to update credit note in SAP:', cnError);
+                console.error('Error details:', cnError.response?.data || cnError.message);
+
+                // Store the error but don't fail the whole operation
+                sapError = cnError.message;
+            }
+
+        } catch (error) {
+            console.error('❌ SAP Payment Creation Error:', error);
+            sapError = error.message;
+        }
+
+        // ✅ ONLY UPDATE LOCAL DB IF SAP SYNC WAS SUCCESSFUL
+        if (!sapPaymentDocEntry) {
+            return res.status(500).json({
+                success: false,
+                message: "Failed to apply credit note in SAP. Local database not updated to prevent inconsistencies.",
+                error: sapError,
+                data: {
+                    invoice: {
+                        DocNum: invoice.DocNum,
+                        DocEntry: invoice.DocEntry,
+                        remainingBalance: invoiceRemaining,
+                    },
+                    creditNote: {
+                        DocNum: creditNote.DocNum,
+                        DocEntry: creditNote.DocEntry,
+                        remainingAmount: creditNoteRemaining,
+                    },
+                },
+            });
+        }
+
+        // ✅ Update Invoice in local DB
         if (!invoice.allocatedPayments) {
             invoice.allocatedPayments = [];
         }
@@ -959,6 +1064,9 @@ exports.allocateCreditNoteToInvoice = async (req, res) => {
             allocatedBy: req.user?._id,
             source: 'credit_note',
             notes: notes || `Credit note #${creditNoteDocNum} applied`,
+            sapPaymentDocEntry: sapPaymentDocEntry,
+            sapSyncStatus: 'synced',
+            sapSyncError: null,
         });
 
         // Update payment tracking
@@ -984,6 +1092,9 @@ exports.allocateCreditNoteToInvoice = async (req, res) => {
         invoice.paymentTracking.totalCreditAmount += amountToAllocate;
         invoice.paymentTracking.remainingBalance -= amountToAllocate;
 
+        // ✅ Update PaidToDate to reflect SAP state
+        invoice.PaidToDate = (invoice.PaidToDate || 0) + amountToAllocate;
+
         // Update payment status
         if (invoice.paymentTracking.remainingBalance <= 0.01) {
             invoice.paymentStatus = "Fully Paid";
@@ -994,7 +1105,7 @@ exports.allocateCreditNoteToInvoice = async (req, res) => {
 
         await invoice.save();
 
-        // Update credit note with allocation
+        // ✅ Update Credit Note in local DB
         if (!creditNote.allocatedToInvoices) {
             creditNote.allocatedToInvoices = [];
         }
@@ -1004,33 +1115,66 @@ exports.allocateCreditNoteToInvoice = async (req, res) => {
             invoiceDocEntry: invoice.DocEntry,
             amountAllocated: amountToAllocate,
             allocationDate: new Date(),
+            sapPaymentDocEntry: sapPaymentDocEntry,
         });
 
-        creditNote.remainingAmount = creditNoteRemaining - amountToAllocate;
+        // ✅ Update remaining amount
+        creditNote.remainingAmount = newRemainingAmount;
 
-        if (creditNote.remainingAmount <= 0.01) {
+        // ✅ Mark as fully allocated if consumed
+        if (newRemainingAmount <= 0.01) {
             creditNote.fullyAllocated = true;
+            creditNote.DocumentStatus = "bost_Close";
         }
+
+        // ✅ Store SAP sync status for credit note
+        creditNote.sapSyncStatus = {
+            paymentSynced: true,
+            creditNoteUpdateSynced: creditNoteUpdateSuccess,
+            lastSyncAttempt: new Date(),
+            syncError: creditNoteUpdateSuccess ? null : sapError,
+        };
 
         await creditNote.save();
 
-        console.log(`✅ Allocated ${amountToAllocate} from credit note ${creditNoteDocNum} to invoice ${invoiceDocNum}`);
+        // ✅ Update customer totals
+        //await updateCustomerInvoiceTotals(invoice.CardCode);
+
+        console.log(`✅ Successfully allocated ${amountToAllocate} from credit note ${creditNoteDocNum} to invoice ${invoiceDocNum}`);
+        console.log(`   Invoice remaining: ${invoice.paymentTracking.remainingBalance}`);
+        console.log(`   Credit note remaining: ${creditNote.remainingAmount}`);
+        console.log(`   SAP credit note update: ${creditNoteUpdateSuccess ? 'SUCCESS' : 'FAILED'}`);
 
         return res.status(200).json({
             success: true,
-            message: "Credit note allocated successfully",
+            message: creditNoteUpdateSuccess
+                ? "Credit note allocated and synced to SAP successfully"
+                : "Credit note allocated, but SAP credit note update failed (payment was created)",
             data: {
                 invoice: {
                     DocNum: invoice.DocNum,
+                    DocEntry: invoice.DocEntry,
                     paymentStatus: invoice.paymentStatus,
+                    DocumentStatus: invoice.DocumentStatus,
+                    PaidToDate: invoice.PaidToDate,
                     remainingBalance: invoice.paymentTracking.remainingBalance,
                     paymentBreakdown: invoice.paymentBreakdown
                 },
                 creditNote: {
                     DocNum: creditNote.DocNum,
-                    remainingAmount: creditNote.remainingAmount,
-                    fullyAllocated: creditNote.fullyAllocated
-                }
+                    DocEntry: creditNote.DocEntry,
+                    totalAmount: creditNote.DocTotal,
+                    usedAmount: creditNote.DocTotal - newRemainingAmount,
+                    remainingAmount: newRemainingAmount,
+                    fullyAllocated: creditNote.fullyAllocated,
+                    DocumentStatus: creditNote.DocumentStatus
+                },
+                sapSync: {
+                    paymentSynced: true,
+                    sapPaymentDocEntry: sapPaymentDocEntry,
+                    creditNoteUpdateSynced: creditNoteUpdateSuccess,
+                    creditNoteUpdateError: creditNoteUpdateSuccess ? null : sapError,
+                },
             },
         });
 
@@ -1043,7 +1187,6 @@ exports.allocateCreditNoteToInvoice = async (req, res) => {
         });
     }
 };
-
 /**
  * Get available credit notes for customer
  */
@@ -1429,7 +1572,7 @@ exports.importSalarySheet = async (req, res) => {
         // Process unpaid deliveries
         parsedData.deliveries.unpaid.forEach(payment => {
             if (payment.amount) {
-               //skipping unpaid deliveries for payment creation
+                //skipping unpaid deliveries for payment creation
             }
         });
 

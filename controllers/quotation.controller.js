@@ -1523,7 +1523,6 @@ exports.convertToOrder = async (req, res) => {
     });
 
     if (!quotation) {
-      console.log('here')
       return res.status(404).json({
         success: false,
         message: `Active quotation with DocEntry ${req.params.docEntry} not found`,
@@ -1571,62 +1570,47 @@ exports.convertToOrder = async (req, res) => {
       paymentId +
       "). ";
 
-    // FIXED: Ensure price list is properly transferred
     const quotationData = quotation.toObject();
 
-    // Process document lines to ensure price list consistency
-    // Process document lines to ensure price list consistency AND VAT
     const processedDocumentLines = quotationData.DocumentLines.map((line) => ({
       ...line,
-      // CRITICAL FIX: Ensure each line has the correct price list
-      PriceList: quotationData.PriceList || "2", // Default to Prix Livraison if not set
-      // Ensure line total is recalculated
+      PriceList: quotationData.PriceList || "2",
       LineTotal: (line.Quantity || 0) * (line.Price || 0),
-      // CRITICAL FIX: Preserve VAT information
       PriceAfterVAT: line.PriceAfterVAT || 0,
       VatGroup: line.VatGroup || "C4",
       LineTotalWithVAT: line.LineTotalWithVAT || 0,
     }));
 
-    // Create the sales order from the quotation data
-    // Create the sales order from the quotation data
+    // ✅ CRITICAL FIX: Use dates from request body if provided
+    const orderDate = req.body.docDate ? new Date(req.body.docDate) : new Date();
+    const dueDate = req.body.docDueDate
+      ? new Date(req.body.docDueDate)
+      : req.body.startDeliveryDate
+        ? new Date(req.body.startDeliveryDate)
+        : quotationData.DocDueDate
+          ? new Date(quotationData.DocDueDate)
+          : new Date();
+
     const newOrder = new SalesOrder({
-      // Copy all fields from quotation except specific fields that need to be fresh
       ...quotationData,
-
-      // Override with request body FIRST (if provided)
       ...req.body,
-
-      // Then set these fields explicitly (they will override req.body)
       DocEntry: newDocEntry,
       DocNum: newDocEntry,
       CreationDate: new Date(),
       UpdateDate: new Date(),
-      DocDate: req.body.DocDate || new Date(),
-      DocDueDate: req.body.DocDueDate || quotationData.DocDueDate || new Date(),
-
-      // ✅ CRITICAL FIX: Properly inherit delivery dates from quotation
-      StartDeliveryDate: req.body.StartDeliveryDate || quotationData.StartDeliveryDate || quotationData.DocDueDate || new Date(),
-      RequriedDate: req.body.StartDeliveryDate || quotationData.StartDeliveryDate || quotationData.RequriedDate || quotationData.DocDueDate || new Date(),
-
+      DocDate: orderDate,
+      DocDueDate: dueDate,
+      StartDeliveryDate: dueDate,
+      RequriedDate: dueDate,
       SyncedWithSAP: false,
       LocalStatus: "Created",
-
-      // CRITICAL FIX: Ensure price list is set at order level
       PriceList: quotationData.PriceList || "2",
-
-      // CRITICAL FIX: Use processed document lines with price list info
       DocumentLines: processedDocumentLines,
-
-      // Ensure we keep the original references
       salesAgent: quotation.salesAgent,
-
-      // Reference to original quotation
       OriginatingQuotation: quotation.DocEntry,
       U_Notes: salesAgentName,
     });
 
-    // Save the new order
     await newOrder.save();
 
     // Mark quotation as inactive (converted)
@@ -1639,7 +1623,6 @@ exports.convertToOrder = async (req, res) => {
     console.log("Pushing converted order to SAP...");
     const sapResult = await pushOrderToSAPInternal(newOrder);
 
-    // Return response
     if (sapResult.success) {
       res.status(201).json({
         success: true,
@@ -1656,7 +1639,6 @@ exports.convertToOrder = async (req, res) => {
         },
       });
     } else {
-      // Customize message based on error code
       let sapErrorMessage = "Failed to sync with SAP";
 
       if (

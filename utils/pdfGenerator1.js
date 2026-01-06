@@ -128,13 +128,13 @@ async function generateRFQPDF(rfq) {
             let detailY = cardY + 38;
             const lineSpacing = 22;
 
-            drawDetailRow(doc, leftCardX + 15, detailY, '📅 Date Issued', formatDate(rfq.dateIssued), colors, false);
+            drawDetailRow(doc, leftCardX + 15, detailY, 'Date Issued', formatDate(rfq.dateIssued), colors, false);
             detailY += lineSpacing;
 
-            drawDetailRow(doc, leftCardX + 15, detailY, '⏰ Quote Due', formatDate(rfq.quotationDueDate), colors, true);
+            drawDetailRow(doc, leftCardX + 15, detailY, 'Quote Due', formatDate(rfq.quotationDueDate), colors, true);
             detailY += lineSpacing;
 
-            drawDetailRow(doc, leftCardX + 15, detailY, '🚚 Delivery By', formatDate(rfq.deliveryBy), colors, false);
+            drawDetailRow(doc, leftCardX + 15, detailY, 'Delivery By', formatDate(rfq.deliveryBy), colors, false);
 
             // Right card - Contact Information
             doc
@@ -325,7 +325,7 @@ async function generateRFQPDF(rfq) {
                         .fontSize(9)
                         .font('Helvetica-Bold')
                         .fillColor(colors.primary)
-                        .text('📦 Packaging: ', reqBoxX + 15, reqY);
+                        .text('Packaging: ', reqBoxX + 15, reqY);
 
                     doc
                         .font('Helvetica')
@@ -340,7 +340,7 @@ async function generateRFQPDF(rfq) {
                     doc
                         .font('Helvetica-Bold')
                         .fillColor(colors.primary)
-                        .text('💳 Payment: ', reqBoxX + 15, reqY);
+                        .text('Payment: ', reqBoxX + 15, reqY);
 
                     doc
                         .font('Helvetica')
@@ -355,7 +355,7 @@ async function generateRFQPDF(rfq) {
                     doc
                         .font('Helvetica-Bold')
                         .fillColor(colors.primary)
-                        .text('📝 Notes: ', reqBoxX + 15, reqY);
+                        .text('Notes: ', reqBoxX + 15, reqY);
 
                     doc
                         .font('Helvetica')

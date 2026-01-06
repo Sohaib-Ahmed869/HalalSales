@@ -19,23 +19,22 @@ function enhanceEmailHTML(bodyHtml, rfqData) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>RFQ - Halal Foods</title>
 </head>
-<body style="margin: 0; padding: 0; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background-color: #f5f5f5;">
-    <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f5f5f5; padding: 20px 0;">
+<body style="margin: 0; padding: 0; font-family: Arial, sans-serif; background-color: #ffffff;">
+    <table width="100%" cellpadding="0" cellspacing="0">
         <tr>
-            <td align="center">
-                <table width="600" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+            <td align="center" style="padding: 20px;">
+                <table width="600" cellpadding="0" cellspacing="0" style="background-color: #ffffff;">
                     
                     <!-- Header -->
                     <tr>
-                        <td style="background: linear-gradient(135deg, #1a4d2e 0%, #2d7a4f 100%); padding: 30px; border-radius: 8px 8px 0 0;">
+                        <td style="padding: 20px 0; border-bottom: 1px solid #cccccc;">
                             <table width="100%" cellpadding="0" cellspacing="0">
                                 <tr>
                                     <td>
-                                        <img src="https://imageshfs.s3.ap-southeast-2.amazonaws.com/image-removebg-preview+(1).png" alt="Halal Foods" style="height: 60px; display: block;" />
+                                        <img src="https://imageshfs.s3.ap-southeast-2.amazonaws.com/image-removebg-preview+(1).png" alt="Halal Foods" style="height: 40px; display: block;" />
                                     </td>
                                     <td align="right">
-                                        <h1 style="color: #ffffff; margin: 0; font-size: 24px; font-weight: 700;">HALAL FOODS</h1>
-                                        <p style="color: #e0e0e0; margin: 5px 0 0 0; font-size: 12px;">Premium Food Wholesaler</p>
+                                        <p style="margin: 0; font-size: 14px; color: #000000;">HALAL FOODS</p>
                                     </td>
                                 </tr>
                             </table>
@@ -44,140 +43,25 @@ function enhanceEmailHTML(bodyHtml, rfqData) {
 
                     <!-- Body Content -->
                     <tr>
-                        <td style="padding: 40px 30px;">
+                        <td style="padding: 20px 0;">
                             ${bodyHtml}
-                        </td>
-                    </tr>
-
-                    <!-- Divider -->
-                    <tr>
-                        <td style="padding: 0 30px;">
-                            <div style="border-top: 2px solid #4ade80; margin: 20px 0;"></div>
                         </td>
                     </tr>
 
                     <!-- Footer -->
                     <tr>
-                        <td style="background-color: #f8f9fa; padding: 30px; border-radius: 0 0 8px 8px;">
-                            
-                            <!-- Company Motto -->
-                            <table width="100%" cellpadding="0" cellspacing="0">
-                                <tr>
-                                    <td align="center" style="padding-bottom: 20px;">
-                                        <h3 style="color: #1a4d2e; margin: 0 0 10px 0; font-size: 18px; font-weight: 700;">
-                                            🌟 HALAL FOODS - Qualité de Confiance depuis des Générations
-                                        </h3>
-                                        <p style="color: #2d7a4f; margin: 0; font-size: 14px; font-style: italic;">
-                                            Trusted Quality Since Generations
-                                        </p>
-                                    </td>
-                                </tr>
-                            </table>
-
-                            <!-- Stats Bar -->
-                            <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 6px; padding: 20px; margin-bottom: 20px;">
-                                <tr>
-                                    <td width="33%" align="center" style="border-right: 1px solid #e5e7eb;">
-                                        <div style="color: #1a4d2e; font-size: 24px; font-weight: 700; margin-bottom: 5px;">600+</div>
-                                        <div style="color: #6b7280; font-size: 12px;">Références Produits</div>
-                                        <div style="color: #9ca3af; font-size: 11px;">Product References</div>
-                                    </td>
-                                    <td width="33%" align="center" style="border-right: 1px solid #e5e7eb;">
-                                        <div style="color: #1a4d2e; font-size: 24px; font-weight: 700; margin-bottom: 5px;">100+</div>
-                                        <div style="color: #6b7280; font-size: 12px;">Fournisseurs</div>
-                                        <div style="color: #9ca3af; font-size: 11px;">Trusted Suppliers</div>
-                                    </td>
-                                    <td width="33%" align="center">
-                                        <div style="color: #1a4d2e; font-size: 24px; font-weight: 700; margin-bottom: 5px;">25+</div>
-                                        <div style="color: #6b7280; font-size: 12px;">Années d'Expérience</div>
-                                        <div style="color: #9ca3af; font-size: 11px;">Years of Excellence</div>
-                                    </td>
-                                </tr>
-                            </table>
-
-                            <!-- Contact Information -->
-                            <table width="100%" cellpadding="0" cellspacing="0">
-                                <tr>
-                                    <td align="center">
-                                        <table cellpadding="5" cellspacing="0">
-                                            <tr>
-                                                <td align="center">
-                                                    <a href="mailto:contact@halalfoods.fr" style="color: #1a4d2e; text-decoration: none; font-size: 14px; font-weight: 600;">
-                                                        📧 contact@halalfoods.fr
-                                                    </a>
-                                                </td>
-                                            </tr>
-                                            <tr>
-                                                <td align="center">
-                                                    <span style="color: #4b5563; font-size: 14px; font-weight: 600;">
-                                                        📞 +33 1 XX XX XX XX
-                                                    </span>
-                                                </td>
-                                            </tr>
-                                            <tr>
-                                                <td align="center">
-                                                    <span style="color: #4b5563; font-size: 14px;">
-                                                        📍 Paris, France
-                                                    </span>
-                                                </td>
-                                            </tr>
-                                            <tr>
-                                                <td align="center" style="padding-top: 10px;">
-                                                    <a href="https://www.halalfoods.fr" style="color: #2d7a4f; text-decoration: none; font-size: 13px;">
-                                                        🌐 www.halalfoods.fr
-                                                    </a>
-                                                </td>
-                                            </tr>
-                                        </table>
-                                    </td>
-                                </tr>
-                            </table>
-
-                            <!-- Certifications -->
-                            <table width="100%" cellpadding="0" cellspacing="0" style="margin-top: 20px;">
-                                <tr>
-                                    <td align="center">
-                                        <div style="background-color: #ffffff; border-radius: 6px; padding: 15px; display: inline-block;">
-                                            <p style="margin: 0; color: #4b5563; font-size: 11px; font-weight: 600;">
-                                                ✅ Certifié Halal | Halal Certified
-                                            </p>
-                                            <p style="margin: 5px 0 0 0; color: #6b7280; font-size: 11px;">
-                                                ISO 9001:2015 | HACCP Compliant | Organic Options Available
-                                            </p>
-                                        </div>
-                                    </td>
-                                </tr>
-                            </table>
-
-                            <!-- Values -->
-                            <table width="100%" cellpadding="0" cellspacing="0" style="margin-top: 20px; border-top: 1px solid #e5e7eb; padding-top: 20px;">
-                                <tr>
-                                    <td align="center">
-                                        <p style="color: #1a4d2e; font-size: 12px; font-weight: 600; margin: 0 0 8px 0;">
-                                            Notre Engagement / Our Commitment
-                                        </p>
-                                        <p style="color: #6b7280; font-size: 11px; margin: 0; line-height: 1.5;">
-                                            Qualité Premium • Prix Compétitifs • Livraison Fiable • Service d'Excellence<br/>
-                                            Premium Quality • Competitive Prices • Reliable Delivery • Excellence in Service
-                                        </p>
-                                    </td>
-                                </tr>
-                            </table>
-
-                            <!-- Legal Footer -->
-                            <table width="100%" cellpadding="0" cellspacing="0" style="margin-top: 20px;">
-                                <tr>
-                                    <td align="center">
-                                        <p style="color: #9ca3af; font-size: 10px; margin: 0; line-height: 1.4;">
-                                            Ce courriel et toutes les pièces jointes sont confidentiels et destinés uniquement au destinataire.<br/>
-                                            This email and any attachments are confidential and intended solely for the addressee.<br/>
-                                            <br/>
-                                            © ${new Date().getFullYear()} Halal Foods. Tous droits réservés / All rights reserved.
-                                        </p>
-                                    </td>
-                                </tr>
-                            </table>
-
+                        <td style="padding: 20px 0; border-top: 1px solid #cccccc;">
+                            <p style="margin: 0 0 10px 0; color: #000000; font-size: 12px;">
+                                <strong>Halal Foods</strong><br/>
+                                Email: contact@halalfoods.fr<br/>
+                                Phone: +33 1 XX XX XX XX<br/>
+                                Paris, France<br/>
+                                www.halalfoods.fr
+                            </p>
+                            <p style="margin: 10px 0 0 0; color: #666666; font-size: 10px;">
+                                This email and any attachments are confidential.<br/>
+                                © ${new Date().getFullYear()} Halal Foods. All rights reserved.
+                            </p>
                         </td>
                     </tr>
 

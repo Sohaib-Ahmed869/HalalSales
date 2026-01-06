@@ -58,6 +58,11 @@ router.post(
   customerController.syncPendingC7000Customers
 );
 
+router.post(
+  '/emails',
+  customerController.getAllCustomerEmails
+)
+
 router.get(
   "/export/excel",
   customerController.exportCustomersToExcel

@@ -9,6 +9,39 @@ class SAPPaymentService {
     }
 
     /**
+ * Generic PATCH request to SAP Service Layer
+ * @param {String} endpoint - API endpoint (e.g., '/CreditNotes(123)')
+ * @param {Object} data - Data to update
+ */
+    async patch(endpoint, data) {
+        try {
+            const config = await this.getConfig();
+
+            const response = await axios.patch(
+                `${this.baseURL}${endpoint}`,
+                data,
+                config
+            );
+
+            console.log(`SAP PATCH ${endpoint} successful`);
+            return response.data;
+
+        } catch (error) {
+            console.error('SAP PATCH Error:', error.response?.data || error.message);
+
+            if (error.response?.status === 401) {
+                this.sessionId = null;
+                return await this.patch(endpoint, data);
+            }
+
+            throw new Error(
+                error.response?.data?.error?.message?.value ||
+                'Failed to update resource in SAP'
+            );
+        }
+    }
+
+    /**
      * Login to SAP Service Layer
      */
     async login() {
