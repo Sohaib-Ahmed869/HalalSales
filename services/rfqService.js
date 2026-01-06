@@ -13,11 +13,14 @@ const vendorEmailService = require('./vendorEmailService');
 /**
  * Process natural language RFQ request
  * @param {string} naturalLanguageInput - User's description of what they need
+ * @param {string} userId - User ID
+ * @param {string} searchMode - 'existing' or 'new' to filter vendor sources
  * @returns {Object} Structured RFQ with vendor recommendations
  */
-async function processNaturalLanguageRFQ(naturalLanguageInput, userId) {
+async function processNaturalLanguageRFQ(naturalLanguageInput, userId, searchMode = 'existing') {
     console.log('=== Starting Natural Language RFQ Processing ===');
     console.log('Input:', naturalLanguageInput);
+    console.log('Search Mode:', searchMode); // ADD THIS LOG
 
     // Step 1: Use AI to parse the natural language input
     const parsedRFQ = await parseNaturalLanguageRFQ(naturalLanguageInput);
@@ -41,35 +44,36 @@ async function processNaturalLanguageRFQ(naturalLanguageInput, userId) {
 
         console.log(`Search keywords: ${JSON.stringify(keywords)}`);
 
-        // Find vendors from historical data
+        // Find vendors from historical data - PASS searchMode
         let vendorAnalysis = await analyzeHistoricalPurchasesMultiKeyword(
             keywords,
-            item.quantity
+            item.quantity,
+            searchMode // PASS searchMode HERE
         );
 
-        console.log(`Found ${vendorAnalysis.length} vendors from initial search`);
+        console.log(`Found ${vendorAnalysis.length} vendors from initial search (mode: ${searchMode})`);
 
         // If no vendors found, try broader search
         if (vendorAnalysis.length === 0) {
             console.log('⚠️ No vendors found, trying broader search...');
 
-            // Try with just product name
             const broaderKeywords = [item.productName];
             vendorAnalysis = await analyzeHistoricalPurchasesMultiKeyword(
                 broaderKeywords,
-                item.quantity
+                item.quantity,
+                searchMode // PASS searchMode HERE
             );
 
             console.log(`Broader search found ${vendorAnalysis.length} vendors`);
 
-            // If still nothing, try with individual words from product name
             if (vendorAnalysis.length === 0) {
                 const words = item.productName.split(' ').filter(w => w.length > 3);
                 if (words.length > 0) {
                     console.log(`Trying word-by-word search: ${JSON.stringify(words)}`);
                     vendorAnalysis = await analyzeHistoricalPurchasesMultiKeyword(
                         words,
-                        item.quantity
+                        item.quantity,
+                        searchMode // PASS searchMode HERE
                     );
                     console.log(`Word-by-word search found ${vendorAnalysis.length} vendors`);
                 }
@@ -77,7 +81,6 @@ async function processNaturalLanguageRFQ(naturalLanguageInput, userId) {
         }
 
         // Get full vendor details
-        // CHANGE 1: Split vendor codes by source
         const sapVendorCodes = vendorAnalysis
             .filter(v => v.vendorSource === 'SAP' || v.vendorSource === 'EMAIL')
             .map(v => v._id);
@@ -87,7 +90,6 @@ async function processNaturalLanguageRFQ(naturalLanguageInput, userId) {
 
         console.log(`Looking for ${sapVendorCodes.length} SAP/EMAIL vendors and ${pdaSupplierIds.length} PDA suppliers`);
 
-        // CHANGE 2: Fetch from both collections
         const vendors = await Vendor.find({
             CardCode: { $in: sapVendorCodes },
         });
@@ -101,17 +103,13 @@ async function processNaturalLanguageRFQ(naturalLanguageInput, userId) {
         console.log(`Vendor.find() returned ${vendors.length} vendors`);
         console.log(`PDA_Supplier.find() returned ${pdaSuppliers.length} suppliers`);
 
-        // CHANGE 3: Merge vendor data with historical analysis
         const enrichedVendors = vendorAnalysis.map(historical => {
-            // Check if it's a PDA supplier or regular vendor
             if (historical.vendorSource === 'PDA_SCRAPER') {
-                // PDA supplier - already has all needed data
                 return {
                     ...historical,
                     hasEmail: !!historical.email,
                 };
             } else {
-                // Regular vendor - merge with Vendor collection data
                 const vendorDetails = vendors.find(v => v.CardCode === historical._id);
                 return {
                     ...historical,
@@ -124,9 +122,8 @@ async function processNaturalLanguageRFQ(naturalLanguageInput, userId) {
                     hasEmail: !!vendorDetails?.email,
                 };
             }
-        }).filter(v => v.hasEmail); // Only include vendors with emails
+        }).filter(v => v.hasEmail);
 
-        console.log(`Final ${enrichedVendors.length} vendors (SAP: ${enrichedVendors.filter(v => v.vendorSource === 'SAP').length}, EMAIL: ${enrichedVendors.filter(v => v.vendorSource === 'EMAIL').length}, PDA: ${enrichedVendors.filter(v => v.vendorSource === 'PDA_SCRAPER').length})`);
         console.log(`Final ${enrichedVendors.length} vendors with email addresses`);
 
         itemsWithVendors.push({
@@ -257,10 +254,12 @@ function generateKeywordVariations(keywords) {
  * Analyze historical purchases with multiple keywords (ENHANCED for Email Vendors)
  * @param {Array<string>} keywords - Search keywords
  * @param {number} quantity - Required quantity
+ * @param {string} searchMode - 'existing' or 'new' to filter vendor sources
  * @returns {Array} Scored vendor list (both SAP and Email vendors)
  */
-async function analyzeHistoricalPurchasesMultiKeyword(keywords, quantity) {
+async function analyzeHistoricalPurchasesMultiKeyword(keywords, quantity, searchMode = 'existing') {
     console.log(`\n>> Searching historical purchases with keywords: ${JSON.stringify(keywords)}`);
+    console.log(`>> Search Mode: ${searchMode}`); // ADD THIS LOG
 
     if (!keywords || keywords.length === 0) {
         console.log('⚠️ No keywords provided, returning empty results');
@@ -279,275 +278,252 @@ async function analyzeHistoricalPurchasesMultiKeyword(keywords, quantity) {
     }));
 
     try {
-        // ====== PART 1: Get SAP Vendors (existing logic) ======
-        let sapVendors = await PurchaseInvoice.aggregate([
-            {
-                $match: {
-                    $or: regexPatterns
-                }
-            },
-            {
-                $unwind: '$DocumentLines'
-            },
-            {
-                $match: {
-                    $or: regexPatterns
-                }
-            },
-            {
-                $group: {
-                    _id: '$CardCode',
-                    vendorName: { $first: '$CardName' },
-                    totalPurchases: { $sum: 1 },
-                    avgPrice: { $avg: '$DocumentLines.Price' },
-                    minPrice: { $min: '$DocumentLines.Price' },
-                    maxPrice: { $max: '$DocumentLines.Price' },
-                    lastPurchaseDate: { $max: '$DocDate' },
-                    firstPurchaseDate: { $min: '$DocDate' },
-                    totalQuantity: { $sum: '$DocumentLines.Quantity' },
-                    totalValue: { $sum: '$DocumentLines.LineTotal' },
-                    items: {
-                        $push: {
-                            itemCode: '$DocumentLines.ItemCode',
-                            description: '$DocumentLines.ItemDescription',
-                            price: '$DocumentLines.Price',
-                            quantity: '$DocumentLines.Quantity',
-                            date: '$DocDate',
-                            currency: '$DocCurrency',
-                            lineTotal: '$DocumentLines.LineTotal',
-                        }
+        let sapVendors = [];
+        let emailVendors = [];
+        let pdaSuppliers = [];
+
+        // ====== CONDITIONAL FETCHING BASED ON searchMode ======
+
+        if (searchMode === 'existing') {
+            // ONLY fetch SAP and EMAIL vendors (existing)
+            console.log('>> MODE: EXISTING - Searching SAP and EMAIL vendors only');
+
+            // Fetch SAP vendors (existing logic)
+            sapVendors = await PurchaseInvoice.aggregate([
+                // ... existing SAP aggregation pipeline
+                {
+                    $match: {
+                        $or: regexPatterns
                     }
-                }
-            },
-            {
-                $project: {
-                    _id: 1,
-                    vendorName: 1,
-                    totalPurchases: 1,
-                    avgPrice: 1,
-                    minPrice: 1,
-                    maxPrice: 1,
-                    lastPurchaseDate: 1,
-                    firstPurchaseDate: 1,
-                    totalQuantity: 1,
-                    totalValue: 1,
-                    items: { $slice: ['$items', -5] },
-                    purchaseHistory: {
-                        $map: {
-                            input: { $slice: ['$items', -5] },
-                            as: 'item',
-                            in: {
-                                productName: '$$item.description',
-                                quantity: '$$item.quantity',
-                                unit: 'kg',
-                                price: '$$item.price',
-                                total: '$$item.lineTotal',
-                                date: '$$item.date',
-                                poNumber: null
+                },
+                {
+                    $unwind: '$DocumentLines'
+                },
+                {
+                    $match: {
+                        $or: regexPatterns
+                    }
+                },
+                {
+                    $group: {
+                        _id: '$CardCode',
+                        vendorName: { $first: '$CardName' },
+                        totalPurchases: { $sum: 1 },
+                        avgPrice: { $avg: '$DocumentLines.Price' },
+                        minPrice: { $min: '$DocumentLines.Price' },
+                        maxPrice: { $max: '$DocumentLines.Price' },
+                        lastPurchaseDate: { $max: '$DocDate' },
+                        firstPurchaseDate: { $min: '$DocDate' },
+                        totalQuantity: { $sum: '$DocumentLines.Quantity' },
+                        totalValue: { $sum: '$DocumentLines.LineTotal' },
+                        items: {
+                            $push: {
+                                itemCode: '$DocumentLines.ItemCode',
+                                description: '$DocumentLines.ItemDescription',
+                                price: '$DocumentLines.Price',
+                                quantity: '$DocumentLines.Quantity',
+                                date: '$DocDate',
+                                currency: '$DocCurrency',
+                                lineTotal: '$DocumentLines.LineTotal',
                             }
                         }
                     }
-                }
-            },
-            {
-                $sort: { totalPurchases: -1 }
-            }
-        ]);
-
-        sapVendors = sapVendors.map(vendor => ({
-            ...vendor,
-            vendorSource: 'SAP',
-            purchaseHistory: vendor.items?.map(item => ({
-                productName: item.description,
-                quantity: item.quantity,
-                unit: 'kg',
-                price: item.price,
-                total: item.lineTotal,
-                date: item.date,
-                poNumber: null
-            })) || []
-        }));
-
-        console.log(`>> Found ${sapVendors.length} SAP vendors`);
-
-        // ====== PART 2: Get Email Vendors (NEW) ======
-        let emailVendors = [];
-
-        try {
-            // Build regex for keyword matching
-            const keywordRegex = new RegExp(keywords.join('|'), 'i');
-
-            // Search vendors directly by product categories
-            const emailVendorDetails = await Vendor.find({
-                'customFields.isEmailVendor': true,
-                isActive: true,
-                $or: [
-                    // Search in product categories
-                    { productCategories: { $regex: keywordRegex } },
-                    // Also search in vendor name for broader matches
-                    { CardName: { $regex: keywordRegex } }
-                ]
-            });
-
-            console.log(`>> Found ${emailVendorDetails.length} email vendors matching product categories`);
-
-            // Get their interaction histories for additional context
-            const emailVendorCodes = emailVendorDetails.map(v => v.CardCode);
-            const emailVendorHistories = await EmailVendorHistory.find({
-                vendorCardCode: { $in: emailVendorCodes }
-            });
-
-            // Build email vendor results
-            emailVendors = emailVendorDetails.map(vendor => {
-                const history = emailVendorHistories.find(
-                    h => h.vendorCardCode === vendor.CardCode
-                );
-
-                const quotations = history?.interactions.filter(
-                    i => i.type === 'quotation_response'
-                ) || [];
-
-                // NEW: Calculate average price from quotations
-                const quotationsWithPricing = quotations.filter(q => q.quotationData?.quotedItems?.length > 0);
-                let avgPrice = 0;
-                let minPrice = 0;
-                let maxPrice = 0;
-
-                if (quotationsWithPricing.length > 0) {
-                    const allPrices = quotationsWithPricing.flatMap(q =>
-                        q.quotationData.quotedItems.map(item => item.unitPrice)
-                    ).filter(p => p > 0);
-
-                    if (allPrices.length > 0) {
-                        avgPrice = allPrices.reduce((a, b) => a + b, 0) / allPrices.length;
-                        minPrice = Math.min(...allPrices);
-                        maxPrice = Math.max(...allPrices);
-
-                        console.log(`   📊 Calculated pricing for ${vendor.CardName}: avg=${avgPrice.toFixed(2)}, min=${minPrice}, max=${maxPrice}`);
+                },
+                {
+                    $project: {
+                        _id: 1,
+                        vendorName: 1,
+                        totalPurchases: 1,
+                        avgPrice: 1,
+                        minPrice: 1,
+                        maxPrice: 1,
+                        lastPurchaseDate: 1,
+                        firstPurchaseDate: 1,
+                        totalQuantity: 1,
+                        totalValue: 1,
+                        items: { $slice: ['$items', -5] },
+                        purchaseHistory: {
+                            $map: {
+                                input: { $slice: ['$items', -5] },
+                                as: 'item',
+                                in: {
+                                    productName: '$$item.description',
+                                    quantity: '$$item.quantity',
+                                    unit: 'kg',
+                                    price: '$$item.price',
+                                    total: '$$item.lineTotal',
+                                    date: '$$item.date',
+                                    poNumber: null
+                                }
+                            }
+                        }
                     }
+                },
+                {
+                    $sort: { totalPurchases: -1 }
                 }
+            ]);
 
-                const allInteractions = history?.interactions || [];
+            sapVendors = sapVendors.map(vendor => ({
+                ...vendor,
+                vendorSource: 'SAP',
+                purchaseHistory: vendor.items?.map(item => ({
+                    productName: item.description,
+                    quantity: item.quantity,
+                    unit: 'kg',
+                    price: item.price,
+                    total: item.lineTotal,
+                    date: item.date,
+                    poNumber: null
+                })) || []
+            }));
 
-                return {
-                    _id: vendor.CardCode,
-                    vendorName: vendor.CardName,
-                    vendorSource: 'EMAIL',
-                    totalPurchases: vendor.customFields?.emailStats?.quotationsReceived || 0,
-                    avgPrice: avgPrice, // NOW HAS REAL DATA
-                    minPrice: minPrice, // NOW HAS REAL DATA
-                    maxPrice: maxPrice, // NOW HAS REAL DATA
+            console.log(`>> Found ${sapVendors.length} SAP vendors`);
 
-                    lastPurchaseDate: vendor.lastContactDate || vendor.customFields?.emailStats?.firstContactDate || new Date(),
-                    firstPurchaseDate: vendor.customFields?.emailStats?.firstContactDate || new Date(),
-                    totalQuantity: 0,
-                    totalValue: 0,
-                    purchaseHistory: quotations.slice(-5).map(q => ({
-                        productName: q.snippet?.substring(0, 50) || 'Email quotation',
-                        quantity: 0,
-                        unit: 'kg',
-                        price: 0,
-                        total: 0,
-                        date: q.date,
-                        poNumber: null
-                    })),
-                    emailStats: vendor.customFields?.emailStats || {},
-                    // Add matched categories for debugging
-                    matchedCategories: vendor.productCategories.filter(cat =>
-                        keywordRegex.test(cat)
-                    ),
-                    totalEmailInteractions: allInteractions.length
-                };
-            });
+            // Fetch EMAIL vendors (existing logic)
+            try {
+                const keywordRegex = new RegExp(keywords.join('|'), 'i');
 
-            console.log(`>> Found ${emailVendors.length} email vendors`);
-
-            // Debug: Show matched vendors
-            if (emailVendors.length > 0) {
-                console.log('>> Email vendors matched:');
-                emailVendors.forEach(v => {
-                    console.log(`   - ${v.vendorName}: ${v.matchedCategories.join(', ')}`);
+                const emailVendorDetails = await Vendor.find({
+                    'customFields.isEmailVendor': true,
+                    isActive: true,
+                    $or: [
+                        { productCategories: { $regex: keywordRegex } },
+                        { CardName: { $regex: keywordRegex } }
+                    ]
                 });
+
+                console.log(`>> Found ${emailVendorDetails.length} email vendors matching product categories`);
+
+                const emailVendorCodes = emailVendorDetails.map(v => v.CardCode);
+                const emailVendorHistories = await EmailVendorHistory.find({
+                    vendorCardCode: { $in: emailVendorCodes }
+                });
+
+                emailVendors = emailVendorDetails.map(vendor => {
+                    const history = emailVendorHistories.find(
+                        h => h.vendorCardCode === vendor.CardCode
+                    );
+
+                    const quotations = history?.interactions.filter(
+                        i => i.type === 'quotation_response'
+                    ) || [];
+
+                    const quotationsWithPricing = quotations.filter(q => q.quotationData?.quotedItems?.length > 0);
+                    let avgPrice = 0;
+                    let minPrice = 0;
+                    let maxPrice = 0;
+
+                    if (quotationsWithPricing.length > 0) {
+                        const allPrices = quotationsWithPricing.flatMap(q =>
+                            q.quotationData.quotedItems.map(item => item.unitPrice)
+                        ).filter(p => p > 0);
+
+                        if (allPrices.length > 0) {
+                            avgPrice = allPrices.reduce((a, b) => a + b, 0) / allPrices.length;
+                            minPrice = Math.min(...allPrices);
+                            maxPrice = Math.max(...allPrices);
+                        }
+                    }
+
+                    const allInteractions = history?.interactions || [];
+
+                    return {
+                        _id: vendor.CardCode,
+                        vendorName: vendor.CardName,
+                        vendorSource: 'EMAIL',
+                        totalPurchases: vendor.customFields?.emailStats?.quotationsReceived || 0,
+                        avgPrice: avgPrice,
+                        minPrice: minPrice,
+                        maxPrice: maxPrice,
+                        lastPurchaseDate: vendor.lastContactDate || vendor.customFields?.emailStats?.firstContactDate || new Date(),
+                        firstPurchaseDate: vendor.customFields?.emailStats?.firstContactDate || new Date(),
+                        totalQuantity: 0,
+                        totalValue: 0,
+                        purchaseHistory: quotations.slice(-5).map(q => ({
+                            productName: q.snippet?.substring(0, 50) || 'Email quotation',
+                            quantity: 0,
+                            unit: 'kg',
+                            price: 0,
+                            total: 0,
+                            date: q.date,
+                            poNumber: null
+                        })),
+                        emailStats: vendor.customFields?.emailStats || {},
+                        matchedCategories: vendor.productCategories.filter(cat =>
+                            keywordRegex.test(cat)
+                        ),
+                        totalEmailInteractions: allInteractions.length
+                    };
+                });
+
+                console.log(`>> Found ${emailVendors.length} email vendors`);
+
+            } catch (emailError) {
+                console.error('⚠️ Error fetching email vendors:', emailError.message);
             }
 
-        } catch (emailError) {
-            console.error('⚠️ Error fetching email vendors:', emailError.message);
-            console.error(emailError.stack);
-            // Continue with just SAP vendors
-        }
+        } else if (searchMode === 'new') {
+            // ONLY fetch PDA suppliers (new)
+            console.log('>> MODE: NEW - Searching PDA suppliers only');
 
-        // ====== PART 2.5: Get PDA Scraped Suppliers (NEW) ======
-        let pdaSuppliers = [];
+            try {
+                const PDA_Supplier = require('../models/PDA_Supplier');
+                const keywordRegex = new RegExp(keywords.join('|'), 'i');
 
-        try {
-            const PDA_Supplier = require('../models/PDA_Supplier');
+                const pdaSupplierDetails = await PDA_Supplier.find({
+                    isActive: true,
+                    $or: [
+                        { searchTerm: { $regex: keywordRegex } },
+                        { supplierName: { $regex: keywordRegex } },
+                        { 'rawData.metadata.products': { $regex: keywordRegex } },
+                        { 'rawData.productname': { $regex: keywordRegex } }
+                    ],
+                    'email': { $exists: true, $ne: null, $ne: '' }
+                }).limit(20);
 
-            // Build regex for keyword matching
-            const keywordRegex = new RegExp(keywords.join('|'), 'i');
+                console.log(`>> Found ${pdaSupplierDetails.length} PDA suppliers matching keywords`);
 
-            // Search PDA suppliers by search term or supplier name
-            const pdaSupplierDetails = await PDA_Supplier.find({
-                isActive: true,
-                $or: [
-                    { searchTerm: { $regex: keywordRegex } },
-                    { supplierName: { $regex: keywordRegex } },
-                    { 'rawData.metadata.products': { $regex: keywordRegex } },
-                    { 'rawData.productname': { $regex: keywordRegex } }
-                ],
-                // Only include suppliers with email
-                'email': { $exists: true, $ne: null, $ne: '' }
-            }).limit(20); // Limit to top 20 to avoid overwhelming results
-
-            console.log(`>> Found ${pdaSupplierDetails.length} PDA suppliers matching keywords`);
-
-            // Build PDA supplier results
-            pdaSuppliers = pdaSupplierDetails.map(supplier => {
-                return {
-                    _id: supplier._id.toString(),
-                    vendorName: supplier.supplierName,
-                    vendorSource: 'PDA_SCRAPER',
-                    totalPurchases: 0,
-                    avgPrice: 0,
-                    minPrice: 0,
-                    maxPrice: 0,
-                    lastPurchaseDate: supplier.createdAt || new Date(),
-                    firstPurchaseDate: supplier.createdAt || new Date(),
-                    totalQuantity: 0,
-                    totalValue: 0,
-                    purchaseHistory: [],
-                    email: supplier.email,  // ✅ CORRECT - email is at root level
-                    phone: supplier.contactInfo?.phone,
-                    country: supplier.country,
-                    scrapedFrom: supplier.scrapedFrom,
-                    isNewSupplier: true,
-                    supplierMetadata: {
-                        searchTerm: supplier.searchTerm,
-                        scrapedFrom: supplier.scrapedFrom,
+                pdaSuppliers = pdaSupplierDetails.map(supplier => {
+                    return {
+                        _id: supplier._id.toString(),
+                        vendorName: supplier.supplierName,
+                        vendorSource: 'PDA_SCRAPER',
+                        totalPurchases: 0,
+                        avgPrice: 0,
+                        minPrice: 0,
+                        maxPrice: 0,
+                        lastPurchaseDate: supplier.createdAt || new Date(),
+                        firstPurchaseDate: supplier.createdAt || new Date(),
+                        totalQuantity: 0,
+                        totalValue: 0,
+                        purchaseHistory: [],
+                        email: supplier.email,
+                        phone: supplier.contactInfo?.phone,
                         country: supplier.country,
-                        rawData: supplier.rawData
-                    }
-                };
-            });
-
-            console.log(`>> Found ${pdaSuppliers.length} PDA suppliers`);
-
-            // Debug: Show matched suppliers
-            if (pdaSuppliers.length > 0) {
-                console.log('>> PDA suppliers matched:');
-                pdaSuppliers.forEach(v => {
-                    console.log(`   - ${v.vendorName} (${v.country}) from ${v.scrapedFrom}`);
+                        scrapedFrom: supplier.scrapedFrom,
+                        isNewSupplier: true,
+                        supplierMetadata: {
+                            searchTerm: supplier.searchTerm,
+                            scrapedFrom: supplier.scrapedFrom,
+                            country: supplier.country,
+                            rawData: supplier.rawData
+                        }
+                    };
                 });
-            }
 
-        } catch (pdaError) {
-            console.error('⚠️ Error fetching PDA suppliers:', pdaError.message);
-            // Continue without PDA suppliers
+                console.log(`>> Found ${pdaSuppliers.length} PDA suppliers`);
+
+            } catch (pdaError) {
+                console.error('⚠️ Error fetching PDA suppliers:', pdaError.message);
+            }
         }
 
-        // ====== PART 3: Combine and Score All Vendors (MODIFY) ======
+        // ====== Combine and Score All Vendors ======
         const allVendors = [...sapVendors, ...emailVendors, ...pdaSuppliers];
 
         console.log(`>> Combining vendors: ${sapVendors.length} SAP + ${emailVendors.length} EMAIL + ${pdaSuppliers.length} PDA = ${allVendors.length} total`);
+
         if (allVendors.length === 0) {
             console.log('>> No vendors found from any source');
             return [];

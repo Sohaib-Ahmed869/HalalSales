@@ -15,8 +15,8 @@ const { generateRFQPDF } = require('../utils/pdfGenerator1');
  */
 exports.analyzeRFQRequest = async (req, res) => {
     try {
-        const { naturalLanguageInput } = req.body;
-        const userId = req.user?.id || 'admin'; // From auth middleware
+        const { naturalLanguageInput, searchMode = 'existing' } = req.body; // ADD searchMode
+        const userId = req.user?.id || 'admin';
 
         if (!naturalLanguageInput || naturalLanguageInput.trim().length === 0) {
             return res.status(400).json({
@@ -25,16 +25,21 @@ exports.analyzeRFQRequest = async (req, res) => {
             });
         }
 
-        console.log(`Processing RFQ request from user ${userId}`);
+        console.log(`Processing RFQ request from user ${userId} with search mode: ${searchMode}`);
 
         // Process the natural language input using AI
-        const analysis = await processNaturalLanguageRFQ(naturalLanguageInput, userId);
+        const analysis = await processNaturalLanguageRFQ(
+            naturalLanguageInput,
+            userId,
+            searchMode // PASS searchMode to service
+        );
 
         res.json({
             success: true,
             message: 'RFQ request analyzed successfully',
             data: {
                 parsedRequirements: analysis.parsedData,
+                searchMode: searchMode, // Include in response
                 items: analysis.itemsAnalysis.map(item => ({
                     productName: item.productName,
                     specifications: item.specifications,
@@ -62,7 +67,6 @@ exports.analyzeRFQRequest = async (req, res) => {
                                 unit: item.unit,
                                 avgPrice: item.vendors.find(v => v._id === vendor._id)?.avgPrice
                             })),
-                        // ADD THIS - Purchase History
                         purchaseHistory: vendor.recentPurchases || vendor.purchaseHistory || []
                     })),
                     aiInsights: analysis.vendorRecommendations.aiInsights,
