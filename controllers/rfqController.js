@@ -216,6 +216,11 @@ exports.sendRFQToVendors = async (req, res) => {
                     v => v.vendorCode === vendor.CardCode
                 );
 
+                // Determine if this is an existing vendor or new supplier
+                const isExistingVendor = vendor.vendorSource !== 'PDA_SCRAPER';
+
+                console.log(`📧 Vendor Type: ${isExistingVendor ? 'EXISTING VENDOR' : 'NEW SUPPLIER'} - ${vendor.CardName}`);
+
                 const emailContent = await generateRFQEmail(
                     {
                         rfqNumber: rfq.rfqNumber,
@@ -233,7 +238,8 @@ exports.sendRFQToVendors = async (req, res) => {
                         vendorName: vendor.CardName,
                         totalPurchases: vendorHistory?.totalPurchases || 0,
                     },
-                    'en'
+                    'en',
+                    isExistingVendor  // Pass the vendor type flag
                 );
 
                 // Send via Gmail
@@ -276,7 +282,7 @@ exports.sendRFQToVendors = async (req, res) => {
                     messageId: emailResult.messageId,
                 });
 
-              
+
 
                 console.log(`✅ Sent to ${vendor.CardName}`);
 

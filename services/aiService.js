@@ -399,17 +399,100 @@ Return as JSON:
  * Generate personalized RFQ email content
  * @param {Object} rfqData - RFQ details
  * @param {Object} vendor - Vendor details
+ * @param {boolean} isExistingVendor - Whether this is an existing vendor or new supplier
  * @returns {Object} Email subject and body
  */
-async function generateRFQEmail(rfqData, vendor, language = 'both') {
-    const relationshipContext = vendor.totalPurchases
-        ? `Nous avons travaillé ensemble ${vendor.totalPurchases} fois par le passé. / We have worked together ${vendor.totalPurchases} times in the past.`
-        : 'Nous souhaitons établir une nouvelle relation commerciale. / We wish to establish a new business relationship.';
+async function generateRFQEmail(rfqData, vendor, language = 'both', isExistingVendor = true) {
+    // If existing vendor, send simple professional email
+    if (isExistingVendor) {
+        return generateSimpleRFQEmail(rfqData, vendor);
+    }
+
+    // For new suppliers, send detailed company introduction email
+    return generateDetailedRFQEmail(rfqData, vendor);
+}
+
+/**
+ * Simple email for existing vendors (no company intro)
+ */
+function generateSimpleRFQEmail(rfqData, vendor) {
+    const subject = `RFQ ${rfqData.rfqNumber} - Request for Quotation`;
+
+    const bodyHtml = `
+        <div style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;">
+            <h2 style="color: #1a4d2e; margin-bottom: 15px;">Dear ${vendor.vendorName},</h2>
+            
+            <p style="color: #4b5563; line-height: 1.6; margin-bottom: 15px;">
+                Please find attached our Request for Quotation for the products we discussed.
+            </p>
+            
+            <div style="background-color: #f0f9ff; border-left: 4px solid #3b82f6; padding: 15px; margin: 20px 0; border-radius: 4px;">
+                <p style="margin: 0; color: #1e40af; font-weight: 600;">
+                    📋 RFQ Number: ${rfqData.rfqNumber}<br/>
+                    📅 Quotation Due: ${new Date(rfqData.quotationDueDate).toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' })}<br/>
+                    🚚 Delivery By: ${new Date(rfqData.deliveryBy).toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' })}
+                </p>
+            </div>
+            
+            ${rfqData.customMessage ? `<p style="color: #4b5563; line-height: 1.6; margin-bottom: 15px; font-style: italic;">${rfqData.customMessage}</p>` : ''}
+            
+            <p style="color: #4b5563; line-height: 1.6; margin-bottom: 15px;">
+                Please include:
+            </p>
+            <ul style="color: #4b5563; line-height: 1.8;">
+                <li>Unit and total prices</li>
+                <li>Delivery terms</li>
+                <li>Payment terms</li>
+                <li>Product availability</li>
+            </ul>
+            
+            <p style="color: #4b5563; line-height: 1.6; margin-top: 20px;">
+                Best regards,<br/>
+                <strong>Halal Foods - Procurement Team</strong>
+            </p>
+        </div>
+    `;
+
+    const bodyText = `
+Dear ${vendor.vendorName},
+
+Please find attached our Request for Quotation.
+
+RFQ Number: ${rfqData.rfqNumber}
+Quotation Due: ${new Date(rfqData.quotationDueDate).toLocaleDateString('en-GB')}
+Delivery By: ${new Date(rfqData.deliveryBy).toLocaleDateString('en-GB')}
+
+${rfqData.customMessage ? `\n${rfqData.customMessage}\n` : ''}
+
+Please include unit prices, delivery terms, payment terms, and product availability.
+
+Best regards,
+Halal Foods - Procurement Team
+
+---
+Contact: contact@halalfoods.fr | +33 1 XX XX XX XX
+Paris, France | www.halalfoods.fr
+    `;
+
+    return {
+        subject,
+        bodyHtml: enhanceEmailHTML(bodyHtml, rfqData),
+        bodyText
+    };
+}
+
+/**
+ * Detailed email for new suppliers (with company introduction)
+ */
+async function generateDetailedRFQEmail(rfqData, vendor) {
+    const relationshipContext = `We are reaching out to establish a new business relationship.`;
 
     const prompt = `Generate a professional bilingual RFQ email (French and English) for Halal Foods, a premium food wholesaler in Paris.
 
+This is for a NEW SUPPLIER we haven't worked with before.
+
 Vendor Name: ${vendor.vendorName}
-Relationship: ${relationshipContext}
+Context: First-time contact - introduce Halal Foods company
 
 RFQ Details:
 - RFQ Number: ${rfqData.rfqNumber}
@@ -420,12 +503,13 @@ RFQ Details:
 ${rfqData.customMessage ? `Additional Message: ${rfqData.customMessage}` : ''}
 
 Create an email that:
-1. Is professional and warm
-2. Contains BOTH French and English versions (French first, English below with separator)
-3. Highlights the attached RFQ PDF document
-4. Emphasizes quality, trust, and long-term partnership
-5. Has clear call-to-action with deadline
-6. Features an impressive, professional footer with:
+1. INTRODUCES Halal Foods (premium wholesaler, 600+ products, 100+ suppliers, established brand)
+2. Is professional and warm for a first contact
+3. Contains BOTH French and English versions (French first, then separator, then English)
+4. Highlights the attached RFQ PDF document
+5. Emphasizes quality, trust, and potential long-term partnership
+6. Has clear call-to-action with deadline
+7. Features an impressive, professional footer with:
    - Company motto/values
    - Contact information
    - Social proof (600+ products, 100+ suppliers)
@@ -433,7 +517,7 @@ Create an email that:
 
 Return as JSON:
 {
-  "subject": "Demande de devis / Request for Quotation - RFQ ${rfqData.rfqNumber}",
+  "subject": "New Partnership Opportunity - RFQ ${rfqData.rfqNumber} | Halal Foods",
   "bodyHtml": "string (HTML formatted with modern design)",
   "bodyText": "string (plain text version)"
 }`;
@@ -444,9 +528,9 @@ Return as JSON:
             messages: [
                 {
                     role: 'system',
-                    content: `You are a professional business email writer specializing in procurement communications. 
-                    Create bilingual (French/English) emails that are formal yet warm, emphasizing quality, trust, and partnership.
-                    The emails should reflect a premium, professional brand image.`,
+                    content: `You are a professional business email writer specializing in procurement communications for NEW supplier outreach. 
+                    Create bilingual (French/English) emails that introduce the company professionally while being warm and inviting.
+                    The emails should reflect a premium brand looking to establish new partnerships.`,
                 },
                 {
                     role: 'user',
@@ -466,10 +550,154 @@ Return as JSON:
 
         return parsedResponse;
     } catch (error) {
-        console.error('Error generating email:', error);
+        console.error('Error generating detailed email:', error);
         // Fallback to professional template
-        return generateFallbackEmail(rfqData, vendor);
+        return generateFallbackDetailedEmail(rfqData, vendor);
     }
+}
+
+/**
+ * Fallback detailed email for new suppliers
+ */
+function generateFallbackDetailedEmail(rfqData, vendor) {
+    const subject = `New Partnership Opportunity - RFQ ${rfqData.rfqNumber} | Halal Foods`;
+
+    const bodyHtml = `
+        <div style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;">
+            <!-- French Version -->
+            <div style="margin-bottom: 30px;">
+                <h2 style="color: #1a4d2e; margin-bottom: 15px;">Bonjour ${vendor.vendorName},</h2>
+                
+                <p style="color: #4b5563; line-height: 1.6; margin-bottom: 15px;">
+                    Nous sommes <strong>Halal Foods</strong>, un grossiste alimentaire premium basé à Paris, spécialisé dans les produits halal de haute qualité.
+                    Avec plus de <strong>600 références produits</strong> et <strong>100+ fournisseurs de confiance</strong>, nous desservons des centaines de clients à travers la France.
+                </p>
+                
+                <p style="color: #4b5563; line-height: 1.6; margin-bottom: 15px;">
+                    Nous souhaitons explorer une collaboration avec votre entreprise et vous prions de bien vouloir nous faire parvenir votre meilleure offre pour les produits détaillés ci-joint.
+                </p>
+                
+                <div style="background-color: #fef3c7; border-left: 4px solid #f59e0b; padding: 15px; margin: 20px 0; border-radius: 4px;">
+                    <p style="margin: 0; color: #92400e; font-weight: 600;">
+                        📋 Numéro de demande: ${rfqData.rfqNumber}<br/>
+                        📅 Date limite de soumission: ${new Date(rfqData.quotationDueDate).toLocaleDateString('fr-FR', { year: 'numeric', month: 'long', day: 'numeric' })}<br/>
+                        🚚 Livraison souhaitée: ${new Date(rfqData.deliveryBy).toLocaleDateString('fr-FR', { year: 'numeric', month: 'long', day: 'numeric' })}
+                    </p>
+                </div>
+                
+                ${rfqData.customMessage ? `<p style="color: #4b5563; line-height: 1.6; margin-bottom: 15px; font-style: italic;">${rfqData.customMessage}</p>` : ''}
+                
+                <p style="color: #4b5563; line-height: 1.6; margin-bottom: 15px;">
+                    Veuillez inclure dans votre devis:
+                </p>
+                <ul style="color: #4b5563; line-height: 1.8;">
+                    <li>Prix unitaires et totaux</li>
+                    <li>Conditions de livraison</li>
+                    <li>Modalités de paiement</li>
+                    <li>Disponibilité des produits</li>
+                    <li>Certifications (halal, bio, etc.)</li>
+                </ul>
+                
+                <p style="color: #4b5563; line-height: 1.6; margin-top: 20px;">
+                    Nous recherchons des partenaires fiables pour une collaboration à long terme et serions ravis d'établir une relation commerciale mutuellement bénéfique.<br/>
+                    Cordialement,
+                </p>
+                
+                <div style="margin-top: 20px;">
+                    <p style="margin: 0; color: #1a4d2e; font-weight: 600;">L'équipe Halal Foods</p>
+                    <p style="margin: 5px 0 0 0; color: #6b7280; font-size: 14px;">Service Achats / Procurement Department</p>
+                </div>
+            </div>
+            
+            <!-- Separator -->
+            <div style="border-top: 3px double #cbd5e1; margin: 40px 0;"></div>
+            
+            <!-- English Version -->
+            <div>
+                <h2 style="color: #1a4d2e; margin-bottom: 15px;">Dear ${vendor.vendorName},</h2>
+                
+                <p style="color: #4b5563; line-height: 1.6; margin-bottom: 15px;">
+                    We are <strong>Halal Foods</strong>, a premium food wholesaler based in Paris, specializing in high-quality halal products.
+                    With over <strong>600 product references</strong> and <strong>100+ trusted suppliers</strong>, we serve hundreds of clients across France.
+                </p>
+                
+                <p style="color: #4b5563; line-height: 1.6; margin-bottom: 15px;">
+                    We are interested in exploring a partnership with your company and kindly request your best quotation for the products detailed in the attached document.
+                </p>
+                
+                <div style="background-color: #dbeafe; border-left: 4px solid #3b82f6; padding: 15px; margin: 20px 0; border-radius: 4px;">
+                    <p style="margin: 0; color: #1e40af; font-weight: 600;">
+                        📋 RFQ Number: ${rfqData.rfqNumber}<br/>
+                        📅 Quotation Due Date: ${new Date(rfqData.quotationDueDate).toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' })}<br/>
+                        🚚 Requested Delivery: ${new Date(rfqData.deliveryBy).toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' })}
+                    </p>
+                </div>
+                
+                <p style="color: #4b5563; line-height: 1.6; margin-bottom: 15px;">
+                    Please include in your quotation:
+                </p>
+                <ul style="color: #4b5563; line-height: 1.8;">
+                    <li>Unit and total prices</li>
+                    <li>Delivery terms and conditions</li>
+                    <li>Payment terms</li>
+                    <li>Product availability</li>
+                    <li>Certifications (halal, organic, etc.)</li>
+                </ul>
+                
+                <p style="color: #4b5563; line-height: 1.6; margin-top: 20px;">
+                    We are looking for reliable partners for long-term collaboration and would be delighted to establish a mutually beneficial business relationship.<br/>
+                    Best regards,
+                </p>
+                
+                <div style="margin-top: 20px;">
+                    <p style="margin: 0; color: #1a4d2e; font-weight: 600;">The Halal Foods Team</p>
+                    <p style="margin: 5px 0 0 0; color: #6b7280; font-size: 14px;">Procurement Department</p>
+                </div>
+            </div>
+        </div>
+    `;
+
+    const bodyText = `
+NEW PARTNERSHIP OPPORTUNITY
+OPPORTUNITÉ DE PARTENARIAT
+
+Dear / Bonjour ${vendor.vendorName},
+
+We are Halal Foods, a premium food wholesaler based in Paris, specializing in high-quality halal products.
+Nous sommes Halal Foods, un grossiste alimentaire premium basé à Paris, spécialisé dans les produits halal de haute qualité.
+
+With 600+ product references and 100+ trusted suppliers.
+Avec plus de 600 références produits et 100+ fournisseurs de confiance.
+
+RFQ Number / Numéro: ${rfqData.rfqNumber}
+Due Date / Date limite: ${new Date(rfqData.quotationDueDate).toLocaleDateString('en-GB')}
+Delivery / Livraison: ${new Date(rfqData.deliveryBy).toLocaleDateString('en-GB')}
+
+Please refer to the attached PDF for complete details.
+Veuillez consulter le PDF ci-joint pour les détails complets.
+
+${rfqData.customMessage ? `\n${rfqData.customMessage}\n` : ''}
+
+We look forward to establishing a mutually beneficial partnership.
+Nous sommes impatients d'établir un partenariat mutuellement bénéfique.
+
+Best regards / Cordialement,
+The Halal Foods Team / L'équipe Halal Foods
+Procurement Department / Service Achats
+
+---
+HALAL FOODS - Trusted Quality Since Generations
+600+ Products • 100+ Suppliers • Est. Since Generations
+
+Contact: contact@halalfoods.fr | +33 1 XX XX XX XX
+Paris, France | www.halalfoods.fr
+    `;
+
+    return {
+        subject,
+        bodyHtml: enhanceEmailHTML(bodyHtml, rfqData),
+        bodyText
+    };
 }
 
 /**

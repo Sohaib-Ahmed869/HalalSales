@@ -4,6 +4,7 @@ const SalesOrder = require("../models/SalesOrder");
 const Quotation = require("../models/Quotation");
 const Payment = require("../models/payment");
 const Customer = require("../models/Customer");
+const CreditNote = require("../models/CreditNotes");
 const mongoose = require("mongoose");
 
 // Get customer sales report with invoices and period comparison
@@ -101,6 +102,18 @@ exports.getCustomerSalesReport = async (req, res) => {
             },
         ]);
 
+        const customerCreditNotes = await CreditNote.aggregate([
+            { $match: invoiceFilter }, // Same date filter as invoices
+            {
+                $group: {
+                    _id: "$CardCode",
+                    totalCreditNotes: { $sum: "$DocTotal" },
+                    creditNoteCount: { $count: {} },
+                    creditNoteNumbers: { $push: "$DocNum" },
+                },
+            },
+        ]);
+
         // NEW: Get last invoice date for ALL customers (regardless of date range)
         const allLastInvoices = await Invoice.aggregate([
             {
@@ -120,8 +133,8 @@ exports.getCustomerSalesReport = async (req, res) => {
             allLastInvoices.map(li => [li._id, li.lastInvoiceDate])
         );
 
-        // Get COMPARISON period data if dates provided
         let comparisonSalesMap = new Map();
+        let comparisonCreditNotesMap = new Map();
         if (comparisonStartDate && comparisonEndDate) {
             const comparisonFilter = {
                 DocDate: {
@@ -145,8 +158,23 @@ exports.getCustomerSalesReport = async (req, res) => {
                 },
             ]);
 
+            // Get comparison credit notes
+            const comparisonCreditNotes = await CreditNote.aggregate([
+                { $match: comparisonFilter },
+                {
+                    $group: {
+                        _id: "$CardCode",
+                        totalCreditNotes: { $sum: "$DocTotal" },
+                        creditNoteCount: { $count: {} },
+                    },
+                },
+            ]);
+
             comparisonSalesMap = new Map(
                 comparisonSales.map(cs => [cs._id, cs])
+            );
+            comparisonCreditNotesMap = new Map(
+                comparisonCreditNotes.map(cn => [cn._id, cn])
             );
         }
 
@@ -188,20 +216,38 @@ exports.getCustomerSalesReport = async (req, res) => {
         const salesMap = new Map(customerSales.map(cs => [cs.cardCode, cs]));
         const salesOrderMap = new Map(salesOrders.map(so => [so._id, so]));
         const quotationMap = new Map(quotations.map(q => [q._id, q]));
+        const creditNotesMap = new Map(customerCreditNotes.map(cn => [cn._id, cn]));
 
         // NEW: Build enriched data for ALL customers
         const enrichedData = Array.from(customerMap.values()).map(customer => {
             const sales = salesMap.get(customer.CardCode) || {};
             const so = salesOrderMap.get(customer.CardCode) || {};
             const qt = quotationMap.get(customer.CardCode) || {};
+            const creditNotes = creditNotesMap.get(customer.CardCode) || {};
             const comparison = comparisonSalesMap.get(customer.CardCode);
+            const comparisonCreditNotes = comparisonCreditNotesMap.get(customer.CardCode);
 
+            // Calculate net sales (invoices - credit notes)
+            const totalCreditNotesAmount = creditNotes.totalCreditNotes || 0;
+            const grossSales = sales.totalSales || 0;
+            const netSales = grossSales - totalCreditNotesAmount;
+
+            // Calculate period-over-period changes
             // Calculate period-over-period changes
             let periodComparison = null;
             if (comparison && sales.totalSales !== undefined) {
-                const salesChange = sales.totalSales - comparison.totalSales;
-                const salesChangePercent = comparison.totalSales !== 0
-                    ? parseFloat(((salesChange / comparison.totalSales) * 100).toFixed(2))
+                const prevCreditNotesAmount = comparisonCreditNotes?.totalCreditNotes || 0;
+                const prevGrossSales = comparison.totalSales;
+                const prevNetSales = prevGrossSales - prevCreditNotesAmount;
+
+                const salesChange = netSales - prevNetSales;
+                const salesChangePercent = prevNetSales !== 0
+                    ? parseFloat(((salesChange / prevNetSales) * 100).toFixed(2))
+                    : null;
+
+                const creditNotesChange = totalCreditNotesAmount - prevCreditNotesAmount;
+                const creditNotesChangePercent = prevCreditNotesAmount !== 0
+                    ? parseFloat(((creditNotesChange / prevCreditNotesAmount) * 100).toFixed(2))
                     : null;
 
                 const invoiceChange = (sales.totalInvoices || 0) - comparison.totalInvoices;
@@ -216,13 +262,18 @@ exports.getCustomerSalesReport = async (req, res) => {
 
                 periodComparison = {
                     previousPeriod: {
-                        totalSales: comparison.totalSales,
+                        grossSales: prevGrossSales,
+                        totalCreditNotes: prevCreditNotesAmount,
+                        netSales: prevNetSales,
                         totalInvoices: comparison.totalInvoices,
                         avgInvoiceValue: comparison.avgInvoiceValue,
+                        creditNoteCount: comparisonCreditNotes?.creditNoteCount || 0,
                     },
                     changes: {
                         salesChange,
                         salesChangePercent,
+                        creditNotesChange,
+                        creditNotesChangePercent,
                         invoiceChange,
                         invoiceChangePercent,
                         avgInvoiceChange,
@@ -234,7 +285,12 @@ exports.getCustomerSalesReport = async (req, res) => {
             return {
                 cardCode: customer.CardCode,
                 customerName: customer.CardName || sales.customerName || "Unknown",
-                totalSales: sales.totalSales || 0,
+                grossSales: grossSales,
+                totalCreditNotes: totalCreditNotesAmount,
+                creditNoteCount: creditNotes.creditNoteCount || 0,
+                creditNoteNumbers: creditNotes.creditNoteNumbers || [],
+                netSales: netSales,
+                totalSales: netSales, // For backward compatibility and sorting
                 totalInvoices: sales.totalInvoices || 0,
                 invoiceNumbers: sales.invoiceNumbers || [],
                 avgInvoiceValue: sales.avgInvoiceValue || 0,
@@ -259,7 +315,7 @@ exports.getCustomerSalesReport = async (req, res) => {
         });
 
         // NEW: Apply sorting
-        const validSortFields = ['totalSales', 'totalInvoices', 'avgInvoiceValue', 'lastInvoiceDate', 'customerName', 'cardCode'];
+        const validSortFields = ['totalSales', 'netSales', 'grossSales', 'totalCreditNotes', 'totalInvoices', 'avgInvoiceValue', 'lastInvoiceDate', 'customerName', 'cardCode'];
         const actualSortBy = validSortFields.includes(sortBy) ? sortBy : 'totalSales';
         const actualSortOrder = sortOrder === 'asc' ? 1 : -1;
 
@@ -742,6 +798,18 @@ exports.getSalesDashboardSummary = async (req, res) => {
             },
         ]);
 
+        // Get credit notes summary
+        const creditNotesSummary = await CreditNote.aggregate([
+            { $match: dateFilter },
+            {
+                $group: {
+                    _id: null,
+                    totalCreditNotes: { $sum: "$DocTotal" },
+                    creditNoteCount: { $count: {} },
+                },
+            },
+        ]);
+
         // Get sales orders summary
         const salesOrderSummary = await SalesOrder.aggregate([
             { $match: dateFilter },
@@ -784,12 +852,25 @@ exports.getSalesDashboardSummary = async (req, res) => {
             },
         ]);
 
+        const creditNotesData = creditNotesSummary[0] || {
+            totalCreditNotes: 0,
+            creditNoteCount: 0,
+        };
+
+        const invoiceData = invoiceSummary[0] || {
+            totalSales: 0,
+            totalInvoices: 0,
+            avgInvoiceValue: 0,
+            uniqueCustomers: 0,
+        };
+
         const summary = {
-            invoices: invoiceSummary[0] || {
-                totalSales: 0,
-                totalInvoices: 0,
-                avgInvoiceValue: 0,
-                uniqueCustomers: 0,
+            invoices: {
+                ...invoiceData,
+                grossSales: invoiceData.totalSales,
+                totalCreditNotes: creditNotesData.totalCreditNotes,
+                creditNoteCount: creditNotesData.creditNoteCount,
+                netSales: invoiceData.totalSales - creditNotesData.totalCreditNotes,
             },
             salesOrders: salesOrderSummary[0] || {
                 totalOrderValue: 0,
