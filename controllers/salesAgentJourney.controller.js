@@ -79,7 +79,7 @@ const salesAgentJourneyController = {
         customerCodes.length > 0
           ? Invoice.find({
             CardCode: { $in: customerCodes },
-            CreationDate: { $gte: start, $lte: end },
+            DocDate: { $gte: start, $lte: end },
           }).lean()
           : [],
 
@@ -87,7 +87,7 @@ const salesAgentJourneyController = {
         customerCodes.length > 0
           ? SalesOrder.find({
             CardCode: { $in: customerCodes },
-            CreationDate: { $gte: start, $lte: end },
+            DocDate: { $gte: start, $lte: end },
           }).lean()
           : [],
 
@@ -95,7 +95,7 @@ const salesAgentJourneyController = {
         customerCodes.length > 0
           ? require("../models/CreditNotes").find({
             CardCode: { $in: customerCodes },
-            CreationDate: { $gte: start, $lte: end },
+            DocDate: { $gte: start, $lte: end },
           }).lean()
           : [],
       ]);
@@ -337,7 +337,7 @@ const salesAgentJourneyController = {
         endDate,
         status,
         customerCode,
-        sortBy = "CreationDate",
+        sortBy = "DocDate",
         sortDirection = -1,
         export: isExport = false,
       } = req.query;
@@ -382,7 +382,7 @@ const salesAgentJourneyController = {
       // Build query using customer codes
       const query = {
         CardCode: { $in: customerCodes },
-        CreationDate: { $gte: start, $lte: end },
+        DocDate: { $gte: start, $lte: end },
       };
 
       // Add additional filters
@@ -428,7 +428,7 @@ const salesAgentJourneyController = {
       // Calculate conversion rate (quotations that became orders)
       const convertedQuotations = await Invoice.countDocuments({
         CardCode: { $in: customerCodes },
-        CreationDate: { $gte: start, $lte: end },
+        DocDate: { $gte: start, $lte: end },
         BaseType: 23, // SAP object type for quotations
       });
 
@@ -560,7 +560,7 @@ const salesAgentJourneyController = {
       if (startDate && endDate) {
         hasDateFilter = true;
         dateFilter = {
-          CreationDate: {
+          DocDate: {
             $gte: new Date(startDate),
             $lte: new Date(endDate),
           },
@@ -665,11 +665,11 @@ const salesAgentJourneyController = {
               ...(isExport === "true" || isExport === true ? {} : dateFilter),
             },
           },
-          { $sort: { CreationDate: -1 } },
+          { $sort: { DocDate: -1 } },
           {
             $group: {
               _id: "$CardCode",
-              latestInvoiceDate: { $first: "$CreationDate" },
+              latestInvoiceDate: { $first: "$DocDate" },
             },
           },
         ]),
@@ -956,7 +956,7 @@ const salesAgentJourneyController = {
         endDate,
         status,
         customerCode,
-        sortBy = "CreationDate",
+        sortBy = "DocDate",
         sortDirection = -1,
         export: isExport = false, // Add export parameter
       } = req.query;
@@ -1000,7 +1000,7 @@ const salesAgentJourneyController = {
       // Build query using assigned customer codes
       const query = {
         CardCode: { $in: customerCodes },
-        CreationDate: { $gte: start, $lte: end },
+        DocDate: { $gte: start, $lte: end },
       };
 
       // Add status filter if provided
@@ -1124,7 +1124,7 @@ const salesAgentJourneyController = {
         customerCodes.length > 0
           ? await Invoice.find({
             CardCode: { $in: customerCodes },
-            CreationDate: { $gte: start, $lte: end },
+            DocDate: { $gte: start, $lte: end },
           })
           : [];
 
@@ -1182,7 +1182,7 @@ const salesAgentJourneyController = {
 
       // Add sales data to the groups
       salesData.forEach((sale) => {
-        const saleDate = new Date(sale.CreationDate);
+        const saleDate = new Date(sale.DocDate);
         let key;
 
         switch (groupBy) {
@@ -1419,7 +1419,7 @@ const salesAgentJourneyController = {
               _id: "$CardCode",
               totalSpent: { $sum: "$DocTotal" },
               invoiceCount: { $sum: 1 },
-              lastOrderDate: { $max: "$CreationDate" },
+              lastOrderDate: { $max: "$DocDate" },
             },
           },
           {
@@ -1460,7 +1460,7 @@ const salesAgentJourneyController = {
               _id: "$CardCode",
               totalSpent: { $sum: "$DocTotal" },
               invoiceCount: { $sum: 1 },
-              lastOrderDate: { $max: "$CreationDate" },
+              lastOrderDate: { $max: "$DocDate" },
             },
           },
           { $sort: { lastOrderDate: -1 } },
@@ -1550,7 +1550,7 @@ const salesAgentJourneyController = {
         endDate,
         status,
         customerCode,
-        sortBy = "CreationDate",
+        sortBy = "DocDate",
         sortDirection = -1,
         export: isExport = false, // Add export parameter
       } = req.query;
@@ -1596,7 +1596,7 @@ const salesAgentJourneyController = {
       // Build query using customer codes
       const query = {
         CardCode: { $in: customerCodes },
-        CreationDate: { $gte: start, $lte: end },
+        DocDate: { $gte: start, $lte: end },
       };
 
       // Add additional filters
@@ -1771,7 +1771,7 @@ const salesAgentJourneyController = {
       // Base query for reuse
       const baseQuery = {
         CardCode: { $in: customerCodes },
-        CreationDate: { $gte: start, $lte: end },
+        DocDate: { $gte: start, $lte: end },
       };
 
       // Run aggregations in parallel
@@ -1842,8 +1842,8 @@ const salesAgentJourneyController = {
           {
             $group: {
               _id: {
-                year: { $year: "$CreationDate" },
-                month: { $month: "$CreationDate" },
+                year: { $year: "$DocDate" },
+                month: { $month: "$DocDate" },
               },
               count: { $sum: 1 },
               total: { $sum: "$DocTotal" },
@@ -1858,8 +1858,8 @@ const salesAgentJourneyController = {
           {
             $group: {
               _id: {
-                year: { $year: "$CreationDate" },
-                month: { $month: "$CreationDate" },
+                year: { $year: "$DocDate" },
+                month: { $month: "$DocDate" },
               },
               count: { $sum: 1 },
               total: { $sum: "$DocTotal" },
@@ -1874,8 +1874,8 @@ const salesAgentJourneyController = {
           {
             $group: {
               _id: {
-                year: { $year: "$CreationDate" },
-                month: { $month: "$CreationDate" },
+                year: { $year: "$DocDate" },
+                month: { $month: "$DocDate" },
               },
               count: { $sum: 1 },
               total: { $sum: "$DocTotal" },
@@ -2350,13 +2350,13 @@ async function calculateAgentTrends(agentId, agent, startDate, endDate) {
       customerCodes.length > 0
         ? await Invoice.find({
           CardCode: { $in: customerCodes },
-          CreationDate: { $gte: startDate, $lte: endDate },
+          DocDate: { $gte: startDate, $lte: endDate },
         }).lean()
         : [];
 
     // Process invoices
     invoices.forEach((invoice) => {
-      const date = new Date(invoice.CreationDate);
+      const date = new Date(invoice.DocDate);
       const dayKey = getDayKey(date);
       const weekKey = getWeekKey(date);
 
@@ -2465,7 +2465,7 @@ async function getTopCustomers(agentId, startDate, endDate) {
         {
           $match: {
             CardCode: { $in: customerCodes },
-            CreationDate: { $gte: startDate, $lte: endDate },
+            DocDate: { $gte: startDate, $lte: endDate },
           },
         },
         {
@@ -2473,7 +2473,7 @@ async function getTopCustomers(agentId, startDate, endDate) {
             _id: "$CardCode",
             invoiceTotal: { $sum: { $subtract: ["$DocTotal", { $ifNull: ["$VatSum", 0] }] } },
             invoiceCount: { $sum: 1 },
-            lastInvoiceDate: { $max: "$CreationDate" },
+            lastInvoiceDate: { $max: "$DocDate" },
             customerName: { $first: "$CardName" },
           },
         },
@@ -2484,7 +2484,7 @@ async function getTopCustomers(agentId, startDate, endDate) {
         {
           $match: {
             CardCode: { $in: customerCodes },
-            CreationDate: { $gte: startDate, $lte: endDate },
+            DocDate: { $gte: startDate, $lte: endDate },
           },
         },
         {
@@ -2570,9 +2570,9 @@ async function getRecentActivities(agentId, agent, startDate, endDate) {
       customerCodes.length > 0
         ? SalesOrder.find({
           CardCode: { $in: customerCodes },
-          CreationDate: { $gte: startDate, $lte: endDate },
+          DocDate: { $gte: startDate, $lte: endDate },
         })
-          .sort({ CreationDate: -1 })
+          .sort({ DocDate: -1 })
           .limit(5)
           .lean()
         : [],
@@ -2581,9 +2581,9 @@ async function getRecentActivities(agentId, agent, startDate, endDate) {
       customerCodes.length > 0
         ? Invoice.find({
           CardCode: { $in: customerCodes },
-          CreationDate: { $gte: startDate, $lte: endDate },
+          DocDate: { $gte: startDate, $lte: endDate },
         })
-          .sort({ CreationDate: -1 })
+          .sort({ DocDate: -1 })
           .limit(5)
           .lean()
         : [],
@@ -2608,7 +2608,7 @@ async function getRecentActivities(agentId, agent, startDate, endDate) {
     const activities = [
       ...recentOrders.map((order) => ({
         type: "order",
-        date: order.CreationDate,
+        date: order.DocDate,
         title: `Created sales order #${order.DocNum}`,
         customer: order.CardName,
         customerCode: order.CardCode,
@@ -2623,7 +2623,7 @@ async function getRecentActivities(agentId, agent, startDate, endDate) {
 
       ...recentInvoices.map((invoice) => ({
         type: "invoice",
-        date: invoice.CreationDate,
+        date: invoice.DocDate,
         title: `Generated invoice #${invoice.DocNum}`,
         customer: invoice.CardName,
         customerCode: invoice.CardCode,
