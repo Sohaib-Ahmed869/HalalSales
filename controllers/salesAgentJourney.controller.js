@@ -41,12 +41,34 @@ const salesAgentJourneyController = {
       }
 
       const customers = await Customer.find({ assignedTo: agentId }).lean();
-      const customerCodes = customers.map((c) => c.CardCode);
+      let customerCodes = customers.map((c) => c.CardCode);
+      console.log(`📊 Found ${customers.length} customers for agent ${agentId}`);
 
-      const customerTargets = await CustomerTarget.find({
+      //only keep active customers for client average calculation where cardcode starts with C
+      customerCodes = customers
+        .filter((c) => c.status === "active" && /^C\d+/i.test(c.CardCode))
+        .map((c) => c.CardCode);
+
+      console.log(start, end);
+      let customerTargets = await CustomerTarget.find({
         salesAgent: agentId,
-        status: "active",
+        cardCode: { $in: customerCodes },
       }).lean();
+
+      //for one customer, keep one customer target (latest)
+      const uniqueTargetsMap = {};
+      customerTargets.forEach((target) => {
+        if (
+          !uniqueTargetsMap[target.cardCode] ||
+          new Date(target.startDate) > new Date(uniqueTargetsMap[target.cardCode].startDate)
+        ) {
+          uniqueTargetsMap[target.cardCode] = target;
+        }
+      });
+
+      customerTargets = Object.values(uniqueTargetsMap);
+
+
 
       const totalClientAverages = customerTargets.reduce((sum, target) => {
         return sum + (target.clientExistingAverage || 0);
@@ -105,49 +127,35 @@ const salesAgentJourneyController = {
         0
       );
 
-      // Calculate net total sales (invoices minus credit notes, both without VAT)
+      // ✅ STEP 1: Calculate invoice total WITHOUT VAT (simple method)
       const invoiceTotal = invoices.reduce((sum, invoice) => {
-        if (invoice.VatSum && invoice.VatSum > 0) {
-          return sum + (invoice.DocTotal - invoice.VatSum);
-        }
-        if (invoice.VatPercent && invoice.VatPercent > 0) {
-          const vatMultiplier = 1 + invoice.VatPercent / 100;
-          return sum + invoice.DocTotal / vatMultiplier;
-        }
-        if (invoice.DocumentLines && invoice.DocumentLines.length > 0) {
-          const lineTotal = invoice.DocumentLines.reduce((lineSum, line) => {
-            return lineSum + (line.Quantity || 0) * (line.Price || 0);
-          }, 0);
-          return sum + lineTotal;
-        }
-        const defaultVatRate = 0.2;
-        const estimatedNetAmount = invoice.DocTotal / (1 + defaultVatRate);
-        return sum + estimatedNetAmount;
+        // Use VatSum directly from SAP (most reliable)
+        const docTotal = invoice.DocTotal || 0;
+        const vatSum = invoice.VatSum || 0;
+        return sum + (docTotal - vatSum);
       }, 0);
 
+      // ✅ STEP 2: Calculate credit note total WITHOUT VAT (simple method)
       const creditNoteTotal = creditNotes.reduce((sum, creditNote) => {
-        if (creditNote.VatSum && creditNote.VatSum > 0) {
-          return sum + (creditNote.DocTotal - creditNote.VatSum);
-        }
-        if (creditNote.VatPercent && creditNote.VatPercent > 0) {
-          const vatMultiplier = 1 + creditNote.VatPercent / 100;
-          return sum + creditNote.DocTotal / vatMultiplier;
-        }
-        if (creditNote.DocumentLines && creditNote.DocumentLines.length > 0) {
-          const lineTotal = creditNote.DocumentLines.reduce((lineSum, line) => {
-            return lineSum + (line.Quantity || 0) * (line.Price || 0);
-          }, 0);
-          return sum + lineTotal;
-        }
-        const defaultVatRate = 0.2;
-        const estimatedNetAmount = creditNote.DocTotal / (1 + defaultVatRate);
-        return sum + estimatedNetAmount;
+        // Use VatSum directly from SAP (most reliable)
+        const docTotal = creditNote.DocTotal || 0;
+        const vatSum = creditNote.VatSum || 0;
+        return sum + (docTotal - vatSum);
       }, 0);
 
+      // ✅ STEP 3: Calculate NET total sales (invoices - credit notes)
       const netTotalSales = invoiceTotal - creditNoteTotal;
 
-      // STEP 4: Now calculate commission eligible sales using net sales
+      // ✅ STEP 4: Calculate commission eligible sales
       const commissionEligibleSales = netTotalSales - totalClientAverages;
+
+      // 🔍 DEBUG LOGGING (remove after fixing)
+      console.log("💰 Sales Calculation:");
+      console.log("  Invoices:", invoices.length, "| Total (excl VAT):", invoiceTotal.toFixed(2));
+      console.log("  Credit Notes:", creditNotes.length, "| Total (excl VAT):", creditNoteTotal.toFixed(2));
+      console.log("  Net Sales:", netTotalSales.toFixed(2));
+      console.log("  Client Averages:", totalClientAverages.toFixed(2));
+      console.log("  Commission Eligible:", commissionEligibleSales.toFixed(2));
       // Calculate attendance metrics (4+ hours = half day, 7+ hours = full day)
       let totalWorkingDays = 0;
       let totalFullDays = 0;
