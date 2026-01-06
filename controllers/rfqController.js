@@ -109,17 +109,39 @@ exports.createRFQDraft = async (req, res) => {
         });
 
         // Add selected vendors to vendorsContacted list
+        // Add selected vendors to vendorsContacted list
         if (selectedVendorCodes && selectedVendorCodes.length > 0) {
+            // STEP 1: Separate vendor codes by type
+            // PDA supplier IDs are MongoDB ObjectIds (24-character hex strings)
+            // SAP/EMAIL vendor codes are shorter alphanumeric codes
+            const pdaSupplierIds = selectedVendorCodes.filter(code =>
+                /^[0-9a-fA-F]{24}$/.test(code) // MongoDB ObjectId format
+            );
+
+            const sapVendorCodes = selectedVendorCodes.filter(code =>
+                !/^[0-9a-fA-F]{24}$/.test(code) // Not MongoDB ObjectId format
+            );
+
+            console.log(`Fetching vendors: ${sapVendorCodes.length} SAP/EMAIL, ${pdaSupplierIds.length} PDA`);
+
+            // STEP 2: Fetch SAP/EMAIL vendors
             const vendors = await Vendor.find({
-                CardCode: { $in: selectedVendorCodes }
+                CardCode: { $in: sapVendorCodes }
             });
 
-            // Add PDA_Supplier model vendors if any
-            const PDA_Supplier = require('../models/PDA_Supplier');
-            const pdaSuppliers = await PDA_Supplier.find({
-                _id: { $in: selectedVendorCodes }
-            });
+            console.log(`Found ${vendors.length} SAP/EMAIL vendors`);
 
+            // STEP 3: Fetch PDA suppliers (only if there are valid ObjectIds)
+            let pdaSuppliers = [];
+            if (pdaSupplierIds.length > 0) {
+                const PDA_Supplier = require('../models/PDA_Supplier');
+                pdaSuppliers = await PDA_Supplier.find({
+                    _id: { $in: pdaSupplierIds }
+                });
+                console.log(`Found ${pdaSuppliers.length} PDA suppliers`);
+            }
+
+            // STEP 4: Convert PDA suppliers to vendor format
             const pdaSuppliersAsVendors = pdaSuppliers.map(s => ({
                 CardCode: s._id.toString(),
                 CardName: s.supplierName,
@@ -128,13 +150,18 @@ exports.createRFQDraft = async (req, res) => {
                 vendorSource: 'PDA_SCRAPER',
             }));
 
+            // STEP 5: Combine all vendors
             const allSelectedVendors = [...vendors, ...pdaSuppliersAsVendors];
 
+            console.log(`Total vendors to contact: ${allSelectedVendors.length}`);
+
+            // STEP 6: Add to RFQ
             rfq.vendorsContacted = allSelectedVendors.map(v => ({
                 vendorCode: v.CardCode,
                 vendorName: v.CardName,
                 email: v.email,
-                status: 'sent', // Will be updated when actually sent
+                status: 'draft', // Status will be 'sent' after actually sending
+                vendorSource: v.vendorSource || 'SAP', // Track source
             }));
 
             await rfq.save();
@@ -175,20 +202,35 @@ exports.sendRFQToVendors = async (req, res) => {
             });
         }
 
-        // Get vendor details
+        // STEP 1: Separate vendor codes by type (same as in createRFQDraft)
+        const pdaSupplierIds = vendorCodes.filter(code =>
+            /^[0-9a-fA-F]{24}$/.test(code) // MongoDB ObjectId format
+        );
+
+        const sapVendorCodes = vendorCodes.filter(code =>
+            !/^[0-9a-fA-F]{24}$/.test(code) // Not MongoDB ObjectId format
+        );
+
+        console.log(`Sending to: ${sapVendorCodes.length} SAP/EMAIL vendors, ${pdaSupplierIds.length} PDA suppliers`);
+
+        // STEP 2: Fetch SAP/EMAIL vendors
         const vendors = await Vendor.find({
-            CardCode: { $in: vendorCodes },
+            CardCode: { $in: sapVendorCodes },
         });
 
-        const PDA_Supplier = require('../models/PDA_Supplier');
-        const pdaSupplierIds = vendorCodes;
+        console.log(`Found ${vendors.length} SAP/EMAIL vendors`);
 
-        const pdaSuppliers = await PDA_Supplier.find({
-            _id: { $in: pdaSupplierIds }
-        });
+        // STEP 3: Fetch PDA suppliers (only if there are valid ObjectIds)
+        let pdaSuppliers = [];
+        if (pdaSupplierIds.length > 0) {
+            const PDA_Supplier = require('../models/PDA_Supplier');
+            pdaSuppliers = await PDA_Supplier.find({
+                _id: { $in: pdaSupplierIds }
+            });
+            console.log(`Found ${pdaSuppliers.length} PDA suppliers`);
+        }
 
-        console.log(`Found ${vendors.length} vendors and ${pdaSuppliers.length} PDA suppliers to send RFQ to.`, pdaSuppliers);
-
+        // STEP 4: Convert PDA suppliers to vendor format
         const pdaSuppliersAsVendors = pdaSuppliers.map(s => ({
             CardCode: s._id.toString(),
             CardName: s.supplierName,
@@ -197,7 +239,10 @@ exports.sendRFQToVendors = async (req, res) => {
             vendorSource: 'PDA_SCRAPER',
         }));
 
+        // STEP 5: Combine all vendors
         const allVendors = [...vendors, ...pdaSuppliersAsVendors];
+
+        console.log(`Total vendors to send to: ${allVendors.length} (${vendors.length} SAP/EMAIL + ${pdaSuppliers.length} PDA)`);
 
         // Generate PDF
         const pdfBuffer = await generateRFQPDF(rfq, 'en');
