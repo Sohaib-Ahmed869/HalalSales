@@ -159,6 +159,10 @@ mongoose
     process.exit(1);
   });
 
+app.get("/", (req, res) => {
+  res.send("This is the Halal Food Service API, all systems are operational and no call can be sent without authentication.");
+});
+
 
 // Routes
 app.use("/api/auth", authRoutes);
