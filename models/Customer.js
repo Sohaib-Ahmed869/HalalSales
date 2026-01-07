@@ -232,7 +232,7 @@ const CustomerSchema = new Schema({
     },
     geocodeSource: {
       type: String,
-      enum: ["nominatim", "google", "manual", "imported"],
+      enum: ["nominatim", "google", "manual", "imported","photon"],
       default: "nominatim",
     },
     displayName: {

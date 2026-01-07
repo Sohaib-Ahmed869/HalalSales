@@ -55,6 +55,7 @@ exports.getDocumentsByDateRange = async (req, res) => {
 
         const results = {
             invoices: [],
+            failedinvoices: [],
             orders: [],
             quotations: [],
             customers: [],
@@ -91,33 +92,102 @@ exports.getDocumentsByDateRange = async (req, res) => {
                 .select("DocEntry DocNum DocDate CardCode CardName DocTotal Address DocumentStatus")
                 .lean();
 
+            console.log(invoices.length + " invoices found in date range");
+
             const amounts = invoices.map((inv) => inv.DocTotal || 0).filter((a) => a > 0);
             if (amounts.length > 0) {
                 results.stats.invoiceAmountRange.min = Math.min(...amounts);
                 results.stats.invoiceAmountRange.max = Math.max(...amounts);
             }
 
+            let invoicesWithCoords = 0;
+            let invoicesGeocoded = 0;
+            let invoicesFailed = 0;
+
             for (const invoice of invoices) {
-                const customer = customerMap.get(invoice.CardCode);
-                if (customer && customer.coordinates) {
+                let customer = customerMap.get(invoice.CardCode);
+                let coordinates = customer?.coordinates;
+
+                // If customer has no coordinates, try to geocode NOW
+                if (!coordinates && customer) {
+                    const addr = customer.address || customer.deliveryAddress;
+                    if (addr) {
+                        try {
+                            const geocoded = await geocodeWithPhoton(customer);
+                            if (geocoded) {
+                                coordinates = {
+                                    lat: geocoded.lat,
+                                    lng: geocoded.lng,
+                                };
+
+                                // Save to database for future use
+                                await Customer.updateOne(
+                                    { CardCode: customer.CardCode },
+                                    {
+                                        $set: {
+                                            coordinates: {
+                                                lat: geocoded.lat,
+                                                lng: geocoded.lng,
+                                                geocodedAt: new Date(),
+                                                geocodeSource: "photon-ondemand",
+                                                displayName: geocoded.displayName,
+                                            },
+                                        },
+                                    }
+                                );
+
+                                // Update customerMap so other invoices for same customer don't re-geocode
+                                customer.coordinates = coordinates;
+                                customerMap.set(customer.CardCode, customer);
+
+                                invoicesGeocoded++;
+                            }
+                        } catch (err) {
+                            console.error(`Failed to geocode ${customer.CardCode}:`, err.message);
+                        }
+                    }
+                }
+
+                // Now add invoice if we have coordinates
+                if (coordinates) {
                     results.invoices.push({
                         type: "invoice",
                         docEntry: invoice.DocEntry,
                         docNum: invoice.DocNum,
                         docDate: invoice.DocDate,
                         cardCode: invoice.CardCode,
-                        cardName: invoice.CardName || customer.CardName,
+                        cardName: invoice.CardName || customer?.CardName || invoice.CardName,
                         amount: invoice.DocTotal || 0,
                         status: invoice.DocumentStatus,
-                        coordinates: customer.coordinates,
+                        coordinates: coordinates,
                         color: getInvoiceColor(
                             invoice.DocTotal || 0,
                             results.stats.invoiceAmountRange.min,
                             results.stats.invoiceAmountRange.max
                         ),
                     });
+                    invoicesWithCoords++;
+                } else {
+                    results.failedinvoices.push({
+                        cardCode: invoice.CardCode,
+                        cardName: invoice.CardName,
+                    });
+                    invoicesFailed++;
                 }
             }
+
+            console.log(`Invoices with existing coordinates: ${invoicesWithCoords - invoicesGeocoded}`);
+            console.log(`Invoices geocoded on-the-fly: ${invoicesGeocoded}`);
+            console.log(`Invoices without coordinates (excluded): ${invoicesFailed}`);
+
+            //give the number of invoices with card code as c9999
+            const c9999Invoices = results.failedinvoices.filter(inv => inv.cardCode === "C9999").length;
+            console.log(`Number of invoices with card code C9999: ${c9999Invoices}`);
+
+            //just print the failed invoices other than c9999
+            const otherFailedInvoices = results.failedinvoices.filter(inv => inv.cardCode !== "C9999");
+            console.log(`Failed invoices other than C9999: ${JSON.stringify(otherFailedInvoices)}`);
+
             results.stats.totalInvoices = results.invoices.length;
         }
 
@@ -126,10 +196,12 @@ exports.getDocumentsByDateRange = async (req, res) => {
         // Fetch Sales Orders
         if (type === "all" || type === "order") {
             orders = await SalesOrder.find({
-                StartDeliveryDate: { $gte: start, $lte: end },
+                DocDate: { $gte: start, $lte: end },
             })
                 .select("DocEntry DocNum DocDate StartDeliveryDate DocDueDate CardCode CardName DocTotal DocumentStatus")
                 .lean();
+
+            console.log(orders.length + " orders found in date range");
 
             for (const order of orders) {
                 const customer = customerMap.get(order.CardCode);
@@ -425,17 +497,18 @@ exports.getCustomerDocumentsForMap = async (req, res) => {
 const axios = require("axios");
 
 /**
- * Batch geocode customers
+ * Batch geocode customers with improved retry logic
  * 
  * Query params:
  * - limit: number of customers to process (default: 1000)
  * - provider: "photon" (free/fast) or "google" (paid/accurate)
+ * - retries: number of retries for failed requests (default: 2)
  * 
- * Example: POST /api/map/geocoding/batch?limit=1000&provider=photon
+ * Example: POST /api/map/geocoding/batch?limit=1000&provider=photon&retries=2
  */
 exports.batchGeocodeCustomers = async (req, res) => {
     try {
-        const { limit = 100000, provider = "photon" } = req.query;
+        const { limit = 100000, provider = "photon", retries = 2 } = req.query;
         const startTime = Date.now();
 
         // Validate provider
@@ -454,7 +527,7 @@ exports.batchGeocodeCustomers = async (req, res) => {
             });
         }
 
-        // Find customers without coordinates
+        // Find customers without coordinates OR with invalid coordinates
         const customersToGeocode = await Customer.find({
             $or: [
                 { coordinates: { $exists: false } },
@@ -468,11 +541,18 @@ exports.batchGeocodeCustomers = async (req, res) => {
                         { "address.city": { $exists: true, $ne: "" } },
                         { "deliveryAddress.street": { $exists: true, $ne: "" } },
                         { "deliveryAddress.city": { $exists: true, $ne: "" } },
+                        {
+                            addresses: {
+                                $exists: true,
+                                $type: "array",
+                                $ne: []
+                            }
+                        },
                     ],
                 },
             ],
         })
-            .select("CardCode CardName address deliveryAddress")
+            .select("CardCode CardName address deliveryAddress addresses")
             .limit(parseInt(limit))
             .lean();
 
@@ -486,66 +566,103 @@ exports.batchGeocodeCustomers = async (req, res) => {
             });
         }
 
-        // Select geocoding function based on provider
-        const geocodeFunction = provider === "google" ? geocodeWithGoogle : geocodeWithPhoton;
-        const BATCH_SIZE = provider === "google" ? 10 : 5; // Google allows more parallel
-        const DELAY_MS = provider === "google" ? 100 : 200;
+        // Configuration based on provider
+        const config = provider === "google"
+            ? { batchSize: 10, delayMs: 100, timeoutMs: 10000 }  // Google: faster, higher limits
+            : { batchSize: 3, delayMs: 500, timeoutMs: 15000 };  // Photon: slower, conservative
 
-        const results = { success: 0, failed: 0, errors: [] };
+        const results = {
+            success: 0,
+            failed: 0,
+            timeout: 0,
+            retried: 0,
+            errors: []
+        };
         const bulkOps = [];
 
-        // Process in parallel batches
-        for (let i = 0; i < customersToGeocode.length; i += BATCH_SIZE) {
-            const batch = customersToGeocode.slice(i, i + BATCH_SIZE);
+        // Geocoding function with retry logic
+        const geocodeWithRetry = async (customer, attempt = 1) => {
+            try {
+                const geocodeFunc = provider === "google" ? geocodeWithGoogle : geocodeWithPhoton;
+                const result = await geocodeFunc(customer, config.timeoutMs);
+                return result;
+            } catch (error) {
+                if (error.message.includes('timeout') && attempt <= retries) {
+                    console.log(`Retry ${attempt}/${retries} for ${customer.CardCode}`);
+                    await sleep(1000 * attempt); // Exponential backoff
+                    results.retried++;
+                    return geocodeWithRetry(customer, attempt + 1);
+                }
+                throw error;
+            }
+        };
 
-            const batchResults = await Promise.allSettled(
-                batch.map(customer => geocodeFunction(customer))
-            );
+        // Process in sequential batches (not parallel) to avoid overwhelming API
+        for (let i = 0; i < customersToGeocode.length; i += config.batchSize) {
+            const batch = customersToGeocode.slice(i, i + config.batchSize);
 
-            batchResults.forEach((result, index) => {
-                const customer = batch[index];
-                if (result.status === "fulfilled" && result.value) {
-                    bulkOps.push({
-                        updateOne: {
-                            filter: { CardCode: customer.CardCode },
-                            update: {
-                                $set: {
-                                    coordinates: {
-                                        lat: result.value.lat,
-                                        lng: result.value.lng,
-                                        geocodedAt: new Date(),
-                                        geocodeSource: provider,
-                                        displayName: result.value.displayName,
+            // Process batch sequentially (one at a time)
+            for (const customer of batch) {
+                try {
+                    const geocoded = await geocodeWithRetry(customer);
+
+                    if (geocoded) {
+                        bulkOps.push({
+                            updateOne: {
+                                filter: { CardCode: customer.CardCode },
+                                update: {
+                                    $set: {
+                                        coordinates: {
+                                            lat: geocoded.lat,
+                                            lng: geocoded.lng,
+                                            geocodedAt: new Date(),
+                                            geocodeSource: provider,
+                                            displayName: geocoded.displayName,
+                                        },
                                     },
                                 },
                             },
-                        },
-                    });
-                    results.success++;
-                } else {
-                    results.failed++;
-                    if (result.reason) {
-                        results.errors.push({ CardCode: customer.CardCode, error: result.reason.message });
+                        });
+                        results.success++;
+                    } else {
+                        results.failed++;
+                        results.errors.push({
+                            CardCode: customer.CardCode,
+                            error: "No result returned"
+                        });
                     }
+                } catch (error) {
+                    if (error.message.includes('timeout')) {
+                        results.timeout++;
+                    } else {
+                        results.failed++;
+                    }
+                    results.errors.push({
+                        CardCode: customer.CardCode,
+                        error: error.message
+                    });
                 }
-            });
 
-            // Delay between batches
-            if (i + BATCH_SIZE < customersToGeocode.length) {
-                await sleep(DELAY_MS);
+                // Delay between each request
+                await sleep(config.delayMs);
             }
 
-            // Log progress every 100
-            if ((i + BATCH_SIZE) % 100 === 0) {
-                console.log(`Progress: ${Math.min(i + BATCH_SIZE, customersToGeocode.length)}/${customersToGeocode.length} (${results.success} success)`);
+            // Save progress after each batch
+            if (bulkOps.length > 0 && bulkOps.length % 50 === 0) {
+                await Customer.bulkWrite(bulkOps.splice(0, 50), { ordered: false });
+                console.log(`Saved batch progress: ${results.success} successful`);
+            }
+
+            // Log progress
+            const processed = Math.min(i + config.batchSize, customersToGeocode.length);
+            if (processed % 20 === 0 || processed === customersToGeocode.length) {
+                console.log(`Progress: ${processed}/${customersToGeocode.length} (${results.success} success, ${results.failed + results.timeout} failed)`);
             }
         }
 
-        // Bulk update all at once
-        let updateCount = 0;
+        // Save remaining operations
         if (bulkOps.length > 0) {
-            const bulkResult = await Customer.bulkWrite(bulkOps, { ordered: false });
-            updateCount = bulkResult.modifiedCount || bulkOps.length;
+            await Customer.bulkWrite(bulkOps, { ordered: false });
         }
 
         const totalTime = Date.now() - startTime;
@@ -558,10 +675,11 @@ exports.batchGeocodeCustomers = async (req, res) => {
                 total: customersToGeocode.length,
                 success: results.success,
                 failed: results.failed,
-                updated: updateCount,
+                timeout: results.timeout,
+                retried: results.retried,
                 processingTimeMs: totalTime,
-                customersPerSecond: Math.round((customersToGeocode.length / totalTime) * 1000),
-                sampleErrors: results.errors.slice(0, 10),
+                averageTimePerCustomer: Math.round(totalTime / customersToGeocode.length),
+                sampleErrors: results.errors.slice(0, 20),
             },
         });
     } catch (error) {
@@ -577,16 +695,15 @@ exports.batchGeocodeCustomers = async (req, res) => {
 // ============================================
 // PHOTON (Free - Komoot/OpenStreetMap)
 // ============================================
-async function geocodeWithPhoton(customer) {
+async function geocodeWithPhoton(customer, timeoutMs = 15000) {
     const address = buildAddressString(customer);
     if (!address) return null;
 
     try {
         const response = await axios.get("https://photon.komoot.io/api/", {
             params: { q: address, limit: 1, lang: "en" },
-            timeout: 8000,
+            timeout: timeoutMs,
         });
-
         if (response.data?.features?.length > 0) {
             const feature = response.data.features[0];
             const [lng, lat] = feature.geometry.coordinates;
@@ -606,7 +723,7 @@ async function geocodeWithPhoton(customer) {
 // ============================================
 // GOOGLE MAPS (Paid - More Accurate)
 // ============================================
-async function geocodeWithGoogle(customer) {
+async function geocodeWithGoogle(customer, timeoutMs = 10000) {
     const address = buildAddressString(customer);
     if (!address) return null;
 
@@ -618,7 +735,7 @@ async function geocodeWithGoogle(customer) {
                     address: address,
                     key: process.env.GOOGLE_MAPS_API_KEY,
                 },
-                timeout: 8000,
+                timeout: timeoutMs,
             }
         );
 
@@ -646,11 +763,26 @@ async function geocodeWithGoogle(customer) {
 // HELPERS
 // ============================================
 function buildAddressString(customer) {
-    const address = (customer.address?.street || customer.address?.city)
-        ? customer.address
-        : customer.deliveryAddress;
+    // Priority 1: Try address object
+    let address = customer.deliveryAddress;
 
-    if (!address) return null;
+    // Priority 2: Try deliveryAddress
+    if (!address?.street && !address?.city) {
+        console.log(`Using deliveryAddress for ${customer.CardCode}`, !address);
+        address = customer.deliveryAddress;
+    }
+
+    // Priority 3: Try addresses array (take first valid one)
+    if (!address?.street && !address?.city && customer.addresses?.length > 0) {
+        // Prefer delivery address type, then billing, then first available
+        address = customer.addresses.find(a => a.addressType === "bo_ShipTo") ||
+            customer.addresses.find(a => a.addressType === "bo_BillTo") ||
+            customer.addresses[0];
+    }
+
+    if (!address || (!address.street && !address.city)) {
+        return null;
+    }
 
     const parts = [
         address.street,
@@ -835,6 +967,102 @@ exports.searchCustomersForMap = async (req, res) => {
         res.status(500).json({
             success: false,
             message: "Error searching customers",
+            error: error.message,
+        });
+    }
+};
+
+/**
+ * Fix customers with empty coordinate objects
+ * POST /api/map/geocoding/fix-empty-coordinates
+ */
+exports.fixEmptyCoordinates = async (req, res) => {
+    try {
+        const { provider = "photon" } = req.query;
+
+        // Find customers with coordinates object but no lat
+        const customersWithEmptyCoords = await Customer.find({
+            coordinates: { $exists: true },
+            "coordinates.lat": { $exists: false }
+        })
+            .select("CardCode CardName address deliveryAddress addresses coordinates")
+            .lean();
+
+        console.log(`Found ${customersWithEmptyCoords.length} customers with empty coordinates`);
+
+        if (customersWithEmptyCoords.length === 0) {
+            return res.json({
+                success: true,
+                message: "No customers with empty coordinates",
+                results: { total: 0 }
+            });
+        }
+
+        const geocodeFunction = provider === "google" ? geocodeWithGoogle : geocodeWithPhoton;
+        const results = { success: 0, failed: 0, errors: [] };
+        const bulkOps = [];
+
+        for (const customer of customersWithEmptyCoords) {
+            try {
+                const geocoded = await geocodeFunction(customer);
+
+                if (geocoded) {
+                    bulkOps.push({
+                        updateOne: {
+                            filter: { CardCode: customer.CardCode },
+                            update: {
+                                $set: {
+                                    coordinates: {
+                                        lat: geocoded.lat,
+                                        lng: geocoded.lng,
+                                        geocodedAt: new Date(),
+                                        geocodeSource: provider,
+                                        displayName: geocoded.displayName,
+                                    },
+                                },
+                            },
+                        },
+                    });
+                    results.success++;
+                } else {
+                    results.failed++;
+                    results.errors.push({
+                        CardCode: customer.CardCode,
+                        CardName: customer.CardName,
+                        error: "Could not geocode address"
+                    });
+                }
+            } catch (err) {
+                results.failed++;
+                results.errors.push({
+                    CardCode: customer.CardCode,
+                    error: err.message
+                });
+            }
+
+            await sleep(200); // Rate limit
+        }
+
+        // Bulk update
+        if (bulkOps.length > 0) {
+            await Customer.bulkWrite(bulkOps, { ordered: false });
+        }
+
+        res.json({
+            success: true,
+            message: `Fixed ${results.success} of ${customersWithEmptyCoords.length} customers`,
+            results: {
+                total: customersWithEmptyCoords.length,
+                success: results.success,
+                failed: results.failed,
+                sampleErrors: results.errors.slice(0, 10),
+            },
+        });
+    } catch (error) {
+        console.error("Error fixing empty coordinates:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error fixing coordinates",
             error: error.message,
         });
     }

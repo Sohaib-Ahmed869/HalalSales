@@ -3,12 +3,78 @@ const Restaurant = require('../models/Restaurant');
 const RestaurantAssignment = require('../models/RestaurantAssignment');
 const Task = require('../models/Task');
 const User = require('../models/User');
+const Lead = require('../models/Lead');
 const Notification = require('../models/Notification');
 const axios = require('axios');
 
 const SCRAPER_BASE_URL = process.env.SCRAPER_BASE_URL || 'http://localhost:3000';
 
 const restaurantScraperController = {
+  /**
+   * Get single restaurant details by ID
+   */
+  getRestaurantById: async (req, res) => {
+    try {
+      const { restaurantId } = req.params;
+
+      const restaurant = await Restaurant.findById(restaurantId).lean();
+
+      if (!restaurant) {
+        return res.status(404).json({
+          success: false,
+          message: 'Restaurant not found'
+        });
+      }
+
+      // Calculate additional metrics
+      const menuItemsWithPrices = (restaurant.menu_items || []).filter(
+        item => item.price !== 'N/A' && item.price.match(/\d+[,\.]\d+/)
+      );
+
+      const priceRange = {
+        min: 0,
+        max: 0,
+        average: 0
+      };
+
+      if (menuItemsWithPrices.length > 0) {
+        const prices = menuItemsWithPrices.map(item => {
+          const priceMatch = item.price.match(/(\d+)[,\.](\d+)/);
+          return priceMatch ? parseFloat(`${priceMatch[1]}.${priceMatch[2]}`) : 0;
+        }).filter(price => price > 0);
+
+        if (prices.length > 0) {
+          priceRange.min = Math.min(...prices);
+          priceRange.max = Math.max(...prices);
+          priceRange.average = prices.reduce((sum, price) => sum + price, 0) / prices.length;
+        }
+      }
+
+      res.json({
+        success: true,
+        data: {
+          ...restaurant,
+          analytics: {
+            menuItemsWithPrices: menuItemsWithPrices.length,
+            priceRange,
+            contactCompleteness: {
+              email: restaurant.contact_info?.email !== 'N/A',
+              phone: restaurant.contact_info?.phone !== 'N/A',
+              address: restaurant.contact_info?.address !== 'N/A'
+            }
+          }
+        }
+      });
+
+    } catch (error) {
+      console.error('Error fetching restaurant by ID:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Error fetching restaurant details',
+        error: error.message
+      });
+    }
+  },
   /**
  * Clean malformed postal codes
  */
@@ -88,6 +154,7 @@ const restaurantScraperController = {
 
       const assignments = [];
       const errors = [];
+      const createdLeads = []; // NEW: Track created leads
 
       for (const restaurantId of restaurantIds) {
         try {
@@ -113,6 +180,44 @@ const restaurantScraperController = {
           });
           await assignment.save();
 
+          // NEW: Create Lead from restaurant data (only for halal-food-sales)
+          let createdLead = null;
+
+          console.log('Creating lead for restaurant:', restaurant.name);
+          const Lead = require('../models/Lead');
+
+          const leadData = {
+            fullName: restaurant.name,
+            email: restaurant.contact_info?.email !== 'N/A' ? restaurant.contact_info?.email : '',
+            phoneNumber: restaurant.contact_info?.phone !== 'N/A' ? restaurant.contact_info?.phone : '',
+            company: restaurant.name,
+            status: 'new',
+            tags: ['warm'], // Default tag for restaurant leads
+            assignedTo: agentId,
+            sourceType: 'restaurant_scraping',
+            relatedRestaurant: restaurantId,
+            relatedRestaurantAssignment: assignment._id,
+            restaurantData: {
+              name: restaurant.name,
+              postalCode: restaurant.postal_code,
+              menuItemsCount: restaurant.menu_items_count,
+              contactInfo: {
+                email: restaurant.contact_info?.email || 'N/A',
+                phone: restaurant.contact_info?.phone || 'N/A',
+                address: restaurant.contact_info?.address || 'N/A',
+              },
+              url: restaurant.url,
+            },
+            notes: `Auto-created from restaurant scraping on ${new Date().toISOString()}\nPostal Code: ${restaurant.postal_code}\nMenu Items: ${restaurant.menu_items_count}`,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+
+          createdLead = new Lead(leadData);
+          await createdLead.save();
+          createdLeads.push(createdLead);
+
+
           // Create task for agent
           const task = new Task({
             title: `Follow up with ${restaurant.name}`,
@@ -122,9 +227,17 @@ const restaurantScraperController = {
             createdBy: assignedBy,
             priority,
             dueDate: new Date(Date.now() + 24 * 60 * 60 * 1000), // Tomorrow
-            relatedRestaurant: assignment._id
+            relatedRestaurant: assignment._id,
+            leadId: createdLead ? createdLead._id : null, // NEW: Link task to lead
+            isLeadTask: createdLead ? true : false, // NEW: Mark as lead task
           });
           await task.save();
+
+          // NEW: Add task to lead's tasks array
+          if (createdLead) {
+            createdLead.tasks.push(task._id);
+            await createdLead.save();
+          }
 
           // Create notification
           const notification = new Notification({
@@ -150,6 +263,7 @@ const restaurantScraperController = {
           assigned: assignments.length,
           errors: errors.length,
           assignments,
+          createdLeads: createdLeads.length, // NEW: Return count of created leads
           errors
         }
       });

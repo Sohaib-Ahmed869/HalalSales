@@ -53,6 +53,32 @@ const LeadSchema = new Schema({
     },
   ],
 
+  // NEW: Restaurant integration fields
+  sourceType: {
+    type: String,
+    enum: ["manual", "import", "restaurant_scraping"],
+    default: "manual",
+  },
+  relatedRestaurant: {
+    type: Schema.Types.ObjectId,
+    ref: "Restaurant",
+  },
+  relatedRestaurantAssignment: {
+    type: Schema.Types.ObjectId,
+    ref: "RestaurantAssignment",
+  },
+  restaurantData: {
+    name: String,
+    postalCode: String,
+    menuItemsCount: Number,
+    contactInfo: {
+      email: String,
+      phone: String,
+      address: String,
+    },
+    url: String,
+  },
+
   // Timeline tracking
   createdAt: {
     type: Date,

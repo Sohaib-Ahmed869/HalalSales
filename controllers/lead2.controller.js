@@ -9,7 +9,6 @@ const path = require("path");
 const XLSX = require("xlsx");
 
 // Get all leads with filtering
-// Get all leads with filtering
 exports.getLeads = async (req, res) => {
   try {
     const {
@@ -17,8 +16,9 @@ exports.getLeads = async (req, res) => {
       tags,
       assignedTo,
       search,
-      followUpStartDate,  // ADD THIS
-      followUpEndDate     // ADD THIS
+      followUpStartDate,
+      followUpEndDate,
+      sourceType, // NEW: Filter by source type
     } = req.query;
 
     const query = {};
@@ -28,6 +28,11 @@ exports.getLeads = async (req, res) => {
     if (tags) {
       const tagArray = Array.isArray(tags) ? tags : [tags];
       query.tags = { $in: tagArray };
+    }
+
+    // NEW: Filter by source type
+    if (sourceType) {
+      query.sourceType = sourceType;
     }
 
     // Role-based filtering
@@ -49,17 +54,18 @@ exports.getLeads = async (req, res) => {
         { company: { $regex: search, $options: "i" } },
         { phoneNumber: { $regex: search, $options: "i" } },
         { notes: { $regex: search, $options: "i" } },
+        { 'restaurantData.name': { $regex: search, $options: "i" } }, // NEW: Search restaurant name
+        { 'restaurantData.postalCode': { $regex: search, $options: "i" } }, // NEW: Search postal code
       ];
     }
 
-    // NEW: Add follow-up date range filter
+    // Follow-up date range filter
     if (followUpStartDate || followUpEndDate) {
       query.nextFollowUp = {};
       if (followUpStartDate) {
         query.nextFollowUp.$gte = new Date(followUpStartDate);
       }
       if (followUpEndDate) {
-        // Include the end of the day
         const endOfDay = new Date(followUpEndDate);
         endOfDay.setHours(23, 59, 59, 999);
         query.nextFollowUp.$lte = endOfDay;
@@ -69,6 +75,8 @@ exports.getLeads = async (req, res) => {
     const leads = await Lead.find(query)
       .populate("assignedTo", "firstName lastName email")
       .populate("tasks")
+      .populate("relatedRestaurant") // NEW: Populate restaurant data
+      .populate("relatedRestaurantAssignment") // NEW: Populate assignment data
       .sort({ createdAt: -1 });
 
     res.json({
@@ -86,7 +94,6 @@ exports.getLeads = async (req, res) => {
 };
 
 // Get paginated leads
-// Get paginated leads
 exports.getLeadsPaginated = async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
@@ -100,8 +107,9 @@ exports.getLeadsPaginated = async (req, res) => {
       search,
       sortBy,
       sortOrder,
-      followUpStartDate,  // ADD THIS
-      followUpEndDate     // ADD THIS
+      followUpStartDate,
+      followUpEndDate,
+      sourceType, // NEW: Filter by source type
     } = req.query;
 
     const query = {};
@@ -111,6 +119,11 @@ exports.getLeadsPaginated = async (req, res) => {
     if (tags) {
       const tagArray = Array.isArray(tags) ? tags : [tags];
       query.tags = { $in: tagArray };
+    }
+
+    // NEW: Filter by source type
+    if (sourceType) {
+      query.sourceType = sourceType;
     }
 
     if (req.user.role === "sales_agent") {
@@ -130,17 +143,18 @@ exports.getLeadsPaginated = async (req, res) => {
         { company: { $regex: search, $options: "i" } },
         { phoneNumber: { $regex: search, $options: "i" } },
         { notes: { $regex: search, $options: "i" } },
+        { 'restaurantData.name': { $regex: search, $options: "i" } }, // NEW: Search restaurant name
+        { 'restaurantData.postalCode': { $regex: search, $options: "i" } }, // NEW: Search postal code
       ];
     }
 
-    // NEW: Add follow-up date range filter
+    // Follow-up date range filter
     if (followUpStartDate || followUpEndDate) {
       query.nextFollowUp = {};
       if (followUpStartDate) {
         query.nextFollowUp.$gte = new Date(followUpStartDate);
       }
       if (followUpEndDate) {
-        // Include the end of the day
         const endOfDay = new Date(followUpEndDate);
         endOfDay.setHours(23, 59, 59, 999);
         query.nextFollowUp.$lte = endOfDay;
@@ -159,6 +173,8 @@ exports.getLeadsPaginated = async (req, res) => {
     const leads = await Lead.find(query)
       .populate("assignedTo", "firstName lastName email")
       .populate("tasks")
+      .populate("relatedRestaurant") // NEW: Populate restaurant data
+      .populate("relatedRestaurantAssignment") // NEW: Populate assignment data
       .sort(sortOptions)
       .skip(skip)
       .limit(limit);
@@ -212,6 +228,9 @@ exports.getLeadStats = async (req, res) => {
           lostLeads: { $sum: { $cond: [{ $eq: ["$status", "lost"] }, 1, 0] } },
           unassignedLeads: {
             $sum: { $cond: [{ $not: ["$assignedTo"] }, 1, 0] },
+          },
+          restaurantLeads: { // NEW
+            $sum: { $cond: [{ $eq: ["$sourceType", "restaurant_scraping"] }, 1, 0] },
           },
         },
       },
@@ -270,7 +289,9 @@ exports.getLeadById = async (req, res) => {
 
     const lead = await Lead.findOne(query)
       .populate("assignedTo", "firstName lastName email")
-      .populate("tasks");
+      .populate("tasks")
+      .populate("relatedRestaurant") // NEW
+      .populate("relatedRestaurantAssignment"); // NEW
 
     if (!lead) {
       return res.status(404).json({

@@ -15,6 +15,8 @@ router.get("/customer/:cardCode", mapController.getCustomerDocumentsForMap);
 // Search customers for map selection (autocomplete)
 // GET /api/map/search-customers?search=term
 router.get("/search-customers", mapController.searchCustomersForMap);
+
+router.post("/geocoding/fix-empty-coordinates", mapController.fixEmptyCoordinates);
 // Get customers geocoded outside France
 router.get("/geocoding/outside-france", mapController.getCustomersOutsideFrance);
 
