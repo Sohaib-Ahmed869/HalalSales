@@ -751,6 +751,11 @@ async function sendWhatsAppMessage(to, body) {
  * Generate RFQ WhatsApp message
  */
 function generateRFQWhatsAppMessage(rfq, vendor) {
+    const isFirstContact = !rfq.vendorsContacted.some(v => v.vendorCode === vendor.CardCode && v.whatsappSentDate);
+    const greeting = isFirstContact ?
+        `Hello ${vendor.CardName},\n\n` :
+        ``;
+
     const message = `${greeting}` +
         `We are sending you a Request for Quotation:\n\n` +
         `📋 RFQ Number: ${rfq.rfqNumber}\n` +
