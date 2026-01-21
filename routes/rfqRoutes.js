@@ -57,6 +57,15 @@ router.get('/gmail/get-token', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+
+/**
+ * @route   GET /api/rfq/items
+ * @desc    Get inventory items for form selection
+ * @access  Private
+ * @query   { search: string, limit: number }
+ */
+router.get('/items', rfqController.getInventoryItems);
+
 /**
  * @route   POST /api/rfq/:rfqId/vendor-response
  * @desc    Record vendor quotation response

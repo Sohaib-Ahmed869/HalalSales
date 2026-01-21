@@ -217,44 +217,22 @@ const restaurantScraperController = {
           await createdLead.save();
           createdLeads.push(createdLead);
 
-
-          // Create task for agent
-          const task = new Task({
-            title: `Follow up with ${restaurant.name}`,
-            description: `Contact restaurant: ${restaurant.name}\nPostal Code: ${restaurant.postal_code}\nMenu Items: ${restaurant.menu_items_count}`,
-            type: 'restaurant_follow_up',
-            assignedTo: agentId,
-            createdBy: assignedBy,
-            priority,
-            dueDate: new Date(Date.now() + 24 * 60 * 60 * 1000), // Tomorrow
-            relatedRestaurant: assignment._id,
-            leadId: createdLead ? createdLead._id : null, // NEW: Link task to lead
-            isLeadTask: createdLead ? true : false, // NEW: Mark as lead task
-          });
-          await task.save();
-
-          // NEW: Add task to lead's tasks array
-          if (createdLead) {
-            createdLead.tasks.push(task._id);
-            await createdLead.save();
-          }
-
-          // Create notification
-          const notification = new Notification({
-            recipient: agentId,
-            sender: assignedBy,
-            type: 'restaurant_assigned',
-            title: 'New Restaurant Assigned',
-            message: `You have been assigned to follow up with ${restaurant.name}`,
-            relatedTask: task._id,
-            relatedRestaurant: assignment._id
-          });
-          await notification.save();
-
           assignments.push(assignment);
         } catch (error) {
           errors.push({ restaurantId, error: error.message });
         }
+      }
+
+      if (assignments.length > 0) {
+        const notification = new Notification({
+          recipient: agentId,
+          sender: assignedBy,
+          type: 'restaurant_assigned',
+          title: 'New Restaurants Assigned',
+          message: `${assignments.length} restaurant${assignments.length > 1 ? 's have' : ' has'} been assigned to you. Please go to the Leads Management screen to view and manage these leads.`,
+          relatedRestaurant: assignments[0]._id
+        });
+        await notification.save();
       }
 
       res.json({
@@ -1000,30 +978,9 @@ const restaurantScraperController = {
             });
             await assignment.save();
 
-            // Create task
-            const task = new Task({
-              title: `Follow up with ${restaurant.name}`,
-              description: `Contact restaurant: ${restaurant.name}\nPostal Code: ${restaurant.postal_code}\nMenu Items: ${restaurant.menu_items_count}`,
-              type: 'restaurant_follow_up',
-              assignedTo: agent._id,
-              createdBy: assignedBy,
-              priority: 'medium',
-              dueDate: new Date(Date.now() + 24 * 60 * 60 * 1000),
-              relatedRestaurant: assignment._id
-            });
-            await task.save();
 
-            // Create notification
-            const notification = new Notification({
-              recipient: agent._id,
-              sender: assignedBy,
-              type: 'restaurant_assigned',
-              title: 'New Restaurant Auto-Assigned',
-              message: `You have been automatically assigned to follow up with ${restaurant.name}`,
-              relatedTask: task._id,
-              relatedRestaurant: assignment._id
-            });
-            await notification.save();
+
+
 
             newAssignments.push({
               restaurantId: restaurant._id,
@@ -1049,6 +1006,21 @@ const restaurantScraperController = {
             agentName: `${agent.firstName} ${agent.lastName}`,
             error: error.message
           });
+        }
+      }
+
+      //send notification to each agent about new assignments
+      for (const result of assignmentResults) {
+        if (result.assignedCount > 0) {
+          const notification = new Notification({
+            recipient: result.agentId,
+            sender: assignedBy,
+            type: 'restaurant_assigned',
+            title: 'New Restaurants Auto-Assigned',
+            message: `${result.assignedCount} restaurant${result.assignedCount > 1 ? 's have' : ' has'} been auto-assigned to you. Please go to the Leads Management screen to view and manage these leads.`,
+            relatedRestaurant: result.assignments[0].restaurantId
+          });
+          await notification.save();
         }
       }
 

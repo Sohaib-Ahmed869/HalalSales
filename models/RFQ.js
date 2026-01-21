@@ -88,59 +88,81 @@ const RFQSchema = new Schema({
     otherNotes: String,
 
     // ⚠️ SINGLE DEFINITION OF vendorsContacted - THIS IS THE ONLY ONE
-    vendorsContacted: [{
-        vendorCode: String,
-        vendorName: String,
-        email: String,
-        status: {
-            type: String,
-            enum: ['pending', 'draft', 'sent', 'opened', 'responded', 'declined'],
-            default: 'draft',
-        },
-        sentDate: Date,
-        openedDate: Date,
-        responseDate: Date,
-        quotedPrice: Number,
-        quotedTotal: Number,
-        deliveryDate: Date,
-        paymentTerms: String,
-        notes: String,
-        emailMessageId: String,
-
-        // RAW EMAIL CONTENT - CRITICAL FOR STORING FULL EMAILS
-        rawEmailContent: {
-            subject: String,
-            body: String,
-            htmlBody: String,
-            receivedDate: Date,
-            attachments: [String]
-        },
-
-        // QUOTATION DATA - PARSED INFORMATION
-        quotationData: {
-            quotedItems: [{
-                productName: String,
-                quantity: Number,
-                unit: String,
-                unitPrice: Number,
-                totalPrice: Number,
-                currency: String,
-            }],
-            totalQuotedAmount: Number,
-            currency: String,
-            deliveryTimeInDays: Number,
+    vendorsContacted: [
+        {
+            vendorCode: String,
+            vendorName: String,
+            email: String,
+            phone: String, // ADD THIS if not present
+            status: {
+                type: String,
+                enum: ['draft', 'sent', 'opened', 'responded', 'declined'],
+                default: 'draft',
+            },
+            vendorSource: {
+                type: String,
+                enum: ['SAP', 'EMAIL', 'PDA_SCRAPER'],
+                default: 'SAP'
+            },
+            sentDate: Date,
+            responseDate: Date,
+            quotedPrice: Number,
+            quotedTotal: Number,
             deliveryDate: Date,
             paymentTerms: String,
-            validityPeriod: String,
-            additionalNotes: String,
-            isValidQuotation: Boolean,
-            parsingStatus: {
-                type: String,
-                enum: ['success', 'partial', 'failed'],
-                default: 'failed'
+            notes: String,
+
+            // WhatsApp fields
+            whatsappMessageId: String,
+            whatsappSentDate: Date,
+            whatsappHistory: [{
+                direction: {
+                    type: String,
+                    enum: ['incoming', 'outgoing']
+                },
+                message: String,
+                timestamp: Date,
+                messageSid: String,
+                mediaUrl: String,
+                parsedData: Object
+            }],
+            rawWhatsAppContent: {
+                body: String,
+                receivedDate: Date,
+                messageSid: String,
+                mediaUrl: String
+            },
+
+            // Email fields
+            emailMessageId: String,
+            quotationData: {
+                quotedItems: [{
+                    productName: String,
+                    quantity: Number,
+                    unit: String,
+                    unitPrice: Number,
+                    totalPrice: Number,
+                    currency: String
+                }],
+                totalQuotedAmount: Number,
+                currency: String,
+                deliveryTimeInDays: Number,
+                paymentTerms: String,
+                validityPeriod: String,
+                additionalNotes: String,
+                isValidQuotation: Boolean,
+                parsingStatus: String
+            },
+            rawEmailContent: {
+                subject: String,
+                body: String,
+                htmlBody: String,
+                receivedDate: Date,
+                attachments: [String],
+                pdfContent: String
             }
         }
-    }],
+    ],
 
     // Status Tracking
     status: {

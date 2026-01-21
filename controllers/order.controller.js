@@ -2134,6 +2134,355 @@ exports.updateOrderNotes = async (req, res) => {
   }
 };
 
+/**
+ * Sync RECENT sales orders from SAP to local DB (last 2 days)
+ * POST /api/orders/sync-recent-from-sap
+ * 
+ * This fills in missing orders from the last 2 days that might have been missed
+ * - Only fetches orders from last 2 days (fast)
+ * - Creates missing orders with ALL fields
+ * - Updates existing open orders
+ */
+exports.syncRecentOrdersFromSAP = async (req, res) => {
+  try {
+    console.log("\n" + "=".repeat(80));
+    console.log("STARTING RECENT SAP ORDER SYNC (Last 2 Days)");
+    console.log("=".repeat(80));
+
+    const { loginToSAP } = require("../utils/sapB1Integration");
+    const axios = require("axios");
+
+    // Login to SAP
+    const sessionId = await loginToSAP();
+    const headers = {
+      "Content-Type": "application/json",
+      Cookie: `B1SESSION=${sessionId}`,
+    };
+
+    const results = {
+      totalInSAP: 0,
+      ordersCreated: 0,
+      ordersUpdated: 0,
+      alreadySynced: 0,
+      errors: [],
+      createdOrders: [],
+      updatedOrders: [],
+    };
+
+    // Calculate date filter (last 2 days)
+    const twoDaysAgo = new Date();
+    twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+    twoDaysAgo.setHours(0, 0, 0, 0);
+    const dateFilter = twoDaysAgo.toISOString().split('T')[0]; // Format: YYYY-MM-DD
+
+    console.log(`📅 Filtering orders from: ${dateFilter} onwards`);
+
+    // Fetch recent orders from SAP (last 2 days)
+    let recentSAPOrders = [];
+    let nextLink = `${SAP_CONFIG.serviceLayerUrl}/Orders?$filter=DocDate ge '${dateFilter}'&$orderby=DocNum desc`;
+
+    console.log("📥 Fetching recent orders from SAP...");
+
+    while (nextLink) {
+      try {
+        const response = await axios.get(nextLink, { headers });
+        const batch = response.data.value;
+
+        recentSAPOrders.push(...batch);
+        console.log(`   Fetched ${batch.length} orders (Total: ${recentSAPOrders.length})`);
+
+        nextLink = response.data["odata.nextLink"];
+        if (nextLink && nextLink.startsWith("Orders")) {
+          nextLink = `${SAP_CONFIG.serviceLayerUrl}/${nextLink}`;
+        }
+
+        // Rate limiting
+        if (nextLink) {
+          await new Promise(resolve => setTimeout(resolve, 200));
+        }
+      } catch (error) {
+        console.error("❌ Error fetching batch:", error.message);
+        break;
+      }
+    }
+
+    results.totalInSAP = recentSAPOrders.length;
+    console.log(`\n✅ Total recent orders in SAP: ${results.totalInSAP}`);
+
+    if (results.totalInSAP === 0) {
+      console.log("ℹ️ No recent orders found in SAP for the last 2 days");
+      return res.status(200).json({
+        success: true,
+        message: "No recent orders found in SAP",
+        data: results,
+      });
+    }
+
+    // Get DocNums from recent SAP orders
+    const sapDocNums = recentSAPOrders.map(order => order.DocNum);
+
+    // Check which ones exist in local DB
+    const existingOrders = await SalesOrder.find(
+      { DocNum: { $in: sapDocNums } },
+      { DocNum: 1, DocumentStatus: 1, DocTotal: 1, VatSum: 1 }
+    ).lean();
+
+    const existingDocNumsMap = new Map();
+    existingOrders.forEach(order => {
+      existingDocNumsMap.set(order.DocNum, order);
+    });
+
+    console.log(`📊 Found ${existingOrders.length} of these orders already in local DB`);
+    console.log(`🆕 ${results.totalInSAP - existingOrders.length} orders are missing and will be created`);
+
+    // Process each SAP order
+    for (const sapOrder of recentSAPOrders) {
+      try {
+        const localOrder = existingDocNumsMap.get(sapOrder.DocNum);
+
+        if (!localOrder) {
+          // ✅ ORDER DOESN'T EXIST - CREATE IT WITH ALL FIELDS
+          console.log(`🆕 Creating order DocNum: ${sapOrder.DocNum}`);
+
+          const newOrder = new SalesOrder({
+            // Core identifiers
+            DocEntry: sapOrder.DocEntry,
+            DocNum: sapOrder.DocNum,
+            DocType: sapOrder.DocObjectCode || "dDocument_Items",
+
+            // Customer info
+            CardCode: sapOrder.CardCode,
+            CardName: sapOrder.CardName,
+
+            // Addresses
+            Address: sapOrder.Address,
+            Address2: sapOrder.Address2,
+            ShipToCode: sapOrder.ShipToCode,
+            PayToCode: sapOrder.PayToCode,
+
+            // ⭐ ALL DATE FIELDS (CRITICAL)
+            DocDate: sapOrder.DocDate,
+            DocDueDate: sapOrder.DocDueDate,
+            TaxDate: sapOrder.TaxDate,
+            CreationDate: sapOrder.CreationDate || new Date(),
+            UpdateDate: new Date(),
+            StartDeliveryDate: sapOrder.StartDeliveryDate, // ✅ Added
+            RequriedDate: sapOrder.RequriedDate,          // ✅ Added
+            CancelDate: sapOrder.CancelDate,              // ✅ Added
+
+            // Financial data
+            DocTotal: sapOrder.DocTotal,
+            DocCurrency: sapOrder.DocCurrency || "EUR",
+            VatSum: sapOrder.VatSum,
+            DiscountPercent: sapOrder.DiscountPercent,
+            TotalDiscount: sapOrder.TotalDiscount,
+            RoundingDiffAmount: sapOrder.RoundingDiffAmount,
+
+            // Pricing
+            PriceList: sapOrder.PriceList,
+
+            // Payment terms
+            PaymentGroupCode: sapOrder.PaymentGroupCode,
+            PaymentMethod: sapOrder.PaymentMethod,
+            CashDiscountDateOffset: sapOrder.CashDiscountDateOffset,
+
+            // Sales info
+            SalesPersonCode: sapOrder.SalesPersonCode,
+
+            // Shipping
+            TransportationCode: sapOrder.TransportationCode,
+
+            // Document lines with ALL fields
+            DocumentLines: sapOrder.DocumentLines?.map((line, index) => {
+              const originalPrice = line.Price || line.UnitPrice || 0;
+              const discountPercent = parseFloat(line.DiscountPercent) || 0;
+              const effectivePrice = discountPercent >= 100 ? 0 : originalPrice * (1 - discountPercent / 100);
+
+              return {
+                LineNum: line.LineNum || index,
+                ItemCode: line.ItemCode,
+                ItemDescription: line.ItemDescription,
+                Quantity: line.Quantity,
+
+                // Pricing details
+                Price: effectivePrice,
+                OriginalPrice: originalPrice,
+                DiscountPercent: discountPercent,
+                PriceAfterVAT: line.PriceAfterVAT,
+                UnitPrice: line.UnitPrice,
+                Currency: line.Currency || sapOrder.DocCurrency,
+                LineTotal: line.LineTotal,
+                TotalFrgn: line.TotalFrgn,
+
+                // Tax
+                VatGroup: line.VatGroup,
+                TaxCode: line.TaxCode,
+                TaxRate: line.TaxRate,
+
+                // Warehouse & inventory
+                WarehouseCode: line.WarehouseCode,
+                UseBaseUnits: line.UseBaseUnits,
+
+                // Reference
+                PriceList: line.PriceList || sapOrder.PriceList,
+                MeasureUnit: line.MeasureUnit,
+                UnitsOfMeasurment: line.UnitsOfMeasurment,
+
+                // Delivery dates
+                ShipDate: line.ShipDate,
+                RequiredDate: line.RequiredDate,
+
+                // Other
+                FreeText: line.FreeText,
+                CostingCode: line.CostingCode,
+                ProjectCode: line.ProjectCode,
+              };
+            }) || [],
+
+            // Document status
+            DocumentStatus: sapOrder.DocumentStatus || "bost_Open",
+            Cancelled: sapOrder.Cancelled || "N",
+
+            // SAP sync tracking
+            SyncedWithSAP: true,
+            SAPDocEntry: sapOrder.DocEntry,
+            LocalStatus: "Synced",
+            ImportDate: new Date(),
+            ImportSource: "Recent_Sync_API",
+
+            // Notes & comments
+            Comments: sapOrder.Comments || "",
+            JournalMemo: sapOrder.JournalMemo || "",
+            U_Notes: sapOrder.Comments || "",
+            Remarks: sapOrder.Remarks || "",
+
+            // User fields (if any)
+            U_Source: sapOrder.U_Source,
+            U_Priority: sapOrder.U_Priority,
+            U_DeliveryInstructions: sapOrder.U_DeliveryInstructions,
+          });
+
+          await newOrder.save();
+          results.ordersCreated++;
+          results.createdOrders.push({
+            DocNum: sapOrder.DocNum,
+            CardCode: sapOrder.CardCode,
+            DocTotal: sapOrder.DocTotal,
+            DocDate: sapOrder.DocDate,
+          });
+
+          console.log(`   ✅ Created order ${sapOrder.DocNum} (${sapOrder.CardCode})`);
+
+        } else if (localOrder.DocumentStatus === "bost_Open" || localOrder.DocumentStatus === "O") {
+          // ✅ ORDER EXISTS AND IS OPEN - CHECK IF UPDATE NEEDED
+          const localTotal = parseFloat(localOrder.DocTotal) || 0;
+          const sapTotal = parseFloat(sapOrder.DocTotal) || 0;
+          const localVat = parseFloat(localOrder.VatSum) || 0;
+          const sapVat = parseFloat(sapOrder.VatSum) || 0;
+
+          const hasChanges = Math.abs(localTotal - sapTotal) > 0.01 || Math.abs(localVat - sapVat) > 0.01;
+
+          if (hasChanges) {
+            console.log(`🔄 Updating order DocNum: ${sapOrder.DocNum} (Total changed: ${localTotal} → ${sapTotal})`);
+
+            const orderToUpdate = await SalesOrder.findOne({ DocNum: sapOrder.DocNum });
+
+            // Update all fields
+            orderToUpdate.DocTotal = sapOrder.DocTotal;
+            orderToUpdate.VatSum = sapOrder.VatSum;
+            orderToUpdate.DiscountPercent = sapOrder.DiscountPercent;
+            orderToUpdate.TotalDiscount = sapOrder.TotalDiscount;
+
+            // Update dates
+            orderToUpdate.DocDate = sapOrder.DocDate;
+            orderToUpdate.DocDueDate = sapOrder.DocDueDate;
+            orderToUpdate.StartDeliveryDate = sapOrder.StartDeliveryDate;
+            orderToUpdate.RequriedDate = sapOrder.RequriedDate;
+
+            // Update comments
+            orderToUpdate.U_Notes = sapOrder.Comments || orderToUpdate.U_Notes;
+            orderToUpdate.Comments = sapOrder.Comments;
+            orderToUpdate.Remarks = sapOrder.Remarks || sapOrder.Comments;
+
+            // Update document lines
+            orderToUpdate.DocumentLines = sapOrder.DocumentLines?.map((line, index) => {
+              const originalPrice = line.Price || line.UnitPrice || 0;
+              const discountPercent = parseFloat(line.DiscountPercent) || 0;
+              const effectivePrice = discountPercent >= 100 ? 0 : originalPrice * (1 - discountPercent / 100);
+
+              return {
+                LineNum: line.LineNum || index,
+                ItemCode: line.ItemCode,
+                ItemDescription: line.ItemDescription,
+                Quantity: line.Quantity,
+                Price: effectivePrice,
+                OriginalPrice: originalPrice,
+                DiscountPercent: discountPercent,
+                PriceAfterVAT: line.PriceAfterVAT,
+                Currency: line.Currency || sapOrder.DocCurrency,
+                LineTotal: line.LineTotal,
+                VatGroup: line.VatGroup,
+                PriceList: line.PriceList || sapOrder.PriceList,
+                WarehouseCode: line.WarehouseCode,
+                ShipDate: line.ShipDate,
+                RequiredDate: line.RequiredDate,
+              };
+            }) || [];
+
+            orderToUpdate.UpdateDate = new Date();
+
+            await orderToUpdate.save();
+            results.ordersUpdated++;
+            results.updatedOrders.push({
+              DocNum: sapOrder.DocNum,
+              oldTotal: localTotal,
+              newTotal: sapTotal,
+            });
+
+            console.log(`   ✅ Updated order ${sapOrder.DocNum}`);
+          } else {
+            results.alreadySynced++;
+          }
+        } else {
+          // Order exists but is closed - skip
+          results.alreadySynced++;
+        }
+
+      } catch (error) {
+        console.error(`❌ Error processing order ${sapOrder.DocNum}:`, error.message);
+        results.errors.push({
+          DocNum: sapOrder.DocNum,
+          error: error.message,
+        });
+      }
+    }
+
+    console.log("\n" + "=".repeat(80));
+    console.log("RECENT SAP ORDER SYNC COMPLETED");
+    console.log(`Date Range: ${dateFilter} to today`);
+    console.log(`Total in SAP: ${results.totalInSAP}`);
+    console.log(`Created: ${results.ordersCreated}`);
+    console.log(`Updated: ${results.ordersUpdated}`);
+    console.log(`Already Synced: ${results.alreadySynced}`);
+    console.log(`Errors: ${results.errors.length}`);
+    console.log("=".repeat(80) + "\n");
+
+    res.status(200).json({
+      success: true,
+      message: `Recent sync completed. Created ${results.ordersCreated}, Updated ${results.ordersUpdated}`,
+      data: results,
+    });
+
+  } catch (error) {
+    console.error("❌ Error in syncRecentOrdersFromSAP:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error syncing recent orders from SAP",
+      error: error.message,
+    });
+  }
+};
+
 exports.syncOrderStatusesFromSAP = async (req, res) => {
   try {
     console.log("\n" + "=".repeat(60));

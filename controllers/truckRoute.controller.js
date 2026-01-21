@@ -6,6 +6,65 @@ const Customer = require("../models/Customer");
 const Item = require("../models/item");
 
 /**
+ * Update truck capacity (manual override)
+ * PATCH /api/truck-routes/:routeId/capacity
+ * Body: { maxWeightKg: number }
+ */
+exports.updateTruckCapacity = async (req, res) => {
+    try {
+        const { routeId } = req.params;
+        const { maxWeightKg } = req.body;
+
+        if (!maxWeightKg || maxWeightKg < 100) {
+            return res.status(400).json({
+                success: false,
+                message: "maxWeightKg must be at least 100",
+            });
+        }
+
+        const route = await TruckRoute.findById(routeId);
+        if (!route) {
+            return res.status(404).json({
+                success: false,
+                message: "Route not found",
+            });
+        }
+
+        const oldCapacity = route.maxWeightKg || 1000;
+        route.maxWeightKg = maxWeightKg;
+
+        // Recalculate capacity percentage
+        route.capacityUsedPercent = route.totalWeightKg > 0
+            ? parseFloat(((route.totalWeightKg / maxWeightKg) * 100).toFixed(2))
+            : 0;
+
+        route.updatedAt = new Date();
+        await route.save();
+
+        console.log(`✅ Truck ${route.truckName} capacity updated: ${oldCapacity}kg → ${maxWeightKg}kg`);
+
+        res.json({
+            success: true,
+            message: "Truck capacity updated",
+            route: {
+                _id: route._id,
+                truckName: route.truckName,
+                maxWeightKg: route.maxWeightKg,
+                totalWeightKg: route.totalWeightKg,
+                capacityUsedPercent: route.capacityUsedPercent,
+            },
+        });
+    } catch (error) {
+        console.error("Error updating truck capacity:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error updating capacity",
+            error: error.message,
+        });
+    }
+};
+
+/**
  * Get all truck schedules (weekly templates)
  * These define which areas get deliveries on which days
  */

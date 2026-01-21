@@ -17,7 +17,8 @@ const {
     optimizeRoute,
     generateTruckRoute,
     autoFillAllTrucks,
-    getSingleRoute
+    getSingleRoute,
+    updateTruckCapacity
 } = require('../controllers/truckRoute.controller');
 
 router.get("/debug", debugRoutes);
@@ -36,7 +37,7 @@ router.get('/stats', getRouteStatistics);
 router.post('/:routeId/assign-order', assignOrderToTruck);
 router.delete('/:routeId/orders/:orderDocEntry', removeOrderFromTruck);
 router.put('/:routeId/reorder', reorderOrders);
-
+router.patch('/:routeId/capacity', updateTruckCapacity);
 // Route Management - Update route status
 router.patch('/:routeId/status', updateRouteStatus);
 router.post('/:routeId/optimize', optimizeRoute);

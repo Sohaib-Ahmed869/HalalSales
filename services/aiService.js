@@ -5,7 +5,53 @@ const config = require('../config/config')
 const openai = new OpenAI({
     apiKey: process.env.NEW_OPENAI_API_KEY,
 });
+/**
+ * Generate AI response to vendor question
+ */
+async function generateQuestionResponse(question, rfqContext) {
+    const prompt = `You are a professional customer service representative for Halal Foods, a premium food wholesaler.
 
+RFQ Context:
+- RFQ Number: ${rfqContext.rfqNumber}
+- Items: ${rfqContext.items.map(i => `${i.productName} (${i.quantity} ${i.unit})`).join(', ')}
+- Quotation Due: ${new Date(rfqContext.quotationDueDate).toLocaleDateString()}
+- Delivery By: ${new Date(rfqContext.deliveryBy).toLocaleDateString()}
+- Payment Terms: ${rfqContext.paymentTerms}
+
+Vendor Name: ${rfqContext.vendorName}
+Vendor Question: "${question}"
+
+Generate a helpful, professional WhatsApp response (max 300 characters) that:
+1. Addresses their specific question
+2. Provides relevant RFQ information
+3. Is warm and professional
+4. Ends with "Best regards, Halal Foods Team"
+
+Return only the message text, no JSON.`;
+
+    try {
+        const completion = await openai.chat.completions.create({
+            model: config.openai.model || 'gpt-4o',
+            messages: [
+                {
+                    role: 'system',
+                    content: 'You are a professional customer service representative. Keep responses concise and helpful.'
+                },
+                {
+                    role: 'user',
+                    content: prompt
+                }
+            ],
+            temperature: 0.7,
+            max_tokens: 200
+        });
+
+        return completion.choices[0].message.content.trim();
+    } catch (error) {
+        console.error('Error generating question response:', error);
+        return `Thank you for your question about RFQ ${rfqContext.rfqNumber}. Our team will review it and respond shortly.\n\nBest regards,\nHalal Foods Team`;
+    }
+}
 
 /**
  * Enhance email HTML with professional footer and styling
@@ -1102,4 +1148,5 @@ module.exports = {
     parseVendorInfoFromEmail,
     parseRFQResponseWithAI,
     parseQuotationFromText,
+    generateQuestionResponse
 };

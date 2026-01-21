@@ -73,6 +73,7 @@ const rfqResponsePoller = require('./services/rfqResponsePoller');
 require('./jobs/updateRestaurantAnalysis');
 const SuperChatCronService = require('./services/superChatCronService');
 const rfqRoutes = require('./routes/rfqRoutes'); // RFQ routes
+const whatsappRoutes = require('./routes/whatsappRoutes');
 // Initialize express app
 const app = express();
 
@@ -224,6 +225,7 @@ app.use("/api/area-analysis", areaAnalysisRoutes);
 app.use('/api/truck-routes', truckRouteRoutes);
 app.use('/api/rfq', rfqRoutes); // RFQ routes
 app.use('/api/vendor-email', vendorEmailRoutes);
+app.use('/api/whatsapp', whatsappRoutes);
 // Health check route
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });

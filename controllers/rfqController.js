@@ -8,71 +8,118 @@ const {
 const { generateRFQEmail } = require('../services/aiService');
 const { sendEmail } = require('../utils/emailService');
 const { generateRFQPDF } = require('../utils/pdfGenerator1');
+const { processFormBasedRFQ } = require('../services/rfqService');
+const { sendRFQViaWhatsApp } = require('../services/whatsappService');
+/**
+ * Get items from inventory for form selection
+ * GET /api/rfq/items
+ */
+exports.getInventoryItems = async (req, res) => {
+    try {
+        const { search, limit = 50 } = req.query;
+        const Item = require('../models/item');
 
+        const query = {
+            Valid: 'tYES',
+            PurchaseItem: 'tYES'
+        };
+
+        if (search) {
+            query.$or = [
+                { ItemName: { $regex: search, $options: 'i' } },
+                { ForeignName: { $regex: search, $options: 'i' } },
+                { ItemCode: { $regex: search, $options: 'i' } }
+            ];
+        }
+
+        const items = await Item.find(query)
+            .select('ItemCode ItemName ForeignName SalesUnit QuantityOnStock')
+            .limit(parseInt(limit))
+            .sort({ ItemName: 1 });
+
+        res.json({
+            success: true,
+            data: items
+        });
+    } catch (error) {
+        console.error('Error fetching items:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+};
 /**
  * Step 1: Process natural language input and get vendor recommendations
  * POST /api/rfq/analyze
  */
 exports.analyzeRFQRequest = async (req, res) => {
     try {
-        const { naturalLanguageInput, searchMode = 'existing' } = req.body; // ADD searchMode
+        const { searchMode = 'existing', itemCodes, quantities, targetPrices } = req.body;
         const userId = req.user?.id || 'admin';
 
-        if (!naturalLanguageInput || naturalLanguageInput.trim().length === 0) {
-            return res.status(400).json({
-                success: false,
-                error: 'Natural language input is required',
+        // For EXISTING vendors: Use form-based input
+        if (searchMode === 'existing') {
+            if (!itemCodes || itemCodes.length === 0) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Item codes are required for existing vendor search',
+                });
+            }
+
+            console.log(`Processing EXISTING vendor search for items:`, itemCodes);
+
+            const analysis = await processFormBasedRFQ(
+                itemCodes,
+                quantities,
+                targetPrices,
+                userId
+            );
+
+            res.json({
+                success: true,
+                message: 'RFQ analyzed for existing vendors (SAP)',
+                data: analysis,
             });
         }
+        // For NEW suppliers: Use natural language
+        else if (searchMode === 'new') {
+            const { naturalLanguageInput } = req.body;
 
-        console.log(`Processing RFQ request from user ${userId} with search mode: ${searchMode}`);
+            if (!naturalLanguageInput || naturalLanguageInput.trim().length === 0) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'Natural language input is required for new supplier search',
+                });
+            }
 
-        // Process the natural language input using AI
-        const analysis = await processNaturalLanguageRFQ(
-            naturalLanguageInput,
-            userId,
-            searchMode // PASS searchMode to service
-        );
+            console.log(`Processing NEW supplier search with:`, naturalLanguageInput);
 
-        res.json({
-            success: true,
-            message: 'RFQ request analyzed successfully',
-            data: {
-                parsedRequirements: analysis.parsedData,
-                searchMode: searchMode, // Include in response
-                items: analysis.itemsAnalysis.map(item => ({
-                    productName: item.productName,
-                    specifications: item.specifications,
-                    quantity: item.quantity,
-                    unit: item.unit,
-                    vendorsFound: item.vendorsFound,
-                    topVendors: item.vendors.slice(0, 5).map(v => ({
-                        vendorCode: v._id,
-                        vendorName: v.vendorName,
-                        avgPrice: v.avgPrice,
-                        totalPurchases: v.totalPurchases,
-                        lastPurchaseDate: v.lastPurchaseDate,
-                        score: v.scores.total,
-                    })),
-                })),
-                overallRecommendations: {
-                    totalVendorsFound: analysis.vendorRecommendations.total,
-                    topVendorsAcrossAllItems: analysis.vendorRecommendations.topVendors.map(vendor => ({
-                        ...vendor,
-                        canSupplyItems: analysis.itemsAnalysis
-                            .filter(item => item.vendors.some(v => v._id === vendor._id))
-                            .map(item => ({
-                                productName: item.productName,
-                                quantity: item.quantity,
-                                unit: item.unit,
-                                avgPrice: item.vendors.find(v => v._id === vendor._id)?.avgPrice
-                            })),
-                        purchaseHistory: vendor.recentPurchases || vendor.purchaseHistory || []
-                    })),
-                    aiInsights: analysis.vendorRecommendations.aiInsights,
+            const analysis = await processNaturalLanguageRFQ(
+                naturalLanguageInput,
+                userId,
+                'new'
+            );
+
+            res.json({
+                success: true,
+                message: 'New suppliers found (Email + PDA)',
+                data: {
+                    ...analysis,
+                    // ADD vendor type counts
+                    vendorTypeCounts: {
+                        email: analysis.vendorRecommendations.topVendors.filter(v => v.vendorSource === 'EMAIL').length,
+                        pda: analysis.vendorRecommendations.topVendors.filter(v => v.vendorSource === 'PDA_SCRAPER').length,
+                        total: analysis.vendorRecommendations.total
+                    }
                 },
-            },
-        });
+            });
+        } else {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid searchMode. Use "existing" or "new"',
+            });
+        }
     } catch (error) {
         console.error('Error analyzing RFQ:', error);
         res.status(500).json({
@@ -96,12 +143,50 @@ exports.createRFQDraft = async (req, res) => {
             contactEmail,
             contactPhone,
             paymentTerms,
+            searchMode = 'existing', // ADD THIS
+            itemCodes, // ADD THIS
+            quantities, // ADD THIS
+            targetPrices // ADD THIS
         } = req.body;
 
         const userId = req.user?.id || 'admin';
 
-        // Re-analyze to get fresh data
-        const analysis = await processNaturalLanguageRFQ(naturalLanguageInput, userId);
+        let analysis;
+
+        // DETERMINE WHICH PROCESSING METHOD TO USE
+        if (searchMode === 'existing' && itemCodes && itemCodes.length > 0) {
+            // FORM-BASED RFQ (Existing vendors)
+            console.log('Creating RFQ from form-based analysis (existing vendors)');
+
+            analysis = await processFormBasedRFQ(
+                itemCodes,
+                quantities,
+                targetPrices,
+                userId
+            );
+        } else if (naturalLanguageInput && naturalLanguageInput.trim()) {
+            // NATURAL LANGUAGE RFQ (New suppliers or existing)
+            console.log('Creating RFQ from natural language analysis');
+
+            analysis = await processNaturalLanguageRFQ(
+                naturalLanguageInput,
+                userId,
+                searchMode
+            );
+        } else {
+            return res.status(400).json({
+                success: false,
+                error: 'Either provide itemCodes (for existing vendors) or naturalLanguageInput (for new suppliers)'
+            });
+        }
+
+        // Validate that we have items
+        if (!analysis.parsedData?.items || analysis.parsedData.items.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'No items could be parsed from the input. Please check your request.'
+            });
+        }
 
         // Create RFQ
         const rfq = await createRFQFromAnalysis(analysis, {
@@ -113,17 +198,14 @@ exports.createRFQDraft = async (req, res) => {
         });
 
         // Add selected vendors to vendorsContacted list
-        // Add selected vendors to vendorsContacted list
         if (selectedVendorCodes && selectedVendorCodes.length > 0) {
             // STEP 1: Separate vendor codes by type
-            // PDA supplier IDs are MongoDB ObjectIds (24-character hex strings)
-            // SAP/EMAIL vendor codes are shorter alphanumeric codes
             const pdaSupplierIds = selectedVendorCodes.filter(code =>
-                /^[0-9a-fA-F]{24}$/.test(code) // MongoDB ObjectId format
+                /^[0-9a-fA-F]{24}$/.test(code)
             );
 
             const sapVendorCodes = selectedVendorCodes.filter(code =>
-                !/^[0-9a-fA-F]{24}$/.test(code) // Not MongoDB ObjectId format
+                !/^[0-9a-fA-F]{24}$/.test(code)
             );
 
             console.log(`Fetching vendors: ${sapVendorCodes.length} SAP/EMAIL, ${pdaSupplierIds.length} PDA`);
@@ -154,8 +236,17 @@ exports.createRFQDraft = async (req, res) => {
                 vendorSource: 'PDA_SCRAPER',
             }));
 
-            // STEP 5: Combine all vendors
-            const allSelectedVendors = [...vendors, ...pdaSuppliersAsVendors];
+            // STEP 5: Combine all vendors and mark their source
+            const allSelectedVendors = [
+                ...vendors.map(v => ({
+                    CardCode: v.CardCode,
+                    CardName: v.CardName,
+                    email: v.email,
+                    phone: v.phone,
+                    vendorSource: v.customFields?.isEmailVendor ? 'EMAIL' : 'SAP'
+                })),
+                ...pdaSuppliersAsVendors
+            ];
 
             console.log(`Total vendors to contact: ${allSelectedVendors.length}`);
 
@@ -164,8 +255,9 @@ exports.createRFQDraft = async (req, res) => {
                 vendorCode: v.CardCode,
                 vendorName: v.CardName,
                 email: v.email,
-                status: 'draft', // Status will be 'sent' after actually sending
-                vendorSource: v.vendorSource || 'SAP', // Track source
+                phone: v.phone, // ADD THIS
+                status: 'draft',
+                vendorSource: v.vendorSource,
             }));
 
             await rfq.save();
@@ -194,9 +286,11 @@ exports.createRFQDraft = async (req, res) => {
 exports.sendRFQToVendors = async (req, res) => {
     try {
         const { rfqId } = req.params;
-        const { vendorCodes, customMessage, language = 'fr' } = req.body;
+        const { vendorCodes, customMessage, language = 'fr', sendVia = 'email' } = req.body;
 
         console.log(`Sending RFQ ${rfqId} to vendors:`, vendorCodes);
+        console.log(`Send method: ${sendVia}`); // ADD LOG
+
         const rfq = await RFQ.findById(rfqId);
 
         if (!rfq) {
@@ -206,13 +300,13 @@ exports.sendRFQToVendors = async (req, res) => {
             });
         }
 
-        // STEP 1: Separate vendor codes by type (same as in createRFQDraft)
+        // STEP 1: Separate vendor codes by type
         const pdaSupplierIds = vendorCodes.filter(code =>
-            /^[0-9a-fA-F]{24}$/.test(code) // MongoDB ObjectId format
+            /^[0-9a-fA-F]{24}$/.test(code)
         );
 
         const sapVendorCodes = vendorCodes.filter(code =>
-            !/^[0-9a-fA-F]{24}$/.test(code) // Not MongoDB ObjectId format
+            !/^[0-9a-fA-F]{24}$/.test(code)
         );
 
         console.log(`Sending to: ${sapVendorCodes.length} SAP/EMAIL vendors, ${pdaSupplierIds.length} PDA suppliers`);
@@ -224,7 +318,7 @@ exports.sendRFQToVendors = async (req, res) => {
 
         console.log(`Found ${vendors.length} SAP/EMAIL vendors`);
 
-        // STEP 3: Fetch PDA suppliers (only if there are valid ObjectIds)
+        // STEP 3: Fetch PDA suppliers
         let pdaSuppliers = [];
         if (pdaSupplierIds.length > 0) {
             const PDA_Supplier = require('../models/PDA_Supplier');
@@ -234,7 +328,7 @@ exports.sendRFQToVendors = async (req, res) => {
             console.log(`Found ${pdaSuppliers.length} PDA suppliers`);
         }
 
-        // STEP 4: Convert PDA suppliers to vendor format
+        // STEP 4: Convert PDA suppliers to vendor format and ADD vendorSource
         const pdaSuppliersAsVendors = pdaSuppliers.map(s => ({
             CardCode: s._id.toString(),
             CardName: s.supplierName,
@@ -243,97 +337,168 @@ exports.sendRFQToVendors = async (req, res) => {
             vendorSource: 'PDA_SCRAPER',
         }));
 
-        // STEP 5: Combine all vendors
-        const allVendors = [...vendors, ...pdaSuppliersAsVendors];
+        // STEP 5: Combine all vendors and ADD vendorSource to SAP vendors
+        const allVendors = [
+            ...vendors.map(v => ({
+                ...v.toObject(), // Convert mongoose doc to plain object
+                vendorSource: v.customFields?.isEmailVendor ? 'EMAIL' : 'SAP' // ADD THIS
+            })),
+            ...pdaSuppliersAsVendors
+        ];
 
         console.log(`Total vendors to send to: ${allVendors.length} (${vendors.length} SAP/EMAIL + ${pdaSuppliers.length} PDA)`);
 
-        // Generate PDF
-        const pdfBuffer = await generateRFQPDF(rfq, 'en');
+        // Generate PDF (only if sending via email)
+        const pdfBuffer = sendVia === 'email' ? await generateRFQPDF(rfq, 'en') : null;
 
-        // Import Gmail service
-        const gmailService = require('../services/gmailService');
+        // Import Gmail service (only if sending via email)
+        const gmailService = sendVia === 'email' ? require('../services/gmailService') : null;
 
-        // Send emails
+        // Send messages
         const sendResults = [];
 
         for (const vendor of allVendors) {
             try {
-                console.log(`📧 Sending RFQ to ${vendor.CardName} (${vendor.email})`);
+                // CHECK: WhatsApp is ONLY for SAP vendors (not PDA, not EMAIL) with phone numbers
+                const isSAPVendor = vendor.vendorSource === 'SAP';
+                const hasPhone = vendor.phone && vendor.phone.trim() !== '';
 
-                const vendorHistory = rfq.metadata?.suggestedVendors?.find(
-                    v => v.vendorCode === vendor.CardCode
-                );
+                if (sendVia === 'whatsapp' && isSAPVendor && hasPhone) {
+                    console.log(`📱 Sending via WhatsApp to ${vendor.CardName} (${vendor.phone})`);
 
-                // Determine if this is an existing vendor or new supplier
-                const isExistingVendor = vendor.vendorSource !== 'PDA_SCRAPER';
+                    const whatsappResult = await sendRFQViaWhatsApp(rfqId, vendor.CardCode);
 
-                console.log(`📧 Vendor Type: ${isExistingVendor ? 'EXISTING VENDOR' : 'NEW SUPPLIER'} - ${vendor.CardName}`);
+                    // UPDATE VENDOR CONTACT STATUS FOR WHATSAPP
+                    const vendorContact = rfq.vendorsContacted.find(
+                        v => v.vendorCode === vendor.CardCode
+                    );
 
-                const emailContent = await generateRFQEmail(
-                    {
-                        rfqNumber: rfq.rfqNumber,
-                        items: rfq.items,
-                        quotationDueDate: rfq.quotationDueDate,
-                        deliveryBy: rfq.deliveryBy,
-                        specialRequirements: {
-                            packaging: rfq.packagingRequirements,
-                            payment: rfq.paymentTermsPreference,
-                            other: rfq.otherNotes,
-                        },
-                        customMessage,
-                    },
-                    {
-                        vendorName: vendor.CardName,
-                        totalPurchases: vendorHistory?.totalPurchases || 0,
-                    },
-                    'en',
-                    isExistingVendor  // Pass the vendor type flag
-                );
+                    if (vendorContact) {
+                        vendorContact.status = 'sent';
+                        vendorContact.sentDate = new Date();
+                        vendorContact.whatsappMessageId = whatsappResult.messageId; // ADD THIS
+                        vendorContact.whatsappSentDate = new Date(); // ADD THIS
+                    } else {
+                        rfq.vendorsContacted.push({
+                            vendorCode: vendor.CardCode,
+                            vendorName: vendor.CardName,
+                            email: vendor.email,
+                            phone: vendor.phone, // ADD THIS
+                            status: 'sent',
+                            sentDate: new Date(),
+                            whatsappMessageId: whatsappResult.messageId, // ADD THIS
+                            whatsappSentDate: new Date(), // ADD THIS
+                        });
+                    }
 
-                // Send via Gmail
-                const emailResult = await gmailService.sendEmail({
-                    to: vendor.email,
-                    subject: emailContent.subject,
-                    text: emailContent.bodyText,
-                    html: emailContent.bodyHtml,
-                    attachments: [
-                        {
-                            filename: `RFQ-${rfq.rfqNumber}-EN.pdf`,
-                            content: pdfBuffer,
-                            contentType: 'application/pdf',
-                        }
-                    ],
-                });
-
-                // Update RFQ vendor status
-                const vendorContact = rfq.vendorsContacted.find(
-                    v => v.vendorCode === vendor.CardCode
-                );
-
-                if (vendorContact) {
-                    vendorContact.status = 'sent';
-                    vendorContact.sentDate = new Date();
-                } else {
-                    rfq.vendorsContacted.push({
+                    sendResults.push({
                         vendorCode: vendor.CardCode,
                         vendorName: vendor.CardName,
-                        email: vendor.email,
-                        status: 'sent',
-                        sentDate: new Date(),
+                        success: whatsappResult.success,
+                        messageId: whatsappResult.messageId,
+                        method: 'whatsapp'
                     });
+
+                    console.log(`✅ WhatsApp sent to ${vendor.CardName}`);
+
+                } else if (sendVia === 'whatsapp' && isSAPVendor && !hasPhone) {
+                    // SAP vendor but no phone - skip with warning
+                    console.log(`⚠️ Skipping ${vendor.CardName} - No phone number for WhatsApp`);
+
+                    sendResults.push({
+                        vendorCode: vendor.CardCode,
+                        vendorName: vendor.CardName,
+                        success: false,
+                        error: 'No phone number available',
+                        method: 'whatsapp'
+                    });
+
+                } else if (sendVia === 'whatsapp' && !isSAPVendor) {
+                    // Not SAP vendor - skip with info
+                    console.log(`⚠️ Skipping ${vendor.CardName} - WhatsApp only for SAP vendors`);
+
+                    sendResults.push({
+                        vendorCode: vendor.CardCode,
+                        vendorName: vendor.CardName,
+                        success: false,
+                        error: 'WhatsApp only available for SAP vendors',
+                        method: 'whatsapp'
+                    });
+
+                } else {
+                    // SEND VIA EMAIL (default)
+                    console.log(`📧 Sending RFQ to ${vendor.CardName} (${vendor.email})`);
+
+                    const vendorHistory = rfq.metadata?.suggestedVendors?.find(
+                        v => v.vendorCode === vendor.CardCode
+                    );
+
+                    const isExistingVendor = vendor.vendorSource !== 'PDA_SCRAPER';
+
+                    console.log(`📧 Vendor Type: ${isExistingVendor ? 'EXISTING VENDOR' : 'NEW SUPPLIER'} - ${vendor.CardName}`);
+
+                    const emailContent = await generateRFQEmail(
+                        {
+                            rfqNumber: rfq.rfqNumber,
+                            items: rfq.items,
+                            quotationDueDate: rfq.quotationDueDate,
+                            deliveryBy: rfq.deliveryBy,
+                            specialRequirements: {
+                                packaging: rfq.packagingRequirements,
+                                payment: rfq.paymentTermsPreference,
+                                other: rfq.otherNotes,
+                            },
+                            customMessage,
+                        },
+                        {
+                            vendorName: vendor.CardName,
+                            totalPurchases: vendorHistory?.totalPurchases || 0,
+                        },
+                        'en',
+                        isExistingVendor
+                    );
+
+                    const emailResult = await gmailService.sendEmail({
+                        to: vendor.email,
+                        subject: emailContent.subject,
+                        text: emailContent.bodyText,
+                        html: emailContent.bodyHtml,
+                        attachments: [
+                            {
+                                filename: `RFQ-${rfq.rfqNumber}-EN.pdf`,
+                                content: pdfBuffer,
+                                contentType: 'application/pdf',
+                            }
+                        ],
+                    });
+
+                    const vendorContact = rfq.vendorsContacted.find(
+                        v => v.vendorCode === vendor.CardCode
+                    );
+
+                    if (vendorContact) {
+                        vendorContact.status = 'sent';
+                        vendorContact.sentDate = new Date();
+                    } else {
+                        rfq.vendorsContacted.push({
+                            vendorCode: vendor.CardCode,
+                            vendorName: vendor.CardName,
+                            email: vendor.email,
+                            status: 'sent',
+                            sentDate: new Date(),
+                        });
+                    }
+
+                    sendResults.push({
+                        vendorCode: vendor.CardCode,
+                        vendorName: vendor.CardName,
+                        success: true,
+                        messageId: emailResult.messageId,
+                        method: 'email'
+                    });
+
+                    console.log(`✅ Email sent to ${vendor.CardName}`);
                 }
-
-                sendResults.push({
-                    vendorCode: vendor.CardCode,
-                    vendorName: vendor.CardName,
-                    success: true,
-                    messageId: emailResult.messageId,
-                });
-
-
-
-                console.log(`✅ Sent to ${vendor.CardName}`);
 
             } catch (error) {
                 console.error(`❌ Failed to send to ${vendor.CardName}:`, error);
@@ -342,6 +507,7 @@ exports.sendRFQToVendors = async (req, res) => {
                     vendorName: vendor.CardName,
                     success: false,
                     error: error.message,
+                    method: sendVia
                 });
             }
         }
@@ -351,18 +517,22 @@ exports.sendRFQToVendors = async (req, res) => {
         rfq.metadata = {
             ...rfq.metadata,
             sentAt: new Date(),
+            sendMethod: sendVia // ADD THIS to track what method was used
         };
         await rfq.save();
 
         const successCount = sendResults.filter(r => r.success).length;
+        const method = sendVia === 'whatsapp' ? 'WhatsApp' : 'Email';
 
         res.json({
             success: true,
-            message: `RFQ sent via Gmail to ${successCount} out of ${allVendors.length} vendors`,
+            message: `RFQ sent via ${method} to ${successCount} out of ${allVendors.length} vendors`,
             data: {
                 rfqNumber: rfq.rfqNumber,
                 totalVendors: allVendors.length,
                 successfulSends: successCount,
+                failedSends: sendResults.filter(r => !r.success).length,
+                sendMethod: sendVia,
                 sendResults,
                 rfq: rfq.toObject(),
             },

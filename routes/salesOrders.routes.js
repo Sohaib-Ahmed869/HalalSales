@@ -24,6 +24,7 @@ const upload = multer({
     }
   },
 });
+router.post("/sync-recent-from-sap",  auth, orderController.syncRecentOrdersFromSAP);
 router.post(
   "/update-notes-from-sap",
   orderController.updateNotesForOpenOrders

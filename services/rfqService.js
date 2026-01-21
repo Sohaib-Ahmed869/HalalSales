@@ -380,7 +380,11 @@ async function analyzeHistoricalPurchasesMultiKeyword(keywords, quantity, search
 
             console.log(`>> Found ${sapVendors.length} SAP vendors`);
 
-            // Fetch EMAIL vendors (existing logic)
+        } else if (searchMode === 'new') {
+            // Fetch EMAIL vendors + PDA suppliers
+            console.log('>> MODE: NEW - Searching EMAIL vendors + PDA suppliers');
+
+            // ===== FETCH EMAIL VENDORS =====
             try {
                 const keywordRegex = new RegExp(keywords.join('|'), 'i');
 
@@ -449,6 +453,8 @@ async function analyzeHistoricalPurchasesMultiKeyword(keywords, quantity, search
                             date: q.date,
                             poNumber: null
                         })),
+                        email: vendor.email,
+                        phone: vendor.phone,
                         emailStats: vendor.customFields?.emailStats || {},
                         matchedCategories: vendor.productCategories.filter(cat =>
                             keywordRegex.test(cat)
@@ -463,10 +469,7 @@ async function analyzeHistoricalPurchasesMultiKeyword(keywords, quantity, search
                 console.error('⚠️ Error fetching email vendors:', emailError.message);
             }
 
-        } else if (searchMode === 'new') {
-            // ONLY fetch PDA suppliers (new)
-            console.log('>> MODE: NEW - Searching PDA suppliers only');
-
+            // ===== FETCH PDA SUPPLIERS =====
             try {
                 const PDA_Supplier = require('../models/PDA_Supplier');
                 const keywordRegex = new RegExp(keywords.join('|'), 'i');
@@ -794,8 +797,156 @@ async function syncEmailVendors() {
         throw error;
     }
 }
+
+/**
+ * Process form-based RFQ for EXISTING vendors (SAP only)
+ * @param {Array<string>} itemCodes - Selected item codes from inventory
+ * @param {Array<number>} quantities - Quantities for each item
+ * @param {Array<number>} targetPrices - Optional target prices
+ * @param {string} userId - User ID
+ */
+async function processFormBasedRFQ(itemCodes, quantities, targetPrices, userId) {
+    console.log('=== Starting Form-Based RFQ Processing (SAP Vendors Only) ===');
+
+    const Item = require('../models/item');
+
+    // Fetch item details from inventory
+    const items = await Item.find({ ItemCode: { $in: itemCodes } });
+
+    if (items.length === 0) {
+        throw new Error('No items found with provided item codes');
+    }
+
+    const itemsWithVendors = [];
+
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const quantity = quantities[i] || 1;
+        const targetPrice = targetPrices?.[i] || null;
+
+        console.log(`\n--- Analyzing item: ${item.ItemName} (${item.ItemCode}) ---`);
+
+        // Search ONLY SAP vendors for this item
+        const keywords = [item.ItemName, item.ForeignName].filter(Boolean);
+
+        let vendorAnalysis = await analyzeHistoricalPurchasesMultiKeyword(
+            keywords,
+            quantity,
+            'existing' // Force SAP-only search
+        );
+
+        // Filter to ONLY SAP vendors
+        vendorAnalysis = vendorAnalysis.filter(v => v.vendorSource === 'SAP');
+
+        console.log(`Found ${vendorAnalysis.length} SAP vendors`);
+
+        // Get full vendor details
+        const sapVendorCodes = vendorAnalysis.map(v => v._id);
+        const vendors = await Vendor.find({
+            CardCode: { $in: sapVendorCodes },
+        });
+
+        const enrichedVendors = vendorAnalysis.map(historical => {
+            const vendorDetails = vendors.find(v => v.CardCode === historical._id);
+            return {
+                ...historical,
+                email: vendorDetails?.email,
+                phone: vendorDetails?.phone,
+                hasEmail: !!vendorDetails?.email,
+            };
+        }).filter(v => v.hasEmail);
+
+        itemsWithVendors.push({
+            itemCode: item.ItemCode,
+            productName: item.ItemName,
+            specifications: item.ForeignName || '',
+            quantity,
+            unit: item.SalesUnit || 'kg',
+            targetPrice,
+            vendors: enrichedVendors,
+            vendorsFound: enrichedVendors.length,
+        });
+    }
+
+    // Get unique SAP vendors
+    const allVendorCodes = new Set();
+    itemsWithVendors.forEach(item => {
+        item.vendors.forEach(v => allVendorCodes.add(v._id));
+    });
+
+    console.log(`\n=== Total unique SAP vendors: ${allVendorCodes.size} ===`);
+
+    // Consolidate vendor list
+    const topVendorsAcrossItems = itemsWithVendors
+        .flatMap(item => item.vendors)
+        .reduce((acc, vendor) => {
+            const existing = acc.find(v => v._id === vendor._id);
+            if (existing) {
+                existing.itemsCanSupply = (existing.itemsCanSupply || 1) + 1;
+                existing.totalScore += vendor.scores.total;
+                existing.avgScore = existing.totalScore / existing.itemsCanSupply;
+            } else {
+                acc.push({
+                    ...vendor,
+                    itemsCanSupply: 1,
+                    totalScore: vendor.scores.total,
+                    avgScore: vendor.scores.total,
+                });
+            }
+            return acc;
+        }, [])
+        .sort((a, b) => {
+            if (b.itemsCanSupply !== a.itemsCanSupply) {
+                return b.itemsCanSupply - a.itemsCanSupply;
+            }
+            return b.avgScore - a.avgScore;
+        });
+
+    const rfqContext = {
+        items: itemsWithVendors.map(i => ({
+            productName: i.productName,
+            quantity: i.quantity,
+            unit: i.unit,
+            targetPrice: i.targetPrice
+        })),
+        totalVendorsFound: allVendorCodes.size,
+    };
+
+    const aiRecommendations = topVendorsAcrossItems.length > 0
+        ? await analyzeVendorRecommendations(topVendorsAcrossItems, rfqContext)
+        : {
+            topRecommendations: [],
+            priceInsights: 'No SAP vendor history available',
+            riskFactors: 'No SAP vendors found',
+            suggestedVendorCount: 0,
+            suggestedVendorCodes: [],
+        };
+
+    console.log('=== Form-Based RFQ Processing Complete ===\n');
+
+    return {
+        parsedData: {
+            items: itemsWithVendors.map(i => ({
+                itemCode: i.itemCode,
+                productName: i.productName,
+                specifications: i.specifications,
+                quantity: i.quantity,
+                unit: i.unit,
+                targetPrice: i.targetPrice
+            }))
+        },
+        itemsAnalysis: itemsWithVendors,
+        vendorRecommendations: {
+            total: allVendorCodes.size,
+            topVendors: topVendorsAcrossItems,
+            aiInsights: aiRecommendations,
+        },
+        createdBy: userId,
+    };
+}
 module.exports = {
     processNaturalLanguageRFQ,
+    processFormBasedRFQ,
     analyzeHistoricalPurchasesMultiKeyword,
     createRFQFromAnalysis,
     syncEmailVendors,
