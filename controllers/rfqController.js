@@ -16,7 +16,7 @@ const { sendRFQViaWhatsApp } = require('../services/whatsappService');
  */
 exports.getInventoryItems = async (req, res) => {
     try {
-        const { search, limit = 50 } = req.query;
+        const { search, limit = 20000 } = req.query;
         const Item = require('../models/item');
 
         const query = {
