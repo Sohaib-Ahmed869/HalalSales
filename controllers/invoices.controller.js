@@ -710,7 +710,7 @@ exports.getPaymentsForInvoice = async (req, res) => {
       });
     }
 
-    const Payment = require("../models/Payment");
+    const Payment = require("../models/payment");
     const payments = await Payment.find({
       DocEntry: { $in: invoice.paymentDocEntries }
     }).sort({ DocDate: -1 });

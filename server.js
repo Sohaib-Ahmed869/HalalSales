@@ -74,6 +74,8 @@ require('./jobs/updateRestaurantAnalysis');
 const SuperChatCronService = require('./services/superChatCronService');
 const rfqRoutes = require('./routes/rfqRoutes'); // RFQ routes
 const whatsappRoutes = require('./routes/whatsappRoutes');
+const whatsappBusinessRoutes = require("./routes/whatsapp.routes");
+const whatsappAgentRoutes = require("./routes/whatsappAgent.routes");
 // Initialize express app
 const app = express();
 
@@ -226,6 +228,8 @@ app.use('/api/truck-routes', truckRouteRoutes);
 app.use('/api/rfq', rfqRoutes); // RFQ routes
 app.use('/api/vendor-email', vendorEmailRoutes);
 app.use('/api/whatsapp', whatsappRoutes);
+app.use("/api/whatsapp-business", whatsappBusinessRoutes);
+app.use("/api/whatsapp-agent", whatsappAgentRoutes);
 // Health check route
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });

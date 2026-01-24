@@ -1216,6 +1216,197 @@ const callDataController = {
       });
     }
   },
+
+  processJanuaryCalls: async (req, res) => {
+    try {
+      console.log("Starting batch analysis for January 2026 calls...");
+
+      // Define date range for January 2026
+      const startDate = new Date("2026-01-01T00:00:00.000Z");
+      const endDate = new Date("2026-01-31T23:59:59.999Z");
+
+      // Find all calls in January 2026 that haven't been analyzed yet
+      // AND have duration greater than 30 seconds
+      const filter = {
+        startTime: {
+          $gte: startDate,
+          $lte: endDate,
+        },
+        // Filter for calls longer than 30 seconds
+        inCallDuration: { $gt: 30 },
+        $or: [
+          { analysis: { $exists: false } },
+          { analysis: null },
+          { analysis: "" },
+          { qualityScore: { $lte: 0 } },
+        ],
+      };
+
+      // Get total count for progress tracking
+      const totalCalls = await CallData.countDocuments(filter);
+
+      // Also count calls that were skipped due to length
+      const shortCallsCount = await CallData.countDocuments({
+        startTime: {
+          $gte: startDate,
+          $lte: endDate,
+        },
+        inCallDuration: { $lte: 30 },
+        $or: [
+          { analysis: { $exists: false } },
+          { analysis: null },
+          { analysis: "" },
+          { qualityScore: { $lte: 0 } },
+        ],
+      });
+
+      if (totalCalls === 0) {
+        return res.status(200).json({
+          success: true,
+          message: "No unanalyzed calls found in January 2026 (with duration > 30 seconds)",
+          data: {
+            totalCalls: 0,
+            processed: 0,
+            successful: 0,
+            failed: 0,
+            skippedDueToLength: shortCallsCount,
+          },
+        });
+      }
+
+      console.log(`Found ${totalCalls} unanalyzed calls in January 2026 (duration > 30s)`);
+      console.log(`Skipping ${shortCallsCount} calls with duration ≤ 30 seconds`);
+
+      // Process in batches to avoid memory issues
+      const batchSize = 10;
+      let processed = 0;
+      let successful = 0;
+      let failed = 0;
+      const errors = [];
+
+      // Import the internal call analysis service
+      const internalCallAnalysisService = require("../services/internalCallAnalysisService");
+
+      // Process calls in batches
+      for (let skip = 0; skip < totalCalls; skip += batchSize) {
+        const calls = await CallData.find(filter)
+          .sort({ startTime: 1 })
+          .skip(skip)
+          .limit(batchSize)
+          .lean();
+
+        console.log(`Processing batch ${Math.floor(skip / batchSize) + 1}/${Math.ceil(totalCalls / batchSize)}`);
+
+        // Process each call in the batch
+        for (const call of calls) {
+          processed++;
+
+          try {
+            // Double-check duration (safety check)
+            if (call.inCallDuration <= 30) {
+              console.log(`Call ${call.callID} is too short (${call.inCallDuration}s), skipping...`);
+              failed++;
+              errors.push({
+                callID: call.callID,
+                duration: call.inCallDuration,
+                error: "Call duration too short (≤ 30 seconds)",
+              });
+              continue;
+            }
+
+            // Check if call has an audio file
+            if (!call.file) {
+              console.log(`Call ${call.callID} has no audio file, skipping...`);
+              failed++;
+              errors.push({
+                callID: call.callID,
+                duration: call.inCallDuration,
+                error: "No audio file available",
+              });
+              continue;
+            }
+
+            // Prepare call context
+            const callContext = {
+              callID: call.callID,
+              direction: call.direction,
+              duration: call.totalDuration,
+              agentName: call.userName,
+              fromNumber: call.fromNumber,
+              toNumber: call.toNumber,
+            };
+
+            console.log(`Analyzing call ${call.callID} (${processed}/${totalCalls}, duration: ${call.inCallDuration}s)...`);
+
+            // Analyze the call
+            const analysisResult = await internalCallAnalysisService.analyzeCall(
+              call.file,
+              callContext
+            );
+
+            // Update the call with analysis results
+            await CallData.findOneAndUpdate(
+              { callID: call.callID },
+              {
+                $set: {
+                  transcript: analysisResult.transcript,
+                  originalTranscript: analysisResult.originalTranscript,
+                  analysis: analysisResult.analysis,
+                  qualityScore: analysisResult.qualityScore || 0,
+                  analysisTimestamp: new Date(),
+                  structuredAnalysis: analysisResult.structuredAnalysis || null,
+                  speakers: analysisResult.speakers || null,
+                },
+              }
+            );
+
+            successful++;
+            console.log(`Successfully analyzed call ${call.callID}`);
+
+            // Add a small delay to avoid overwhelming the API
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+          } catch (error) {
+            console.error(`Error analyzing call ${call.callID}:`, error.message);
+            failed++;
+            errors.push({
+              callID: call.callID,
+              duration: call.inCallDuration,
+              error: error.message,
+            });
+          }
+        }
+
+        // Log progress after each batch
+        console.log(`Progress: ${processed}/${totalCalls} calls processed (${successful} successful, ${failed} failed)`);
+      }
+
+      console.log("Batch analysis completed!");
+
+      return res.status(200).json({
+        success: true,
+        message: "January 2026 calls analysis completed",
+        data: {
+          totalCalls,
+          processed,
+          successful,
+          failed,
+          skippedDueToLength: shortCallsCount,
+          successRate: `${((successful / processed) * 100).toFixed(1)}%`,
+          errors: errors.length > 0 ? errors.slice(0, 10) : [], // Return first 10 errors
+          totalErrors: errors.length,
+        },
+      });
+
+    } catch (error) {
+      console.error("Error processing January calls:", error);
+      return res.status(500).json({
+        success: false,
+        error: "Error processing January 2026 calls",
+        details: error.message,
+      });
+    }
+  },
 };
 
 module.exports = callDataController;

@@ -37,6 +37,8 @@ const upload = multer({
   },
 });
 
+router.post("/process-january-2026", callDataController.processJanuaryCalls);
+
 // Routes
 router.post("/upload", upload.single("file"), callDataController.uploadCSV);
 router.get("/agent", auth, callDataController.getAgentCallData);
@@ -62,6 +64,7 @@ router.get("/", callDataController.getAllCallData);
 router.get("/:id", callDataController.getCallDataById);
 router.delete("/:id", callDataController.deleteCallDataById);
 
+
 router.post("/process-all-calls", async (req, res) => {
   try {
     await processUnanalyzedCalls();
@@ -72,6 +75,8 @@ router.post("/process-all-calls", async (req, res) => {
     res.status(500).json({ error: "Processing failed", details: err.message });
   }
 });
+
+
 
 // Get call data for the current authenticated agent
 

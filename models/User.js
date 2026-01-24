@@ -153,6 +153,41 @@ const UserSchema = new Schema({
       message: "Sales agents must have a manager assigned",
     },
   },
+  // Add to UserSchema in models/User.js
+  whatsappSettings: {
+    enabled: {
+      type: Boolean,
+      default: false,
+    },
+    phoneNumberId: {
+      type: String,
+      sparse: true,
+    },
+    businessAccountId: {
+      type: String,
+      sparse: true,
+    },
+    verifiedName: {
+      type: String,
+    },
+    qualityRating: {
+      type: String,
+      enum: ['GREEN', 'YELLOW', 'RED', 'UNKNOWN'],
+      default: 'UNKNOWN',
+    },
+    // Link WhatsApp messages to sales agent
+    lastMessageAt: {
+      type: Date,
+    },
+    totalMessagesSent: {
+      type: Number,
+      default: 0,
+    },
+    totalMessagesReceived: {
+      type: Number,
+      default: 0,
+    },
+  },
 });
 
 module.exports = mongoose.model("User", UserSchema);

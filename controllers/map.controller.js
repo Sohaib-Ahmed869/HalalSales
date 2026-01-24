@@ -253,12 +253,12 @@ exports.getDocumentsByDateRange = async (req, res) => {
             results.stats.totalQuotations = results.quotations.length;
         }
 
-        // Get customers who placed orders in date range
-        // Get customers who placed orders in date range WITH KPIS
+        // Get customers who have invoices in date range WITH KPIS
         if (type === "all" || type === "customer") {
             const uniqueCustomerCodes = new Set();
-            for (const order of orders) {
-                uniqueCustomerCodes.add(order.CardCode);
+            // CHANGED: Use invoices instead of orders
+            for (const invoice of results.invoices) {
+                uniqueCustomerCodes.add(invoice.cardCode);
             }
 
             // CHANGED: Fetch customer KPIs
@@ -300,12 +300,13 @@ exports.getDocumentsByDateRange = async (req, res) => {
 
         console.log(includePotentialCustomers);
 
-        // Get potential customers (those WITHOUT orders in date range)
+        // Get potential customers (those WITHOUT invoices in date range)
         if (includePotentialCustomers === "true") {
-            const customersWithOrders = new Set(orders.map(o => o.CardCode));
+            // CHANGED: Use invoices instead of orders
+            const customersWithInvoices = new Set(results.invoices.map(inv => inv.cardCode));
 
             for (const customer of customersWithCoords) {
-                if (!customersWithOrders.has(customer.CardCode)) {
+                if (!customersWithInvoices.has(customer.CardCode)) {
                     results.potentialCustomers.push({
                         type: "potentialCustomer",
                         cardCode: customer.CardCode,
