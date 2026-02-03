@@ -53,6 +53,11 @@ const upload = multer({
   },
 });
 
+router.get(
+  "/export/ringover-csv",
+  customerController.exportCustomersToRingoverCSV
+);
+
 router.post(
   "/sync-c7000-batch",
   customerController.syncPendingC7000Customers

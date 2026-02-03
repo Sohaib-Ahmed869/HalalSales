@@ -7535,3 +7535,198 @@ exports.getCustomerMetrics = async (req, res) => {
     });
   }
 };
+
+exports.exportCustomersToRingoverCSV = async (req, res) => {
+  try {
+    const startTime = Date.now();
+
+    // ── 1. Pull every field we might need in one query ──────
+    const customers = await Customer.find({})
+      .select(
+        "firstName lastName CardName company phoneNumber additionalPhoneNumbers"
+      )
+      .lean();
+
+    // ── 2. Phone → E.164 converter ───────────────────────────
+    //   Handles:
+    //     • already correct          +33612345678  → kept as-is
+    //     • missing +, has country   33612345678   → +33612345678
+    //     • French 0X                0612345678    → +33612345678
+    //     • 9-digit local            612345678     → +33612345678
+    //     • spaces / dots / dashes   06 12 34 56 78 → +33612345678
+    //     • tabs, nbsp, zero-width   stripped first
+    //     • international non-FR     +1 213 509 6995 → +12135096995
+    //       (kept if already starts with +<digit>)
+    //   Returns null when the string is empty or un-salvageable.
+
+    const toE164 = (raw) => {
+      if (!raw) return null;
+
+      // Coerce to string (in case a number slipped through from Excel)
+      let s = String(raw);
+
+      // Strip zero-width chars, nbsp, tabs, and regular whitespace
+      s = s.replace(/[\u200B\u200C\u200D\uFEFF\u00A0\t]/g, "").trim();
+
+      // If empty after cleaning, bail
+      if (!s) return null;
+
+      // Remember whether the original started with +
+      const hadPlus = s.startsWith("+");
+
+      // Strip everything that is NOT a digit
+      const digits = s.replace(/[^\d]/g, "");
+
+      if (digits.length < 7) return null; // too short to be a real number
+
+      // ── already a full international number with + ──
+      if (hadPlus) {
+        // e.g.  +33612345678  or  +12135096995
+        return "+" + digits;
+      }
+
+      // ── starts with country code 33 (French) ──
+      if (digits.startsWith("33") && digits.length >= 11 && digits.length <= 15) {
+        return "+" + digits;
+      }
+
+      // ── French local: starts with 0, 10 digits ──
+      if (digits.startsWith("0") && digits.length === 10) {
+        return "+33" + digits.slice(1); // drop leading 0, prepend +33
+      }
+
+      // ── French local: 9 digits, no prefix at all ──
+      if (digits.length === 9) {
+        return "+33" + digits;
+      }
+
+      // ── Fallback: we have digits but can't be sure of the country.
+      //    If it looks like a plausible international number (10-15 digits)
+      //    prepend + and hope for the best; otherwise null.
+      if (digits.length >= 10 && digits.length <= 15) {
+        return "+" + digits;
+      }
+
+      return null; // genuinely un-parseable
+    };
+
+    // ── 3. Build rows ────────────────────────────────────────
+    const rows = [];
+
+    customers.forEach((c) => {
+      // Derive lastName / firstName
+      //   Priority: explicit fields → split CardName → CardName as lastName
+      let lastName = (c.lastName || "").trim();
+      let firstName = (c.firstName || "").trim();
+
+      if (!lastName && !firstName && c.CardName) {
+        const parts = c.CardName.trim().split(/\s+/);
+        if (parts.length >= 2) {
+          lastName = parts[0];
+          firstName = parts.slice(1).join(" ");
+        } else {
+          lastName = parts[0]; // single word → treat as last name
+        }
+      }
+
+      // If we still have nothing, skip — RingOver requires at least one name
+      if (!lastName && !firstName) return;
+
+      const company = (c.company || "").trim();
+
+      // Collect ALL phone strings from every field
+      const rawPhones = [
+        c.phoneNumber,
+        ...(c.additionalPhoneNumbers || []),
+        // some docs also populate additionalPhones (see updateCustomerPhones)
+        ...(c.additionalPhones || []),
+      ];
+
+      // Convert + dedupe
+      const seen = new Set();
+      const e164Phones = [];
+      rawPhones.forEach((raw) => {
+        const num = toE164(raw);
+        if (num && !seen.has(num)) {
+          seen.add(num);
+          e164Phones.push(num);
+        }
+      });
+
+      // RingOver spec: "a contact without a number will not be inserted"
+      if (e164Phones.length === 0) return;
+
+      // First phone → phone1, second → phone2 (max 2 per row)
+      rows.push({
+        lastName,
+        firstName,
+        company,
+        phone1: e164Phones[0] || "",
+        phone2: e164Phones[1] || "",
+      });
+    });
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No exportable customers (need at least one name + one valid phone)",
+      });
+    }
+
+    // ── 4. Serialise to CSV (no header — matches RingOver example) ──
+    const escapeCSV = (val) => {
+      if (!val && val !== 0) return "";
+      const s = String(val);
+      // Wrap in quotes if the value contains comma, quote, or newline
+      if (s.includes(",") || s.includes('"') || s.includes("\n")) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    };
+
+    let csvBody = "";
+    rows.forEach((r) => {
+      csvBody +=
+        [
+          escapeCSV(r.lastName),
+          escapeCSV(r.firstName),
+          escapeCSV(r.company),
+          escapeCSV(r.phone1),
+          escapeCSV(r.phone2),
+        ].join(",") + "\n";
+    });
+
+    // ── 5. Write to /exports on disk ─────────────────────────
+    const exportsDir = path.join(process.cwd(), "exports");
+    if (!fs.existsSync(exportsDir)) {
+      fs.mkdirSync(exportsDir, { recursive: true });
+    }
+
+    const timestamp = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+    const filename = `ringover_contacts_${timestamp}.csv`;
+    const filePath = path.join(exportsDir, filename);
+
+    fs.writeFileSync(filePath, csvBody, "utf8");
+
+    const totalTime = Date.now() - startTime;
+    console.log(
+      `RingOver export: ${rows.length} contacts → ${filePath} (${totalTime}ms)`
+    );
+
+    // ── 6. Stream the file back as a download ───────────────
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${filename}"`
+    );
+    res.send(csvBody);
+
+  } catch (error) {
+    console.error("RingOver CSV export error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error exporting customers to RingOver CSV",
+      error: error.message,
+    });
+  }
+};
