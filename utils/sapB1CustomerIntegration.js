@@ -130,13 +130,14 @@ exports.getLastCustomerFromSAP = async () => {
 };
 
 // Generate next CardCode based on last customer
+// Generate next CardCode based on last customer
 exports.generateNextCardCode = async () => {
   try {
     const sessionId = await getSessionId();
 
-    console.log("Fetching last customer in C6xxx range from SAP B1...");
+    console.log("Fetching last customer in C7xxx range from SAP B1...");
 
-    // Modified query to filter for C6xxx customers only
+    // Query to filter for C7xxx customers only
     const response = await axios.get(
       `${SAP_CONFIG.serviceLayerUrl}/BusinessPartners?$top=1&$orderby=CardCode desc&$filter=CardType eq 'cCustomer' and startswith(CardCode,'C7')`,
       {
@@ -153,25 +154,29 @@ exports.generateNextCardCode = async () => {
       response.data.value.length > 0
     ) {
       const lastCustomer = response.data.value[0];
-      console.log(`Last C6xxx customer CardCode: ${lastCustomer.CardCode}`);
+      console.log(`Last C7xxx customer CardCode: ${lastCustomer.CardCode}`);
 
       const lastCardCode = lastCustomer.CardCode;
 
-      // Extract numeric part from CardCode (e.g., C6001 -> 6001)
-      const match = lastCardCode.match(/^C(\d+)$/);
+      // Extract numeric part from CardCode (e.g., C7527 -> 7527)
+      const match = lastCardCode.match(/^C7(\d+)$/);
 
       if (match) {
         const lastNumber = parseInt(match[1], 10);
         const nextNumber = lastNumber + 1;
-        const nextCardCode = `C${nextNumber}`;
+        const nextCardCode = `C7${String(nextNumber).padStart(3, '0')}`;
 
         console.log(`Generated next CardCode: ${nextCardCode}`);
         return nextCardCode;
+      } else {
+        // If the format doesn't match C7xxx, log error and throw
+        console.error(`Unexpected CardCode format: ${lastCardCode}`);
+        throw new Error(`Invalid CardCode format: ${lastCardCode}`);
       }
     }
 
-    // If no C6xxx customers found, start with C6001
-    console.log("No C6xxx customers found, starting with C6001");
+    // If no C7xxx customers found, start with C7000
+    console.log("No C7xxx customers found, starting with C7000");
     return "C7000";
   } catch (error) {
     // If unauthorized, try to login again and retry once
@@ -182,9 +187,11 @@ exports.generateNextCardCode = async () => {
       return exports.generateNextCardCode();
     }
 
-    console.error("Error generating next CardCode:", error);
-    // Fallback to a default CardCode in C6xxx range
-    return "C6001";
+    console.error("Error generating next CardCode:", error.message);
+
+    // IMPORTANT: Throw error instead of returning fallback
+    // This prevents all customers from getting the same code
+    throw new Error(`Failed to generate CardCode from SAP: ${error.message}`);
   }
 };
 

@@ -76,6 +76,7 @@ const rfqRoutes = require('./routes/rfqRoutes'); // RFQ routes
 const whatsappRoutes = require('./routes/whatsappRoutes');
 const whatsappBusinessRoutes = require("./routes/whatsapp.routes");
 const whatsappAgentRoutes = require("./routes/whatsappAgent.routes");
+const sapSyncRoutes = require("./routes/sapSyncRoutes");
 // Initialize express app
 const app = express();
 
@@ -168,6 +169,7 @@ app.get("/", (req, res) => {
 
 
 // Routes
+app.use("/api/sap-sync", sapSyncRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/customers", customerRoutes);
 app.use("/api/prestashop", prestashopRoutes);

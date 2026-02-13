@@ -177,33 +177,23 @@ exports.editQuotationForMsFoods = async (req, res) => {
     // Update the UpdateDate
     quotation.UpdateDate = new Date();
 
-    // Set quotation status to approved since editing is complete
+    // CHANGED: Reset approval status to pending and create new task instead of auto-approving
     console.log("Before update - approvalStatus:", quotation.approvalStatus);
 
-    quotation.approvalStatus = "approved";
-    quotation.approvedBy = req.user._id;
-    quotation.approvedDate = new Date();
+    quotation.approvalStatus = "pending";
+    quotation.approvedBy = undefined;
+    quotation.approvedDate = undefined;
     quotation.rejectedBy = undefined;
     quotation.rejectedDate = undefined;
     quotation.rejectionReason = undefined;
     quotation.approvalComments = undefined;
 
-    // Clear the approval task reference since it's no longer needed
-    quotation.approvalTask = undefined;
-
     console.log("After update - approvalStatus:", quotation.approvalStatus);
-    console.log("Quotation object before save:", {
-      DocEntry: quotation.DocEntry,
-      approvalStatus: quotation.approvalStatus,
-      approvedBy: quotation.approvedBy,
-      approvedDate: quotation.approvedDate
-    });
 
-    // Complete all existing approval tasks for this quotation
+    // Cancel/complete all existing approval tasks for this quotation
     try {
-      // First, find the tasks to see what we're working with
       const existingTasks = await Task.find({
-        relatedQuotation: quotation.DocEntry,  // Use DocEntry instead of _id
+        relatedQuotation: quotation.DocEntry,
         type: "approval",
         status: { $in: ["pending", "pending_approval"] },
       });
@@ -213,31 +203,58 @@ exports.editQuotationForMsFoods = async (req, res) => {
       if (existingTasks.length > 0) {
         const taskUpdateResult = await Task.updateMany(
           {
-            relatedQuotation: quotation.DocEntry,  // Use DocEntry instead of _id
+            relatedQuotation: quotation.DocEntry,
             type: "approval",
             status: { $in: ["pending", "pending_approval"] },
           },
           {
-            status: "completed",
+            status: "cancelled",
             completedDate: new Date(),
-            comments: `Task completed automatically when quotation was edited and approved by ${req.user.firstName} ${req.user.lastName}`,
+            comments: `Task cancelled when quotation was edited by ${req.user.firstName} ${req.user.lastName}. New approval task created.`,
           }
         );
 
-        console.log(`Updated ${taskUpdateResult.modifiedCount} approval tasks for quotation ${quotation.DocEntry}`);
-      } else {
-        console.log("No approval tasks found to update");
+        console.log(`Cancelled ${taskUpdateResult.modifiedCount} approval tasks for quotation ${quotation.DocEntry}`);
       }
     } catch (taskError) {
       console.error("Error updating approval tasks:", taskError);
       // Continue with quotation update even if task update fails
     }
 
-    // Save the updated quotation
-    console.log("Saving quotation with approvalStatus:", quotation.approvalStatus);
+    // Save the updated quotation first
     await quotation.save();
     console.log("Quotation saved successfully with new status:", quotation.approvalStatus);
 
+    // ADDED: Create new approval task for edited quotation
+    try {
+      const adminUsers = await User.find({ role: "admin" }).select("_id");
+      if (adminUsers.length > 0) {
+        const adminId = adminUsers[0]._id;
+
+        const task = new Task({
+          title: `Approve Edited Quotation #${quotation.DocNum}`,
+          description: `Review and approve edited quotation #${quotation.DocNum} for ${quotation.CardName} (${quotation.CardCode}) - Total: €${quotation.DocTotal.toFixed(2)} (Edited by ${isAdminEdit ? 'Admin' : 'Sales Agent'})`,
+          dueDate: new Date(new Date().setDate(new Date().getDate() + 1)), // Due tomorrow
+          priority: "medium",
+          type: "approval",
+          status: "pending_approval",
+          assignedTo: adminId,
+          createdBy: req.user._id,
+          relatedQuotation: quotation.DocEntry,
+        });
+
+        await task.save();
+        console.log("Created new approval task:", task._id);
+
+        // Link the task to the quotation and save again
+        quotation.approvalTask = task._id;
+        await quotation.save();
+        console.log("Linked task to quotation");
+      }
+    } catch (taskError) {
+      console.error("Error creating approval task for edited quotation:", taskError);
+      // Continue even if task creation fails - quotation is still saved
+    }
     // Create notification for sales agent if admin edited the quotation
     if (isAdminEdit && quotation.salesAgent && quotation.salesAgent._id.toString() !== req.user._id.toString()) {
       try {
@@ -810,29 +827,32 @@ exports.getQuotationStats = async (req, res) => {
     let query = {};
 
     // Role-based filtering
+    // Role-based filtering
     if (req.user.role === "sales_agent") {
-      // Sales agents can only see their own stats
+      // Sales agents can only see their own quotations
       query.salesAgent = req.user._id;
     } else if (req.user.role === "sales_manager") {
-      // Sales managers can see stats from their team members
+      // Sales managers can see quotations from their team members
       const teamMembers = await User.find({ manager: req.user._id }).distinct(
         "_id"
       );
       const allAgentIds = [...teamMembers, req.user._id];
-      query.salesAgent = { $in: allAgentIds };
 
       // If specific sales agent requested, verify they're in the team
-      if (salesAgent) {
-        if (allAgentIds.map((id) => id.toString()).includes(salesAgent)) {
-          query.salesAgent = salesAgent;
+      if (req.query.salesAgent) {  // ✅ FIXED: Use req.query.salesAgent
+        if (allAgentIds.map((id) => id.toString()).includes(req.query.salesAgent)) {
+          query.salesAgent = req.query.salesAgent;
         } else {
-          query.salesAgent = "invalid_agent_id"; // Will return 0 results
+          query.salesAgent = "invalid_agent_id";
         }
+      } else {
+        query.salesAgent = { $in: allAgentIds };
       }
     } else if (req.user.role === "admin") {
-      // Admins can see all stats, optionally filtered by sales agent
-      if (salesAgent) {
-        query.salesAgent = salesAgent;
+      // Admins can see all quotations, optionally filtered by sales agent
+      if (req.query.salesAgent) {  // ✅ FIXED: Use req.query.salesAgent
+        console.log("Admin filtering by sales agent:", req.query.salesAgent);
+        query.salesAgent = req.query.salesAgent;
       }
     }
 
@@ -846,13 +866,18 @@ exports.getQuotationStats = async (req, res) => {
     // Get total quotations
     const totalQuotations = await Quotation.countDocuments(query);
 
-    // Get total value
+    // FIXED: Convert salesAgent to ObjectId for aggregate query if it exists
+    const aggregateQuery = { ...query };
+    if (aggregateQuery.salesAgent && typeof aggregateQuery.salesAgent === 'string') {
+      const mongoose = require('mongoose');
+      aggregateQuery.salesAgent = new mongoose.Types.ObjectId(aggregateQuery.salesAgent);
+    }
+
     const totalValueResult = await Quotation.aggregate([
-      { $match: query },
+      { $match: aggregateQuery },
       { $group: { _id: null, total: { $sum: "$DocTotal" } } },
     ]);
     const totalValue = totalValueResult[0]?.total || 0;
-
     // Get pending approval count
     const pendingApproval = await Quotation.countDocuments({
       ...query,
@@ -1228,32 +1253,40 @@ exports.createQuotation = async (req, res) => {
     }
 
     if (adminUsers.length > 0) {
-      // Assign to the first admin (or you could implement round-robin assignment)
-      const adminId = adminUsers[0]._id;
+      try {
+        // Assign to the first admin (or you could implement round-robin assignment)
+        const adminId = adminUsers[0]._id;
 
-      // Create new task for quotation approval
-      const task = new Task({
-        title: `Approve Quotation #${newQuotation.DocNum}`,
-        description: `Review and approve quotation #${newQuotation.DocNum
-          } for ${newQuotation.CardName} (${newQuotation.CardCode
-          }) - Total: $${newQuotation.DocTotal.toFixed(2)}`,
-        dueDate: new Date(new Date().setDate(new Date().getDate() + 1)), // Due tomorrow
-        priority: "medium",
-        type: "approval",
-        status: "pending_approval",
-        assignedTo: adminId,
-        createdBy: salesAgentId,
-        relatedQuotation: newQuotation.DocEntry,
-      });
+        // CRITICAL FIX: Save quotation FIRST to get DocNum, then create task
+        // This prevents race conditions when multiple quotations are created simultaneously
+        await newQuotation.save();
 
-      await task.save();
+        // Create new task for quotation approval with the saved DocNum
+        const task = new Task({
+          title: `Approve Quotation #${newQuotation.DocNum}`,
+          description: `Review and approve quotation #${newQuotation.DocNum
+            } for ${newQuotation.CardName} (${newQuotation.CardCode
+            }) - Total: $${newQuotation.DocTotal.toFixed(2)}`,
+          dueDate: new Date(new Date().setDate(new Date().getDate() + 1)), // Due tomorrow
+          priority: "medium",
+          type: "approval",
+          status: "pending_approval",
+          assignedTo: adminId,
+          createdBy: salesAgentId,
+          relatedQuotation: newQuotation.DocEntry,
+        });
 
-      // Link the task to the quotation
-      newQuotation.approvalTask = task._id;
-      newQuotation.approvalStatus = "pending";
+        await task.save();
+
+        // Link the task to the quotation and save again
+        newQuotation.approvalTask = task._id;
+        newQuotation.approvalStatus = "pending";
+        await newQuotation.save();
+      } catch (taskError) {
+        console.error("Error creating approval task:", taskError);
+        // Continue even if task creation fails - quotation is still created
+      }
     }
-
-    await newQuotation.save();
 
     res.status(201).json({
       success: true,
@@ -1310,16 +1343,32 @@ exports.getAllQuotations = async (req, res) => {
 
     // Role-based filtering
     if (req.user.role === "sales_agent") {
-      // Sales agents can only see their own quotations
+      // Sales agents can only see their own stats
       query.salesAgent = req.user._id;
     } else if (req.user.role === "sales_manager") {
-      // Sales managers can see quotations from their team members
+      // Sales managers can see stats from their team members
       const teamMembers = await User.find({ manager: req.user._id }).distinct(
         "_id"
       );
-      // Include the manager's own quotations if they have any
       const allAgentIds = [...teamMembers, req.user._id];
-      query.salesAgent = { $in: allAgentIds };
+
+      // If specific sales agent requested, verify they're in the team
+      if (req.query.salesAgent) {
+        if (allAgentIds.map((id) => id.toString()).includes(req.query.salesAgent)) {
+          query.salesAgent = req.query.salesAgent; // FIXED: Apply specific agent filter
+        } else {
+          query.salesAgent = "invalid_agent_id"; // Will return 0 results
+        }
+      } else {
+        query.salesAgent = { $in: allAgentIds }; // FIXED: Show team stats when no specific agent selected
+      }
+    } else if (req.user.role === "admin") {
+      // Admins can see all stats, optionally filtered by sales agent
+      if (req.query.salesAgent) {
+        console.log("Admin filtering by sales agent:", req.query.salesAgent);
+        query.salesAgent = req.query.salesAgent; // FIXED: Apply specific agent filter
+      }
+      // REMOVED: Don't add any salesAgent filter when none is selected by admin
     }
     // Admin users can see all quotations (no additional filtering)
 
@@ -1358,22 +1407,27 @@ exports.getAllQuotations = async (req, res) => {
       };
     }
 
-    // Additional sales agent filter for sales managers
-    if (req.query.salesAgent && req.user.role === "sales_manager") {
-      // Verify the requested agent is in their team
-      const teamMembers = await User.find({ manager: req.user._id }).distinct(
-        "_id"
-      );
-      const requestedAgentId = req.query.salesAgent;
+    // Additional sales agent filter - FIXED to work for all roles
+    if (req.query.salesAgent) {
+      if (req.user.role === "sales_manager") {
+        // Verify the requested agent is in their team
+        const teamMembers = await User.find({ manager: req.user._id }).distinct(
+          "_id"
+        );
+        const requestedAgentId = req.query.salesAgent;
 
-      if (
-        teamMembers.map((id) => id.toString()).includes(requestedAgentId) ||
-        requestedAgentId === req.user._id.toString()
-      ) {
-        query.salesAgent = requestedAgentId;
-      } else {
-        // If requesting an agent not in their team, return empty results
-        query.salesAgent = "invalid_agent_id";
+        if (
+          teamMembers.map((id) => id.toString()).includes(requestedAgentId) ||
+          requestedAgentId === req.user._id.toString()
+        ) {
+          query.salesAgent = requestedAgentId;
+        } else {
+          // If requesting an agent not in their team, return empty results
+          query.salesAgent = "invalid_agent_id";
+        }
+      } else if (req.user.role === "admin") {
+        // ADDED: Allow admins to filter by any sales agent
+        query.salesAgent = req.query.salesAgent;
       }
     }
 
@@ -1908,6 +1962,36 @@ exports.duplicateQuotation = async (req, res) => {
 
     await duplicatedQuotation.save();
 
+    // ADDED: Create approval task for duplicated quotation
+    try {
+      const adminUsers = await User.find({ role: "admin" }).select("_id");
+      if (adminUsers.length > 0) {
+        const adminId = adminUsers[0]._id;
+
+        const task = new Task({
+          title: `Approve Duplicated Quotation #${duplicatedQuotation.DocNum}`,
+          description: `Review and approve duplicated quotation #${duplicatedQuotation.DocNum} for ${duplicatedQuotation.CardName} (${duplicatedQuotation.CardCode}) - Total: €${duplicatedQuotation.DocTotal.toFixed(2)} (Duplicated from #${quotation.DocNum})`,
+          dueDate: new Date(new Date().setDate(new Date().getDate() + 1)), // Due tomorrow
+          priority: "medium",
+          type: "approval",
+          status: "pending_approval",
+          assignedTo: adminId,
+          createdBy: req.user._id,
+          relatedQuotation: duplicatedQuotation.DocEntry,
+        });
+
+        await task.save();
+
+        // Link the task to the quotation
+        duplicatedQuotation.approvalTask = task._id;
+        duplicatedQuotation.approvalStatus = "pending";
+        await duplicatedQuotation.save();
+      }
+    } catch (taskError) {
+      console.error("Error creating approval task for duplicated quotation:", taskError);
+      // Continue even if task creation fails - quotation is still created
+    }
+
     res.status(201).json({
       success: true,
       data: duplicatedQuotation,
@@ -1925,7 +2009,6 @@ exports.duplicateQuotation = async (req, res) => {
     });
   }
 };
-
 // Add to controllers/quotation.controller.js
 
 exports.sendQuotationByEmail = async (req, res) => {
