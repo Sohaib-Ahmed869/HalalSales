@@ -919,6 +919,196 @@ exports.createOrder = async (req, res) => {
   }
 };
 
+exports.getUnsyncedData = async (req, res) => {
+  try {
+    console.log("Fetching all unsynced orders and customers...");
+
+    // Set the cutoff date (16/02/2025)
+    const cutoffDate = new Date("2026-02-16T00:00:00.000Z");
+
+    // Fetch unsynced orders (created in system, not synced to SAP, after 16/02/2025)
+    const unsyncedOrders = await SalesOrder.find({
+      SyncedWithSAP: false,
+      salesAgent: { $exists: true, $ne: null }, // Only system-created orders
+      DocDate: { $gte: cutoffDate }, // Only orders from 16/02/2025 onwards
+    })
+      .populate("salesAgent", "firstName lastName email")
+      .select("DocNum DocDate CardCode CardName DocTotal DocCurrency salesAgent LocalStatus SyncErrors")
+      .sort({ DocDate: -1 })
+      .limit(500);
+
+    // Fetch unsynced customers (created after 16/02/2025)
+    const Customer = require("../models/Customer");
+    const unsyncedCustomers = await Customer.find({
+      SyncedWithSAP: false,
+      customerType: { $ne: "lead" }, // Exclude leads
+      createdAt: { $gte: cutoffDate }, // Only customers created from 16/02/2025 onwards
+    })
+      .populate("assignedTo", "firstName lastName email")
+      .select("CardName Email phoneNumber address assignedTo LocalStatus SyncErrors createdAt")
+      .sort({ createdAt: -1 })
+      .limit(500);
+
+    console.log(`Found ${unsyncedOrders.length} unsynced orders (after ${cutoffDate.toISOString().split('T')[0]})`);
+    console.log(`Found ${unsyncedCustomers.length} unsynced customers (after ${cutoffDate.toISOString().split('T')[0]})`);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        orders: {
+          count: unsyncedOrders.length,
+          data: unsyncedOrders,
+        },
+        customers: {
+          count: unsyncedCustomers.length,
+          data: unsyncedCustomers,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching unsynced data:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching unsynced data",
+      error: error.message,
+    });
+  }
+};
+
+// Bulk sync selected orders and customers to SAP
+exports.bulkSyncSelected = async (req, res) => {
+  try {
+    const { orderIds, customerIds } = req.body;
+
+    const results = {
+      orders: {
+        total: orderIds?.length || 0,
+        successful: 0,
+        failed: 0,
+        details: [],
+      },
+      customers: {
+        total: customerIds?.length || 0,
+        successful: 0,
+        failed: 0,
+        details: [],
+      },
+    };
+
+    // Sync selected orders
+    if (orderIds && orderIds.length > 0) {
+      console.log(`Syncing ${orderIds.length} selected orders...`);
+
+      for (const orderId of orderIds) {
+        try {
+          const order = await SalesOrder.findById(orderId);
+          if (!order) {
+            results.orders.failed++;
+            results.orders.details.push({
+              id: orderId,
+              success: false,
+              error: "Order not found",
+            });
+            continue;
+          }
+
+          const sapResult = await pushOrderToSAPInternal(order);
+
+          if (sapResult.success) {
+            results.orders.successful++;
+            results.orders.details.push({
+              id: orderId,
+              DocNum: order.DocNum,
+              success: true,
+              SAPDocEntry: sapResult.SAPDocEntry,
+            });
+          } else {
+            results.orders.failed++;
+            results.orders.details.push({
+              id: orderId,
+              DocNum: order.DocNum,
+              success: false,
+              error: sapResult.error,
+            });
+          }
+        } catch (error) {
+          results.orders.failed++;
+          results.orders.details.push({
+            id: orderId,
+            success: false,
+            error: error.message,
+          });
+        }
+      }
+    }
+
+    // Sync selected customers
+    if (customerIds && customerIds.length > 0) {
+      console.log(`Syncing ${customerIds.length} selected customers...`);
+
+      const Customer = require("../models/Customer");
+      const { pushBusinessPartnerToSAP } = require("../utils/sapB1Integration");
+
+      for (const customerId of customerIds) {
+        try {
+          const customer = await Customer.findById(customerId);
+          if (!customer) {
+            results.customers.failed++;
+            results.customers.details.push({
+              id: customerId,
+              success: false,
+              error: "Customer not found",
+            });
+            continue;
+          }
+
+          const sapResult = await pushBusinessPartnerToSAP(customer);
+
+          if (sapResult.success) {
+            results.customers.successful++;
+            results.customers.details.push({
+              id: customerId,
+              CardName: customer.CardName,
+              success: true,
+              CardCode: sapResult.CardCode,
+            });
+          } else {
+            results.customers.failed++;
+            results.customers.details.push({
+              id: customerId,
+              CardName: customer.CardName,
+              success: false,
+              error: sapResult.error,
+            });
+          }
+        } catch (error) {
+          results.customers.failed++;
+          results.customers.details.push({
+            id: customerId,
+            success: false,
+            error: error.message,
+          });
+        }
+      }
+    }
+
+    console.log("Bulk sync completed:", results);
+
+    res.status(200).json({
+      success: true,
+      message: `Sync completed. Orders: ${results.orders.successful}/${results.orders.total} successful. Customers: ${results.customers.successful}/${results.customers.total} successful.`,
+      data: results,
+    });
+  } catch (error) {
+    console.error("Error in bulk sync:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error during bulk sync",
+      error: error.message,
+    });
+  }
+};
+
 // Add this filter option to your getAllOrders function
 // Add this to the existing filters section:
 exports.getAllOrders = async (req, res) => {
@@ -1050,7 +1240,7 @@ exports.getAllOrders = async (req, res) => {
             }
           }
         },
-        { $sort: { effectiveDeliveryDate: sortOrder } },
+        { $sort: { effectiveDeliveryDate: sortOrder, CardName: 1 } }, // *** ADDED CardName: 1 ***
         { $skip: skip },
         { $limit: limit },
         {
@@ -1090,7 +1280,63 @@ exports.getAllOrders = async (req, res) => {
       });
     } else {
       // Standard sorting for other fields
+
+      // *** SPECIAL HANDLING FOR DocDate - sort by date only, not time ***
+      if (sortBy === "DocDate") {
+        const orders = await SalesOrder.aggregate([
+          { $match: query },
+          {
+            $addFields: {
+              // Extract just the date part (no time)
+              dateOnly: {
+                $dateToString: { format: "%Y-%m-%d", date: "$DocDate" }
+              }
+            }
+          },
+          { $sort: { dateOnly: sortOrder, CardName: 1 } },
+          { $skip: skip },
+          { $limit: limit },
+          {
+            $lookup: {
+              from: "users",
+              localField: "salesAgent",
+              foreignField: "_id",
+              as: "salesAgent"
+            }
+          },
+          {
+            $unwind: {
+              path: "$salesAgent",
+              preserveNullAndEmptyArrays: true
+            }
+          },
+          {
+            $project: {
+              "salesAgent.password": 0,
+              "salesAgent.resetPasswordToken": 0,
+              "salesAgent.resetPasswordExpire": 0
+            }
+          }
+        ]);
+
+        const total = await SalesOrder.countDocuments(query);
+
+        console.log(`Found ${orders.length} orders out of ${total} total (sorted by date only + CardName)`);
+
+        return res.status(200).json({
+          success: true,
+          count: orders.length,
+          total,
+          page,
+          pages: Math.ceil(total / limit),
+          data: orders,
+        });
+      }
+
+      // Regular sorting for other fields
+      const sortObj = {};
       sortObj[sortBy] = sortOrder;
+      sortObj.CardName = 1;
 
       console.log("Sort:", sortObj);
 

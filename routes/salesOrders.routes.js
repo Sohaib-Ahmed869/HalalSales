@@ -24,6 +24,8 @@ const upload = multer({
     }
   },
 });
+router.get("/unsynced-data", auth, orderController.getUnsyncedData);
+router.post("/bulk-sync-selected", auth, orderController.bulkSyncSelected);
 router.post("/sync-recent-from-sap",  auth, orderController.syncRecentOrdersFromSAP);
 router.post(
   "/update-notes-from-sap",
