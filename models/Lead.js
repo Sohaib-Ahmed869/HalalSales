@@ -24,7 +24,7 @@ const LeadSchema = new Schema({
   // Lead categorization
   status: {
     type: String,
-    enum: ["new", "contacted", "qualified", "converted", "lost"],
+    enum: ["new", "qualified", "converted", "dead"],
     default: "new",
   },
   tags: [

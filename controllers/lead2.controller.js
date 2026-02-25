@@ -216,15 +216,13 @@ exports.getLeadStats = async (req, res) => {
           _id: null,
           totalLeads: { $sum: 1 },
           newLeads: { $sum: { $cond: [{ $eq: ["$status", "new"] }, 1, 0] } },
-          contactedLeads: {
-            $sum: { $cond: [{ $eq: ["$status", "contacted"] }, 1, 0] },
-          },
           qualifiedLeads: {
             $sum: { $cond: [{ $eq: ["$status", "qualified"] }, 1, 0] },
           },
           convertedLeads: {
             $sum: { $cond: [{ $eq: ["$status", "converted"] }, 1, 0] },
           },
+          deadLeads: { $sum: { $cond: [{ $eq: ["$status", "dead"] }, 1, 0] } },
           lostLeads: { $sum: { $cond: [{ $eq: ["$status", "lost"] }, 1, 0] } },
           unassignedLeads: {
             $sum: { $cond: [{ $not: ["$assignedTo"] }, 1, 0] },
@@ -255,10 +253,9 @@ exports.getLeadStats = async (req, res) => {
         overview: stats[0] || {
           totalLeads: 0,
           newLeads: 0,
-          contactedLeads: 0,
           qualifiedLeads: 0,
           convertedLeads: 0,
-          lostLeads: 0,
+          deadLeads: 0,
           unassignedLeads: 0,
         },
         tagBreakdown: tagStats,
@@ -323,9 +320,24 @@ exports.createLead = async (req, res) => {
       updatedAt: new Date(),
     };
 
+    console.log("Creating lead with data:", leadData);
+
     // Auto-assign to sales agent if they create the lead
     if (req.user.role === "sales_agent") {
       leadData.assignedTo = req.user._id;
+    }
+
+    //if made by admin or manager see which agent assigned
+    if (req.user.role === "admin" || req.user.role === "manager") {
+      if (leadData.assignedTo) {
+        const agent = await User.findById(leadData.assignedTo);
+        if (!agent || agent.role !== "sales_agent") {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid sales agent ID in assignedTo field",
+          });
+        }
+      }
     }
 
     // Check for duplicate email if provided
