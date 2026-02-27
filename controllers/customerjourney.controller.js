@@ -390,7 +390,7 @@ exports.getCustomerJourney = async (req, res) => {
           isPaid: actualPaidAmount >= invoice.DocTotal,
           partiallyPaid:
             actualPaidAmount > 0 && actualPaidAmount < invoice.DocTotal,
-          paidAmount: invoice.DocTotal,
+          paidAmount: actualPaidAmount,
           balance: invoice.DocTotal - actualPaidAmount,
           details: invoice,
         };
