@@ -383,14 +383,14 @@ exports.getCustomerJourney = async (req, res) => {
         return {
           type: "invoice",
           date: invoice.DocDate,
-          amount: netAmount, // Use net amount instead of DocTotal
+          amount: invoice.DocTotal, // Use net amount instead of DocTotal
           grossAmount: invoice.DocTotal, // Keep gross for reference
           vatAmount: invoice.VatSum || 0,
           docNum: invoice.DocNum,
           isPaid: actualPaidAmount >= invoice.DocTotal,
           partiallyPaid:
             actualPaidAmount > 0 && actualPaidAmount < invoice.DocTotal,
-          paidAmount: actualPaidAmount,
+          paidAmount: invoice.DocTotal,
           balance: invoice.DocTotal - actualPaidAmount,
           details: invoice,
         };
@@ -509,7 +509,7 @@ exports.getCustomerJourney = async (req, res) => {
       totalInvoices: invoices.length,
       totalPayments: payments.length,
       totalInvoiceAmount: invoices.reduce(
-        (sum, inv) => sum + ((inv.DocTotal || 0) - (inv.VatSum || 0)),
+        (sum, inv) => sum + ((inv.DocTotal || 0)),
         0
       ),
       totalInvoiceAmountGross: invoices.reduce(

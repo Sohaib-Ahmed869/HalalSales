@@ -4791,7 +4791,7 @@ exports.getCustomerCallData = async (req, res) => {
     // Get paginated call data
     const callData = await CallData.find(filter)
       .select(
-        "id callID direction fromNumber toNumber startTime inCallDuration totalDuration lastState missed userName transcript analysis qualityScore structuredAnalysis analysisTimestamp file"
+        "id callID direction fromNumber toNumber startTime inCallDuration totalDuration lastState missed userName transcript analysis qualityScore structuredAnalysis analysisTimestamp file originalTranscript"
       )
       .sort({ startTime: -1 })
       .skip(skip)
