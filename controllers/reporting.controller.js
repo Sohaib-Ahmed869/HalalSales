@@ -208,10 +208,37 @@ exports.getCustomerSalesReport = async (req, res) => {
                     totalQuotations: { $count: {} },
                     quotationNumbers: { $push: "$DocNum" },
                     totalQuotationValue: { $sum: "$DocTotal" },
+                    unconvertedQuotations: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $ne: ["$DocumentStatus", "bost_Close"] },
+                                        { $ne: ["$convertedToOrder", true] }
+                                    ]
+                                },
+                                1,
+                                0
+                            ]
+                        }
+                    },
+                    unconvertedQuotationValue: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $ne: ["$DocumentStatus", "bost_Close"] },
+                                        { $ne: ["$convertedToOrder", true] }
+                                    ]
+                                },
+                                "$DocTotal",
+                                0
+                            ]
+                        }
+                    },
                 },
             },
         ]);
-
         // Merge all data
         const salesMap = new Map(customerSales.map(cs => [cs.cardCode, cs]));
         const salesOrderMap = new Map(salesOrders.map(so => [so._id, so]));
@@ -309,6 +336,8 @@ exports.getCustomerSalesReport = async (req, res) => {
                     count: qt.totalQuotations || 0,
                     numbers: qt.quotationNumbers || [],
                     totalValue: qt.totalQuotationValue || 0,
+                    unconvertedCount: qt.unconvertedQuotations || 0,
+                    unconvertedValue: qt.unconvertedQuotationValue || 0,
                 },
                 periodComparison,
             };

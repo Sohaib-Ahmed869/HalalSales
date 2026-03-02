@@ -10,17 +10,114 @@ const { auth, checkRole, updateLastLogin } = require("../middleware/auth");
 
 // Configure multer for file uploads
 const storage = multer.memoryStorage();
-const upload = multer({ 
+const upload = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
   fileFilter: (req, file, cb) => {
     // Accept only excel files
-    if (file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || 
-        file.mimetype === 'application/vnd.ms-excel') {
+    if (file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+      file.mimetype === 'application/vnd.ms-excel') {
       cb(null, true);
     } else {
       cb(new Error('Only Excel files are allowed!'), false);
     }
+  }
+});
+router.post('/upload-v2', upload.single('desktimeFile'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'No file uploaded' });
+    }
+
+    const batchId = uuidv4();
+    const uploadedBy = req.user ? req.user.id : 'system';
+    const originalFilename = req.file.originalname;
+
+    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+    const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+    const data = XLSX.utils.sheet_to_json(worksheet, { raw: false });
+
+    if (!data || data.length === 0) {
+      return res.status(400).json({ success: false, message: 'Excel file contains no data' });
+    }
+
+    console.log('Row keys from file:', Object.keys(data[0]).map(k => `"${k}"`));
+
+    const records = [];
+    const errors = [];
+
+    for (let i = 0; i < data.length; i++) {
+      const row = data[i];
+      try {
+        // Normalize all keys - trim whitespace
+        const r = {};
+        Object.keys(row).forEach(key => {
+          r[key.trim()] = typeof row[key] === 'string' ? row[key].trim() : row[key];
+        });
+
+        // Parse date
+        const dateValue = r['Date'];
+        if (!dateValue) throw new Error('Missing date');
+        const date = new Date(dateValue);
+        if (isNaN(date.getTime())) throw new Error(`Invalid date: ${dateValue}`);
+
+        // Extract required fields
+        const email = r['Email'] || r['email'] || '';
+        const name = r['User name'] || r['Name'] || r['name'] || '';
+        const userId = r['User ID'] || r['userId'] || r['user_id'] || email;
+
+        if (!email || !name) throw new Error('Missing required fields: name or email');
+
+        records.push({
+          date,
+          userId,
+          name,
+          email,
+          userRoles: r['User Roles'] || r['userRoles'] || '',
+          group: r['Team'] || r['Group'] || r['group'] || '',
+          absence: r['Absence'] || r['absence'] || '',
+          productiveTime: r['Productive time (sum)'] || r['Productive time'] || '',
+          unproductiveTime: r['Unproductive time (sum)'] || r['Unproductive time'] || '',
+          neutralTime: r['Neutral time (sum)'] || r['Neutral time'] || '',
+          totalDeskTime: r['Total DeskTime'] || '',
+          offlineTime: r['Offline time'] || '',
+          privateTime: r['Private time (sum)'] || r['Private time'] || '',
+          arrived: r['Arrival time'] || r['Arrived'] || r['arrived'] || '',
+          left: r['Left time'] || r['Left'] || r['left'] || '',
+          late: r['Late (sum)'] || r['Late'] || r['late'] || '',
+          totalTimeAtWork: r['Total time at work'] || '',
+          idleTime: r['Idle time (sum)'] || r['Idle time'] || '',
+          extraHoursBeforeWork: r['Extra hours before work (sum)'] || r['Extra hours before work'] || '',
+          extraHoursAfterWork: r['Extra hours after work (sum)'] || r['Extra hours after work'] || '',
+          hourlyRate: parseFloat(r['Hourly rate'] || r['hourlyRate'] || 0) || 0,
+          metadata: {
+            batchId,
+            uploadedAt: new Date(),
+            uploadedBy,
+            originalFilename
+          }
+        });
+      } catch (error) {
+        errors.push({ row: i + 1, error: error.message });
+      }
+    }
+
+    if (records.length === 0) {
+      return res.status(400).json({ success: false, message: 'No valid records found', errors });
+    }
+
+    const result = await DeskTime.insertMany(records, { ordered: false });
+
+    res.status(201).json({
+      success: true,
+      message: `Successfully uploaded ${result.length} DeskTime records`,
+      batchId,
+      totalRecords: result.length,
+      errors: errors.length > 0 ? errors : undefined
+    });
+  } catch (error) {
+    console.error('Error processing DeskTime upload v2:', error);
+    res.status(500).json({ success: false, message: 'Server error', error: error.message });
   }
 });
 // Route for getting all DeskTime records for a specific sales agent
@@ -147,7 +244,7 @@ router.post('/upload', upload.single('desktimeFile'), async (req, res) => {
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
     const firstSheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[firstSheetName];
-    
+
     // Convert to JSON with header rows
     const data = XLSX.utils.sheet_to_json(worksheet, { raw: false, dateNF: 'yyyy-mm-dd' });
 
@@ -166,11 +263,11 @@ router.post('/upload', upload.single('desktimeFile'), async (req, res) => {
 
     for (let i = 0; i < data.length; i++) {
       const row = data[i];
-      
+
       try {
         // Extract date from the Excel data
         let dateValue = row['Date'] || row['date'];
-        
+
         // If date is not in ISO format, parse it
         let date;
         if (dateValue) {
@@ -198,26 +295,26 @@ router.post('/upload', upload.single('desktimeFile'), async (req, res) => {
         // Map Excel columns to model fields
         const record = {
           date,
-          userId: row['User ID'] || row['userId'] || row['user_id'] || '',
-          name: row['Name'] || row['name'] || '',
+          userId: row['Email'] || email,
+          name: row['User name'] || row['Name'] || row['name'] || '',
           email: row['Email'] || row['email'] || '',
-          userRoles: row['User Roles'] || row['userRoles'] || row['user_roles'] || '',
-          group: row['Group'] || row['group'] || '',
-          absence: row['Absence'] || row['absence'] || '',
-          productiveTime: row['Productive time'] || row['productiveTime'] || row['productive_time'] || '',
-          unproductiveTime: row['Unproductive time'] || row['unproductiveTime'] || row['unproductive_time'] || '',
-          neutralTime: row['Neutral time'] || row['neutralTime'] || row['neutral_time'] || '',
-          totalDeskTime: row['Total DeskTime'] || row['totalDeskTime'] || row['total_desk_time'] || '',
-          offlineTime: row['Offline time'] || row['offlineTime'] || row['offline_time'] || '',
-          privateTime: row['Private time'] || row['privateTime'] || row['private_time'] || '',
-          arrived: row['Arrived'] || row['arrived'] || '',
-          left: row['Left'] || row['left'] || '',
-          late: row['Late'] || row['late'] || '',
-          totalTimeAtWork: row['Total time at work'] || row['totalTimeAtWork'] || row['total_time_at_work'] || '',
-          idleTime: row['Idle time'] || row['idleTime'] || row['idle_time'] || '',
-          extraHoursBeforeWork: row['Extra hours before work'] || row['extraHoursBeforeWork'] || row['extra_hours_before_work'] || '',
-          extraHoursAfterWork: row['Extra hours after work'] || row['extraHoursAfterWork'] || row['extra_hours_after_work'] || '',
-          hourlyRate: parseFloat(row['Hourly rate'] || row['hourlyRate'] || row['hourly_rate'] || 0),
+          userRoles: '',
+          group: '',
+          absence: '',
+          productiveTime: row['Productive time (sum)'] || '',
+          unproductiveTime: row['Unproductive time (sum)'] || '',
+          neutralTime: row['Neutral time (sum)'] || '',
+          totalDeskTime: row['Total DeskTime'] || '',
+          offlineTime: row['Offline time'] || '',
+          privateTime: row['Private time (sum)'] || '',
+          arrived: row['Arrival time'] || '',
+          left: row['Left time'] || '',
+          late: row['Late (sum)'] || '',
+          totalTimeAtWork: row['Total time at work'] || '',
+          idleTime: row['Idle time (sum)'] || '',
+          extraHoursBeforeWork: row['Extra hours before work (sum)'] || '',
+          extraHoursAfterWork: row['Extra hours after work (sum)'] || '',
+          hourlyRate: 0,
           metadata: {
             batchId,
             uploadedAt: new Date(),
@@ -228,6 +325,7 @@ router.post('/upload', upload.single('desktimeFile'), async (req, res) => {
 
         // Validate required fields
         if (!record.userId || !record.name || !record.email) {
+          console.log(record.userId, record.name, record.email);
           throw new Error('Missing required fields: userId, name, or email');
         }
 
@@ -276,13 +374,15 @@ router.post('/upload', upload.single('desktimeFile'), async (req, res) => {
 router.get('/batches', auth, async (req, res) => {
   try {
     const batches = await DeskTime.aggregate([
-      { $group: { 
-        _id: '$metadata.batchId',
-        uploadedAt: { $first: '$metadata.uploadedAt' },
-        uploadedBy: { $first: '$metadata.uploadedBy' },
-        originalFilename: { $first: '$metadata.originalFilename' },
-        recordCount: { $sum: 1 }
-      }},
+      {
+        $group: {
+          _id: '$metadata.batchId',
+          uploadedAt: { $first: '$metadata.uploadedAt' },
+          uploadedBy: { $first: '$metadata.uploadedBy' },
+          originalFilename: { $first: '$metadata.originalFilename' },
+          recordCount: { $sum: 1 }
+        }
+      },
       { $sort: { uploadedAt: -1 } }
     ]);
 

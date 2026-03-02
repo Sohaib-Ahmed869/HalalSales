@@ -301,8 +301,8 @@ exports.getDocumentsByDateRange = async (req, res) => {
         console.log(includePotentialCustomers);
 
         // Get potential customers (those WITHOUT invoices in date range)
-        if (includePotentialCustomers === "true") {
-            // CHANGED: Use invoices instead of orders
+        if (includePotentialCustomers === "true" || type === "potential" || type === "all") {
+            // CHANGED: Use invoices instead of ordersx
             const customersWithInvoices = new Set(results.invoices.map(inv => inv.cardCode));
 
             for (const customer of customersWithCoords) {

@@ -359,9 +359,6 @@ const restaurantScraperController = {
       });
     }
   },
-  /**
-   * Get all restaurants for a postal code with pagination
-   */
   getRestaurantsByPostalCode: async (req, res) => {
     try {
       const { postalCode } = req.params;
@@ -370,11 +367,10 @@ const restaurantScraperController = {
         limit = 20,
         search = '',
         sortBy = 'scraped_at',
-        sortOrder = 'desc'
+        sortOrder = 'desc',
+        assignmentFilter = 'all'
       } = req.query;
 
-      // Validate postal code format
-      console.log('Validating postal code:', postalCode);
       if (!postalCode.match(/^(?:0[1-9]|[1-8][0-9]|9[0-6])[0-9]{3}$/)) {
         return res.status(400).json({
           success: false,
@@ -385,7 +381,6 @@ const restaurantScraperController = {
       const skip = (parseInt(page) - 1) * parseInt(limit);
       const sort = { [sortBy]: sortOrder === 'desc' ? -1 : 1 };
 
-      // Build search query
       let query = { postal_code: postalCode };
       if (search) {
         query.$or = [
@@ -395,17 +390,38 @@ const restaurantScraperController = {
         ];
       }
 
-      // Get restaurants with pagination
-      const [restaurants, total] = await Promise.all([
+      // Apply assignment filter BEFORE querying
+      if (assignmentFilter === 'assigned' || assignmentFilter === 'unassigned') {
+        const assignedRestaurantIds = await RestaurantAssignment.distinct('restaurant');
+        if (assignmentFilter === 'assigned') {
+          query._id = { $in: assignedRestaurantIds };
+        } else {
+          query._id = { $nin: assignedRestaurantIds };
+        }
+      }
+
+      const [restaurants, total, allAssignments] = await Promise.all([
         Restaurant.find(query)
           .sort(sort)
           .skip(skip)
           .limit(parseInt(limit))
           .lean(),
-        Restaurant.countDocuments(query)
+        Restaurant.countDocuments(query),
+        RestaurantAssignment.find({ restaurant: { $in: await Restaurant.find(query).distinct('_id') } })
+          .populate('assignedAgent', 'firstName lastName')
+          .lean()
       ]);
 
-      // Calculate statistics
+      const assignmentMap = {};
+      allAssignments.forEach(a => {
+        assignmentMap[a.restaurant.toString()] = a;
+      });
+
+      const restaurantsWithAssignment = restaurants.map(r => ({
+        ...r,
+        assignment: assignmentMap[r._id.toString()] || null
+      }));
+
       const stats = await Restaurant.aggregate([
         { $match: { postal_code: postalCode } },
         {
@@ -446,7 +462,7 @@ const restaurantScraperController = {
       res.json({
         success: true,
         data: {
-          restaurants,
+          restaurants: restaurantsWithAssignment,
           pagination: {
             currentPage: parseInt(page),
             totalPages: Math.ceil(total / parseInt(limit)),
@@ -465,7 +481,8 @@ const restaurantScraperController = {
             postalCode,
             search,
             sortBy,
-            sortOrder
+            sortOrder,
+            assignmentFilter
           }
         }
       });

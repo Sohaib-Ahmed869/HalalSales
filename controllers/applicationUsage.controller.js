@@ -15,7 +15,6 @@ const timeParser = require("../utils/time-parser");
  */
 exports.processApplicationUsageCSV = async (req, res) => {
   try {
-    // Check if files were uploaded
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({
         success: false,
@@ -23,110 +22,91 @@ exports.processApplicationUsageCSV = async (req, res) => {
       });
     }
 
-    const file = req.files[0]; // Get the first file
+    const file = req.files[0];
     const filePath = file.path;
-    const batchId = uuidv4(); // Generate a unique batch ID
-    const results = [];
+    const batchId = uuidv4();
     const errors = [];
     let processedCount = 0;
 
-    // Create a read stream for the CSV file
     const stream = fs.createReadStream(filePath).pipe(
       csv({
-        skipLines: 0, // Skip header line if needed
-        headers: [
-          // Define the headers based on your CSV format
-          "Date",
-          "User ID",
-          "Name",
-          "Email",
-          "User Roles",
-          "Group",
-          "Application",
-          "Productivity",
-          "Time",
-        ],
+        skipLines: 0,
+        mapHeaders: ({ header }) => header.trim(), // normalize headers
       })
     );
 
-    // Process each row from the CSV file
+    const records = [];
+
     for await (const row of stream) {
       try {
-        // Parse the date - try direct parsing first (works for YYYY-MM-DD format)
-        let date = new Date(row.Date);
-        
-        // If direct parsing fails, try other formats
-        if (isNaN(date.getTime())) {
-          const dateParts = row.Date.split(/[\/\-]/); // Split by either / or -
-          
-          if (dateParts.length === 3) {
-            // Try DD/MM/YYYY format
-            date = new Date(`${dateParts[2]}-${dateParts[1]}-${dateParts[0]}`);
-            
-            // If date is still invalid, try MM/DD/YYYY format
-            if (isNaN(date.getTime())) {
-              date = new Date(`${dateParts[2]}-${dateParts[0]}-${dateParts[1]}`);
-            }
-          }
+        // Normalize all values
+        const r = {};
+        Object.keys(row).forEach(key => {
+          r[key.trim()] = typeof row[key] === 'string' ? row[key].trim() : row[key];
+        });
+
+        const dateValue = r['Date'];
+        if (!dateValue) throw new Error('Missing date');
+
+        let date;
+        if (dateValue.includes('/')) {
+          const parts = dateValue.split('/');
+          // DD/MM/YYYY
+          date = new Date(`${parts[2]}-${parts[1]}-${parts[0]}`);
+        } else {
+          date = new Date(dateValue);
         }
 
-        // Validate the date
-        if (isNaN(date.getTime())) {
-          console.error(`Invalid date format: ${row.Date}`);
-          // Use current date as fallback
-          date = new Date();
-        }
+        if (isNaN(date.getTime())) throw new Error(`Invalid date: ${dateValue}`);
 
-        // Convert time spent to hours
-        const timeSpentHours = timeParser.parseTimeToHours(row.Time);
+        const email = r['Email'] || r['email'] || '';
+        const name = r['User name'] || r['Name'] || '';
+        const userId = r['User ID'] || email;
+        const application = r['App/URL name'] || r['Application'] || '';
+        const productivityRaw = r['Productivity level'] || r['Productivity'] || 'neutral';
+        const productivity = productivityRaw.toLowerCase();
+        const timeSpent = r['Time'] || '0:00:00';
+        const timeSpentHours = timeParser.parseTimeToHours(timeSpent);
 
-        // Create a new application usage record
-        const appUsage = new ApplicationUsage({
-          date: date,
-          userId: row["User ID"],
-          name: row.Name,
-          email: row.Email,
-          userRoles: row["User Roles"],
-          group: row.Group,
-          application: row.Application,
-          productivity: row.Productivity.toLowerCase(), // Normalize to lowercase
-          timeSpent: row.Time,
-          timeSpentHours: timeSpentHours,
+        if (!email || !application) throw new Error('Missing required fields: email or application');
+
+        records.push({
+          date,
+          userId,
+          name,
+          email,
+          userRoles: r['User Roles'] || '',
+          group: r['Group'] || '',
+          application,
+          productivity,
+          timeSpent,
+          timeSpentHours,
           metadata: {
-            batchId: batchId,
+            batchId,
             uploadedAt: new Date(),
-            uploadedBy: req.user ? req.user._id : "system",
+            uploadedBy: req.user ? req.user._id : 'system',
             originalFilename: file.originalname,
           },
         });
-
-        // Save the record to the database
-        await appUsage.save();
-
-        processedCount++;
-        results.push({
-          userId: row["User ID"],
-          date: date,
-          application: row.Application,
-          timeSpent: row.Time,
-        });
       } catch (error) {
-        console.error(`Error processing row: ${JSON.stringify(row)}`, error);
-        errors.push({
-          row: row,
-          error: error.message,
-        });
+        console.error(`Error processing row:`, error.message);
+        errors.push({ row, error: error.message });
       }
     }
 
-    // Delete the temporary file after processing
     fs.unlinkSync(filePath);
 
-    // Return the results
+    if (records.length === 0) {
+      return res.status(400).json({ success: false, message: 'No valid records found', errors });
+    }
+
+    const result = await ApplicationUsage.insertMany(records, { ordered: false });
+    processedCount = result.length;
+
     res.status(200).json({
       success: true,
       message: `Successfully processed ${processedCount} application usage records`,
-      batchId: batchId,
+      batchId,
       processed: processedCount,
       errors: errors.length,
       errorDetails: errors.length > 0 ? errors : undefined,
