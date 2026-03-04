@@ -286,12 +286,12 @@ exports.allocatePaymentToInvoice = async (req, res) => {
 
         let differenceOfAllocation = amountToAllocate - invoiceRemaining;
 
-        if (differenceOfAllocation > 1 || differenceOfAllocation < -1) {
-            return res.status(400).json({
-                success: false,
-                message: `Invoice only needs ${invoiceRemaining}, cannot allocate ${amountToAllocate}`,
-            });
-        }
+        // if (differenceOfAllocation > 1 || differenceOfAllocation < -1) {
+        //     return res.status(400).json({
+        //         success: false,
+        //         message: `Invoice only needs ${invoiceRemaining}, cannot allocate ${amountToAllocate}`,
+        //     });
+        // }
 
         // ✅ NEW: Create payment in SAP
         let sapPaymentDocEntry = null;
