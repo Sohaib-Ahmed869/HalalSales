@@ -1,5 +1,5 @@
 const Deal = require("../models/Deal");
-
+const Customer = require("../models/Customer");
 // Helper function to handle errors
 const handleError = (res, error) => {
   console.error("Error:", error);

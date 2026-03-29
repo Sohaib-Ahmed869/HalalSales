@@ -1,5 +1,5 @@
 const Cart = require("../models/Cart");
-
+const Customer = require("../models/Customer");
 // Helper function to handle errors
 const handleError = (res, error) => {
   console.error("Error:", error);
@@ -80,6 +80,7 @@ exports.getAbandonedCarts = async (req, res) => {
     // Category filter for drill-down
     const category = req.query.category || null;
     const productId = req.query.productId || null;
+    const salesAgent = req.query.salesAgent || null;
 
     // Build query - only abandoned carts
     const query = {
@@ -102,7 +103,70 @@ exports.getAbandonedCarts = async (req, res) => {
     }
 
     if (productId) {
-      query["products.name"] = productId; // Using product name as ID in your CSV data
+      query["products.name"] = productId;
+    }
+
+    // If filtering by sales agent, pre-fetch matching customer identifiers
+    if (salesAgent) {
+      let customerQuery;
+      if (salesAgent === "unassigned") {
+        customerQuery = { assignedTo: { $exists: false } };
+      } else {
+        const mongoose = require("mongoose");
+        customerQuery = { assignedTo: new mongoose.Types.ObjectId(salesAgent) };
+      }
+
+      const matchedCustomers = await Customer.find(customerQuery)
+        .select("Email additionalEmails phoneNumber additionalPhoneNumbers CardName")
+        .lean();
+
+      // Build arrays of all possible identifiers
+      const emails = [];
+      const phones = [];
+      const names = [];
+
+      matchedCustomers.forEach((c) => {
+        if (c.Email) emails.push(c.Email.toLowerCase());
+        if (c.additionalEmails) {
+          c.additionalEmails.forEach((e) => { if (e) emails.push(e.toLowerCase()); });
+        }
+        if (c.phoneNumber) phones.push(c.phoneNumber.replace(/[\s\-()]/g, ""));
+        if (c.additionalPhoneNumbers) {
+          c.additionalPhoneNumbers.forEach((p) => { if (p) phones.push(p.replace(/[\s\-()]/g, "")); });
+        }
+        if (c.CardName) names.push(c.CardName);
+      });
+
+      // Build $or conditions to match carts to these customers
+      const orConditions = [];
+      if (emails.length > 0) {
+        const emailRegexes = emails.map((e) => new RegExp(`^${e.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"));
+        orConditions.push({ customerEmail: { $in: emailRegexes } });
+        orConditions.push({ "contactInfo.email": { $in: emailRegexes } });
+      }
+      if (phones.length > 0) {
+        orConditions.push({ "contactInfo.phone": { $in: phones } });
+        orConditions.push({ "contactInfo.mobilePhone": { $in: phones } });
+      }
+      if (names.length > 0) {
+        const nameRegexes = names.map((n) => new RegExp(`^${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"));
+        orConditions.push({ customerName: { $in: nameRegexes } });
+      }
+
+      if (orConditions.length > 0) {
+        query.$or = orConditions;
+      } else {
+        // No matching customers found — return empty
+        return res.status(200).json({
+          success: true,
+          count: 0,
+          totalPages: 0,
+          currentPage: page,
+          totalItems: 0,
+          data: [],
+          drillDown: { categories: [] },
+        });
+      }
     }
 
     const abandonedCarts = await Cart.find(query)
@@ -111,6 +175,60 @@ exports.getAbandonedCarts = async (req, res) => {
       .limit(limit);
 
     const total = await Cart.countDocuments(query);
+
+    // Enrich carts with CardCode and assigned sales agent
+    const enrichedCarts = await Promise.all(
+      abandonedCarts.map(async (cart) => {
+        const cartObj = cart.toObject();
+        const email = cartObj.customerEmail || cartObj.contactInfo?.email;
+        const phone = cartObj.contactInfo?.phone || cartObj.contactInfo?.mobilePhone;
+        const name = cartObj.customerName;
+
+        let customer = null;
+
+        // 1. Try email match
+        if (!customer && email) {
+          customer = await Customer.findOne({
+            $or: [
+              { Email: { $regex: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } },
+              { additionalEmails: { $regex: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } }
+            ]
+          }).populate('assignedTo', 'firstName lastName email role').lean();
+        }
+
+        // 2. Try phone match
+        if (!customer && phone) {
+          const cleanPhone = phone.replace(/[\s\-()]/g, '');
+          customer = await Customer.findOne({
+            $or: [
+              { phoneNumber: cleanPhone },
+              { additionalPhoneNumbers: cleanPhone }
+            ]
+          }).populate('assignedTo', 'firstName lastName email role').lean();
+        }
+
+        // 3. Try name match (exact, case-insensitive)
+        if (!customer && name) {
+          customer = await Customer.findOne({
+            CardName: { $regex: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+          }).populate('assignedTo', 'firstName lastName email role').lean();
+        }
+
+        cartObj.cardCode = customer?.CardCode || null;
+        cartObj.assignedAgent = customer?.assignedTo
+          ? {
+            _id: customer.assignedTo._id,
+            name: `${customer.assignedTo.firstName || ''} ${customer.assignedTo.lastName || ''}`.trim(),
+            email: customer.assignedTo.email,
+            role: customer.assignedTo.role,
+          }
+          : null;
+
+        return cartObj;
+      })
+    );
+
+    const finalCarts = enrichedCarts;
 
     // Get aggregated data for drill-down navigation
     const categories = await Cart.aggregate([
@@ -133,7 +251,7 @@ exports.getAbandonedCarts = async (req, res) => {
       totalPages: Math.ceil(total / limit),
       currentPage: page,
       totalItems: total,
-      data: abandonedCarts,
+      data: finalCarts,
       drillDown: {
         categories: categories,
       },
@@ -532,10 +650,54 @@ exports.exportAbandonedCarts = async (req, res) => {
       "customerName customerEmail contactInfo.email totalIncludingTaxes products createDate"
     );
 
+    // Enrich with CardCode and sales agent
+    const enrichedCarts = await Promise.all(
+      abandonedCarts.map(async (cart) => {
+        const cartObj = cart.toObject();
+        const email = cartObj.customerEmail || cartObj.contactInfo?.email;
+        const phone = cartObj.contactInfo?.phone || cartObj.contactInfo?.mobilePhone;
+        const name = cartObj.customerName;
+
+        let customer = null;
+
+        if (!customer && email) {
+          customer = await Customer.findOne({
+            $or: [
+              { Email: { $regex: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } },
+              { additionalEmails: { $regex: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } }
+            ]
+          }).populate('assignedTo', 'firstName lastName email role').lean();
+        }
+
+        if (!customer && phone) {
+          const cleanPhone = phone.replace(/[\s\-()]/g, '');
+          customer = await Customer.findOne({
+            $or: [
+              { phoneNumber: cleanPhone },
+              { additionalPhoneNumbers: cleanPhone }
+            ]
+          }).populate('assignedTo', 'firstName lastName email role').lean();
+        }
+
+        if (!customer && name) {
+          customer = await Customer.findOne({
+            CardName: { $regex: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+          }).populate('assignedTo', 'firstName lastName email role').lean();
+        }
+
+        cartObj.cardCode = customer?.CardCode || null;
+        cartObj.assignedAgent = customer?.assignedTo
+          ? { name: `${customer.assignedTo.firstName || ''} ${customer.assignedTo.lastName || ''}`.trim() }
+          : null;
+
+        return cartObj;
+      })
+    );
+
     res.status(200).json({
       success: true,
-      count: abandonedCarts.length,
-      data: abandonedCarts,
+      count: enrichedCarts.length,
+      data: enrichedCarts,
     });
   } catch (error) {
     handleError(res, error);

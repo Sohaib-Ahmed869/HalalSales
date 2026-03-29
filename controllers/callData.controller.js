@@ -4,6 +4,116 @@ const axios = require("axios");
 const { parse } = require("csv-parse");
 const CallData = require("../models/CallData");
 const User = require("../models/User");
+const Customer = require("../models/Customer");
+
+// Helper: Match call numbers/contact to customer business name
+const enrichCallsWithBusinessName = async (calls) => {
+  if (!calls || calls.length === 0) return calls;
+
+  // Collect only the CUSTOMER's phone number based on call direction
+  // Outbound: customer is toNumber (agent is calling them)
+  // Inbound: customer is fromNumber (customer is calling agent)
+  const phoneNumbers = [];
+  calls.forEach(call => {
+    if (call.direction === 'out' && call.toNumber) {
+      phoneNumbers.push(call.toNumber);
+    } else if ((call.direction === 'in' || call.direction === 'inbound') && call.fromNumber) {
+      phoneNumbers.push(call.fromNumber);
+    } else {
+      // Fallback: include both if direction is unknown
+      if (call.fromNumber) phoneNumbers.push(call.fromNumber);
+      if (call.toNumber) phoneNumbers.push(call.toNumber);
+    }
+  });
+
+  // Remove duplicates
+  const uniqueNumbers = [...new Set(phoneNumbers)];
+
+  // Find customers matching any of these phone numbers
+  const customers = await Customer.find({
+    $or: [
+      { phoneNumber: { $in: uniqueNumbers } },
+      { additionalPhoneNumbers: { $in: uniqueNumbers } },
+    ],
+  }, {
+    CardName: 1,
+    CardCode: 1,
+    phoneNumber: 1,
+    additionalPhoneNumbers: 1,
+  }).lean();
+
+  // Build a phone-to-customer lookup map
+  const phoneToCustomer = {};
+  customers.forEach(customer => {
+    const info = { CardName: customer.CardName, CardCode: customer.CardCode || null };
+    if (customer.phoneNumber) {
+      phoneToCustomer[customer.phoneNumber] = info;
+    }
+    if (customer.additionalPhoneNumbers) {
+      customer.additionalPhoneNumbers.forEach(num => {
+        phoneToCustomer[num] = info;
+      });
+    }
+  });
+
+  // Also do a fuzzy match on the contact name against CardName
+  const contactNames = calls
+    .map(c => c.contact)
+    .filter(c => c && c.trim().length > 2);
+  const uniqueContactNames = [...new Set(contactNames)];
+
+  let nameToCustomer = {};
+  if (uniqueContactNames.length > 0) {
+    for (const contactName of uniqueContactNames) {
+      const escaped = contactName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const matchedCustomer = await Customer.findOne({
+        $or: [
+          { CardName: { $regex: escaped, $options: 'i' } },
+        ],
+      }, { CardName: 1, CardCode: 1 }).lean();
+
+      if (matchedCustomer) {
+        nameToCustomer[contactName] = {
+          CardName: matchedCustomer.CardName,
+          CardCode: matchedCustomer.CardCode || null,
+        };
+      }
+    }
+  }
+
+  // Enrich each call with businessName and cardCode
+  return calls.map(call => {
+    let matched = null;
+
+    // Priority 1: Match by customer's phone number based on direction
+    // Outbound: agent calls customer, so customer = toNumber
+    // Inbound: customer calls agent, so customer = fromNumber
+    if (call.direction === 'out' && call.toNumber && phoneToCustomer[call.toNumber]) {
+      matched = phoneToCustomer[call.toNumber];
+    } else if ((call.direction === 'in' || call.direction === 'inbound') && call.fromNumber && phoneToCustomer[call.fromNumber]) {
+      matched = phoneToCustomer[call.fromNumber];
+    } else {
+      // Fallback for unknown direction: try both
+      if (call.toNumber && phoneToCustomer[call.toNumber]) {
+        matched = phoneToCustomer[call.toNumber];
+      } else if (call.fromNumber && phoneToCustomer[call.fromNumber]) {
+        matched = phoneToCustomer[call.fromNumber];
+      }
+    }
+
+    // Priority 2: Match by contact name (fuzzy)
+    if (!matched && call.contact && nameToCustomer[call.contact]) {
+      matched = nameToCustomer[call.contact];
+    }
+
+    return {
+      ...call,
+      businessName: matched?.CardName || null,
+      cardCode: matched?.CardCode || null,
+    };
+  });
+};
+
 // Helper functions to extract data from scoring explanation
 function extractStrengths(explanation) {
   const strengthsMatch = explanation.match(/✓ Strengths: ([^\n]+)/);
@@ -432,13 +542,15 @@ const callDataController = {
       }
 
       // Execute query with pagination
-      const callData = await CallData.find(filter)
+      let callData = await CallData.find(filter)
         .sort({ startTime: -1 })
         .skip(skip)
         .limit(limit)
         .lean();
 
       const total = await CallData.countDocuments(filter);
+
+      callData = await enrichCallsWithBusinessName(callData);
 
       return res.status(200).json({
         data: callData,
@@ -664,13 +776,16 @@ const callDataController = {
       console.log("Final filter:", filter);
 
       // Execute query with pagination - use single query with complete filter
-      const callData = await CallData.find(filter)
+      let callData = await CallData.find(filter)
         .sort({ startTime: -1 })
         .skip(skip)
         .limit(limit)
         .lean();
 
       const total = await CallData.countDocuments(filter);
+
+      // Enrich calls with business names from Customer collection
+      callData = await enrichCallsWithBusinessName(callData);
 
       return res.status(200).json({
         data: callData,

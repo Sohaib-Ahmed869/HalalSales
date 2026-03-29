@@ -361,8 +361,7 @@ exports.exportCustomersToExcel = async (req, res) => {
 
     // Simple query - get all customers for testing
     const customers = await Customer.find({})
-      .select('CardName Email phoneNumber additionalPhoneNumbers address deliveryAddress outstandingBalance CardCode')
-      .limit(10) // Limit to 10 for testing
+      .select('CardName Email phoneNumber additionalPhoneNumbers address deliveryAddress CardCode')
       .lean();
 
     console.log(`Found ${customers.length} customers to export`);
@@ -402,7 +401,6 @@ exports.exportCustomersToExcel = async (req, res) => {
         "Phone Number 1": primaryPhone,
         "Phone Number 2": secondPhone,
         "Address": address,
-        "Outstanding Balance": customer.outstandingBalance || 0,
         "Customer Code": customer.CardCode || ""
       };
     });

@@ -1128,13 +1128,20 @@ const salesAgentJourneyController = {
       }).sort({ date: 1 });
 
       // Get sales data for the same period
-      const salesData =
+      const [salesData, quotationData] = await Promise.all([
         customerCodes.length > 0
-          ? await Invoice.find({
+          ? SalesOrder.find({
             CardCode: { $in: customerCodes },
             DocDate: { $gte: start, $lte: end },
           })
-          : [];
+          : [],
+        customerCodes.length > 0
+          ? Quotation.find({
+            CardCode: { $in: customerCodes },
+            DocDate: { $gte: start, $lte: end },
+          })
+          : [],
+      ]);
 
       // Group data by day, week, or month
       const groupedData = {};
@@ -1175,6 +1182,8 @@ const salesAgentJourneyController = {
             productivity: 0,
             salesAmount: 0,
             orderCount: 0,
+            quotationCount: 0,
+            quotationAmount: 0,
           };
         }
 
@@ -1228,6 +1237,46 @@ const salesAgentJourneyController = {
         }
       });
 
+      // Add quotation data to the groups
+      quotationData.forEach((quote) => {
+        const quoteDate = new Date(quote.DocDate);
+        let key;
+
+        switch (groupBy) {
+          case "week":
+            const weekStartDate = new Date(quoteDate);
+            weekStartDate.setDate(quoteDate.getDate() - quoteDate.getDay());
+            key = weekStartDate.toISOString().split("T")[0];
+            break;
+          case "month":
+            key = `${quoteDate.getFullYear()}-${String(
+              quoteDate.getMonth() + 1
+            ).padStart(2, "0")}`;
+            break;
+          case "day":
+          default:
+            key = quoteDate.toISOString().split("T")[0];
+            break;
+        }
+
+        if (groupedData[key]) {
+          groupedData[key].quotationCount += 1;
+          groupedData[key].quotationAmount += quote.DocTotal || 0;
+        } else {
+          groupedData[key] = {
+            period: key,
+            days: 0,
+            productiveHours: 0,
+            deskHours: 0,
+            productivity: 0,
+            salesAmount: 0,
+            orderCount: 0,
+            quotationCount: 1,
+            quotationAmount: quote.DocTotal || 0,
+          };
+        }
+      });
+
       // Calculate productivity percentages and format numbers
       Object.values(groupedData).forEach((data) => {
         data.productivity =
@@ -1240,6 +1289,7 @@ const salesAgentJourneyController = {
         data.deskHours = parseFloat(data.deskHours.toFixed(2));
         data.productivity = parseFloat(data.productivity.toFixed(2));
         data.salesAmount = parseFloat(data.salesAmount.toFixed(2));
+        data.quotationAmount = parseFloat(data.quotationAmount.toFixed(2));
       });
 
       // Sort by period
@@ -1268,6 +1318,8 @@ const salesAgentJourneyController = {
         totalSales: parseFloat(totalSales.toFixed(2)),
         totalOrders: salesData.length,
         salesPerProductiveHour: parseFloat(productivityToSalesRatio.toFixed(2)),
+        totalQuotations: quotationData.length,
+        totalQuotationAmount: parseFloat(quotationData.reduce((sum, q) => sum + (q.DocTotal || 0), 0).toFixed(2)),
       };
 
       return res.status(200).json({

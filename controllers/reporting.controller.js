@@ -865,6 +865,63 @@ exports.getSalesDashboardSummary = async (req, res) => {
                     pendingQuotations: {
                         $sum: { $cond: [{ $eq: ["$approvalStatus", "pending"] }, 1, 0] },
                     },
+                    pendingQuotationValue: {
+                        $sum: { $cond: [{ $eq: ["$approvalStatus", "pending"] }, "$DocTotal", 0] },
+                    },
+                    unapprovedQuotations: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $eq: ["$approvalStatus", "pending"] },
+                                        { $eq: [{ $ifNull: ["$ConvertedToOrderDocEntry", null] }, null] }
+                                    ]
+                                },
+                                1, 0
+                            ]
+                        },
+                    },
+                    unapprovedQuotationValue: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $eq: ["$approvalStatus", "pending"] },
+                                        { $eq: [{ $ifNull: ["$ConvertedToOrderDocEntry", null] }, null] }
+                                    ]
+                                },
+                                "$DocTotal", 0
+                            ]
+                        },
+                    },
+                    unconvertedQuotations: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $ne: ["$DocumentStatus", "bost_Close"] },
+                                        { $ne: ["$approvalStatus", "rejected"] },
+                                        { $eq: [{ $ifNull: ["$ConvertedToOrderDocEntry", null] }, null] }
+                                    ]
+                                },
+                                1, 0
+                            ]
+                        },
+                    },
+                    unconvertedQuotationValue: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $ne: ["$DocumentStatus", "bost_Close"] },
+                                        { $ne: ["$approvalStatus", "rejected"] },
+                                        { $eq: [{ $ifNull: ["$ConvertedToOrderDocEntry", null] }, null] }
+                                    ]
+                                },
+                                "$DocTotal", 0
+                            ]
+                        },
+                    },
                 },
             },
         ]);
@@ -910,6 +967,11 @@ exports.getSalesDashboardSummary = async (req, res) => {
                 totalQuotationValue: 0,
                 totalQuotations: 0,
                 pendingQuotations: 0,
+                pendingQuotationValue: 0,
+                unapprovedQuotations: 0,
+                unapprovedQuotationValue: 0,
+                unconvertedQuotations: 0,
+                unconvertedQuotationValue: 0,
             },
             payments: paymentSummary[0] || {
                 totalPaymentsReceived: 0,

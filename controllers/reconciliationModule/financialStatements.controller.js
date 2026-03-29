@@ -1261,173 +1261,270 @@ exports.getAvailableCreditNotesByCustomer = async (req, res) => {
 };
 
 /**
- * Auto-match payments to invoices
+ * Enhanced auto-match: learns from previous manual matches
  */
 exports.autoMatchPayments = async (req, res) => {
     try {
-        const { cardCode, confidenceThreshold = 80 } = req.body;
+        const { cardCode, confidenceThreshold = 70 } = req.body;
 
-        console.log(`Starting auto-match for customer: ${cardCode || "ALL"}`);
+        const IGNORE = new Set([
+            // Banking operation words
+            'VIR', 'VIREMENT', 'RECU', 'SEPA', 'INST', 'INSTANTANE', 'EUROPEEN',
+            // French prepositions/articles
+            'DE', 'DU', 'DES', 'LE', 'LA', 'LES', 'UNE', 'PAR', 'SUR', 'POUR', 'EST',
+            // Bank codes
+            'CMC', 'BNP', 'CIC', 'LCL', 'SAS', 'SARL', 'CMCI', 'CMCIFRPPXXX',
+            'FRPP', 'XXX', 'SG', 'SA', 'QNTOFRP', 'SOGEFRPPXXX', 'CCBPFRPPGRE',
+            'CCBPFRPPMTG', 'CEPAFRPP', 'AGRIFRPP', 'BNPAFRPPXXX', 'CMCIFR',
+            'QNTOFRP1XXX', 'SWNBFR22XXX', 'CRLYFRPPXXX', 'NOTPROVIDED', 'CMCIFR2AXXX', 'PAIEMENT', 'VIRSEPA', 'VIREMENTSEPA',
+            // English words
+            'THE', 'AND', 'FROM', 'PAY', 'PAYMENT', 'REF', 'REC', 'EUR',
+            // Common short noise
+            'VH', 'REM', 'ACH', 'MON', 'INT', 'NET', 'CET',
+            // Business/food domain words that appear in EVERY payment — too generic
+            'FOOD', 'HALAL', 'SERVICE', 'FACTURE', 'FAST', 'VERS', 'ACHAT',
+            'REGLEMENT', 'DEVIS', 'FACT', 'FOURNISEUR', 'BOISSONS',
+            'MARCHANDISES', 'NUMERO', 'FORMAT', 'PRO', 'VIREMENT',
+        ]);
 
-        const paymentFilter = {
-            reconciliationStatus: "Unmatched",
-            remainingAmount: { $gt: 0 },
+        const extractKeywords = (payment) => {
+            const fields = [
+                payment.sourceDetails?.details?.detail1,
+                payment.sourceDetails?.details?.detail2,
+                payment.sourceDetails?.details?.detail3,
+                payment.sourceDetails?.details?.detail4,
+                payment.sourceDetails?.senderName,
+                payment.sourceDetails?.fromEmail,
+                payment.cardName,
+            ].filter(Boolean);
+
+            const words = new Set();
+            for (const field of fields) {
+                const tokens = String(field).toUpperCase().split(/[\s\/\-_,;:.@]+/);
+                for (const token of tokens) {
+                    if (
+                        token.length > 2 &&
+                        /^[A-Z]+$/.test(token) &&  // letters only, no numbers or mixed
+                        !IGNORE.has(token)
+                    ) {
+                        words.add(token);
+                    }
+                }
+            }
+            return words;
         };
 
-        if (cardCode) {
-            paymentFilter.$or = [
-                { cardCode: cardCode },
-                { alternateCardCodes: cardCode },
-            ];
+        // ✅ STEP 1: Build pattern library ONLY from payments with a real cardCode
+        const matchedPayments = await FlattenedPayment.find({
+            cardCode: { $nin: [null, "", undefined] },
+        }).lean();
+
+        console.log(`Building pattern library from ${matchedPayments.length} matched payments...`);
+
+        // keywordMap: keyword → { cardCode: occurrenceCount }
+        const keywordMap = {};
+
+        for (const p of matchedPayments) {
+            // Extra safety — skip anything without a valid cardCode
+            if (!p.cardCode || p.cardCode === 'null' || p.cardCode === '') continue;
+
+            const keywords = extractKeywords(p);
+            for (const kw of keywords) {
+                if (!keywordMap[kw]) keywordMap[kw] = {};
+                keywordMap[kw][p.cardCode] = (keywordMap[kw][p.cardCode] || 0) + 1;
+            }
         }
 
-        const unmatchedPayments = await FlattenedPayment.find(paymentFilter).limit(100);
+        // ✅ PRUNE generic keywords — if a keyword maps to more than 1 customer
+        // it's too generic (like FOOD, HALAL, SERVICE) and will cause false matches
+        let prunedCount = 0;
+        for (const kw of Object.keys(keywordMap)) {
+            const uniqueCustomers = Object.keys(keywordMap[kw]).length;
+            if (uniqueCustomers > 1) {
+                delete keywordMap[kw];
+                prunedCount++;
+            }
+        }
 
-        console.log(`Found ${unmatchedPayments.length} unmatched payments`);
+        console.log(`Pattern library built: ${Object.keys(keywordMap).length} unique keywords (pruned ${prunedCount} generic ones)`);
+        console.log(`Sample keywords:`, Object.keys(keywordMap).slice(0, 30));
 
-        const results = {
-            processed: 0,
-            matched: 0,
-            failed: 0,
-            matches: [],
+        if (Object.keys(keywordMap).length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "No matched payments found to build pattern library. Please manually match at least one payment first.",
+            });
+        }
+
+        // ✅ STEP 2: Find unmatched payments
+        const unmatchedFilter = {
+            $and: [
+                {
+                    $or: [
+                        { cardCode: null },
+                        { cardCode: "" },
+                        { cardCode: { $exists: false } },
+                        { cardCode: "null" },
+                    ]
+                },
+                { amount: { $gt: 0 } }
+            ]
         };
+
+        const unmatchedPayments = await FlattenedPayment.find(unmatchedFilter)
+            .sort({ createdAt: -1 })
+            .limit(1000)
+            .lean();
+
+        console.log(`Found ${unmatchedPayments.length} unmatched payments to process`);
+
+        // Debug: log how many contain known keywords
+        const debugCount = unmatchedPayments.filter(p => {
+            const kws = extractKeywords(p);
+            return [...kws].some(kw => keywordMap[kw]);
+        }).length;
+        console.log(`Of which ${debugCount} have at least one keyword in the library`);
+
+        const results = { processed: 0, matched: 0, skipped: 0, failed: 0, matches: [] };
 
         for (const payment of unmatchedPayments) {
             try {
                 results.processed++;
 
-                // Find unpaid invoices for this customer (DocumentStatus = Open)
-                const invoices = await Invoice.find({
-                    CardCode: payment.cardCode,
-                    DocumentStatus: { $in: ["bost_Open", "O"] },
-                }).sort({ DocDate: 1 });
+                // Extract keywords from this payment
+                const paymentKeywords = extractKeywords(payment);
 
-                if (invoices.length === 0) {
+                if (paymentKeywords.size === 0) {
+                    results.skipped++;
                     continue;
                 }
 
-                // Try to match by reference
-                let matchedInvoice = null;
-                let confidence = 0;
+                // Only score against keywords that exist in the library
+                const mappableKeywords = [...paymentKeywords].filter(kw => keywordMap[kw]);
 
-                if (payment.reference) {
-                    // Try exact DocNum match
-                    matchedInvoice = invoices.find(inv =>
-                        inv.DocNum.toString() === payment.reference.replace(/\D/g, '')
-                    );
+                if (mappableKeywords.length === 0) {
+                    results.skipped++;
+                    continue;
+                }
 
-                    if (matchedInvoice) {
-                        confidence = 95;
-                    } else {
-                        // Try reference contains DocNum
-                        matchedInvoice = invoices.find(inv =>
-                            payment.reference.includes(inv.DocNum.toString())
-                        );
-                        if (matchedInvoice) {
-                            confidence = 85;
+                // Score each cardCode
+                const scores = {};
+
+                for (const kw of mappableKeywords) {
+                    for (const [cc, count] of Object.entries(keywordMap[kw])) {
+                        // Never score against null or empty
+                        if (!cc || cc === 'null' || cc === '') continue;
+                        if (!scores[cc]) scores[cc] = { matchCount: 0, totalWeight: 0, matchedKeywords: [] };
+                        scores[cc].matchCount++;
+                        scores[cc].totalWeight += count;
+                        scores[cc].matchedKeywords.push(kw);
+                    }
+                }
+
+                if (Object.keys(scores).length === 0) {
+                    results.skipped++;
+                    continue;
+                }
+
+                // Pick best scoring cardCode
+                let bestCardCode = null;
+                let bestScore = 0;
+                let bestMatchedKeywords = [];
+
+                for (const [cc, data] of Object.entries(scores)) {
+                    const confidence =
+                        (data.matchCount / mappableKeywords.length) * 70 +
+                        Math.min(data.totalWeight * 2, 30);
+
+                    if (confidence > bestScore) {
+                        bestScore = confidence;
+                        bestCardCode = cc;
+                        bestMatchedKeywords = data.matchedKeywords;
+                    }
+                }
+
+                const confidence = Math.min(Math.round(bestScore), 99);
+
+                if (!bestCardCode || confidence < confidenceThreshold) {
+                    console.log(`⏭ ${payment._id}: best confidence ${confidence}% < threshold ${confidenceThreshold}% — skipping`);
+                    results.skipped++;
+                    continue;
+                }
+
+                // Ambiguity check — if another customer scores within 10 points, skip unless very confident
+                const competitors = Object.entries(scores).filter(([cc, data]) => {
+                    if (cc === bestCardCode) return false;
+                    const c =
+                        (data.matchCount / mappableKeywords.length) * 70 +
+                        Math.min(data.totalWeight * 2, 30);
+                    return c >= confidence - 10;
+                });
+
+                if (competitors.length > 0 && confidence < 85) {
+                    console.log(`⚠️ ${payment._id}: ambiguous between ${bestCardCode} and ${competitors.map(([cc]) => cc).join(', ')} — skipping`);
+                    results.skipped++;
+                    continue;
+                }
+
+                // Verify customer exists
+                const customer = await Customer.findOne({ CardCode: bestCardCode }).lean();
+                if (!customer) {
+                    console.log(`⚠️ ${payment._id}: customer ${bestCardCode} not found in DB — skipping`);
+                    results.skipped++;
+                    continue;
+                }
+
+                // ✅ Save the match
+                await FlattenedPayment.findByIdAndUpdate(
+                    payment._id,
+                    {
+                        $set: {
+                            cardCode: bestCardCode,
+                            cardName: customer.CardName,
+                            autoMatchConfidence: confidence,
+                            autoMatchReason: `keyword_match: ${bestMatchedKeywords.join(', ')}`,
+                            autoMatchedAt: new Date(),
+                            reconciliationStatus: 'Unmatched',
                         }
-                    }
-                }
+                    },
+                    { strict: false }
+                );
 
-                // Try amount match
-                if (!matchedInvoice) {
-                    const amountMatches = invoices.filter(inv => {
-                        // Calculate remaining: DocTotal - PaidToDate - any allocations
-                        const totalPaid = inv.PaidToDate || 0;
-                        const totalAllocated = (inv.allocatedPayments || []).reduce((sum, alloc) => sum + alloc.amountAllocated, 0);
-                        const remaining = inv.DocTotal - totalPaid - totalAllocated;
-                        return Math.abs(remaining - payment.remainingAmount) < 0.01;
-                    });
+                results.matched++;
+                results.matches.push({
+                    paymentId: payment._id,
+                    cardCode: bestCardCode,
+                    cardName: customer.CardName,
+                    amount: payment.amount,
+                    confidence,
+                    matchedKeywords: bestMatchedKeywords,
+                    source: payment.source,
+                });
 
-                    if (amountMatches.length === 1) {
-                        matchedInvoice = amountMatches[0];
-                        confidence = 75;
-                    }
-                }
+                console.log(`✅ ${payment._id} → ${bestCardCode} (${customer.CardName}) | ${confidence}% | [${bestMatchedKeywords.join(', ')}]`);
 
-                // If confidence is high enough, create allocation
-                if (matchedInvoice && confidence >= confidenceThreshold) {
-                    // Calculate remaining balance properly
-                    const totalPaid = matchedInvoice.PaidToDate || 0;
-                    const totalAllocated = (matchedInvoice.allocatedPayments || []).reduce((sum, alloc) => sum + alloc.amountAllocated, 0);
-                    const remaining = matchedInvoice.DocTotal - totalPaid - totalAllocated;
-
-                    const amountToAllocate = Math.min(payment.remainingAmount, remaining);
-
-                    // Add to payment
-                    payment.matchedInvoices.push({
-                        invoiceDocNum: matchedInvoice.DocNum,
-                        invoiceDocEntry: matchedInvoice.DocEntry,
-                        amountAllocated: amountToAllocate,
-                        matchedDate: new Date(),
-                    });
-
-                    payment.autoMatchConfidence = confidence;
-                    payment.calculateRemaining();
-                    await payment.save();
-
-                    // Add to invoice
-                    if (!matchedInvoice.allocatedPayments) {
-                        matchedInvoice.allocatedPayments = [];
-                    }
-
-                    matchedInvoice.allocatedPayments.push({
-                        flattenedPaymentId: payment._id,
-                        amountAllocated: amountToAllocate,
-                        allocationDate: new Date(),
-                        source: payment.source,
-                    });
-
-                    // Update invoice payment tracking
-                    if (!matchedInvoice.paymentTracking) {
-                        matchedInvoice.paymentTracking = {
-                            totalInvoiceAmount: matchedInvoice.DocTotal,
-                            totalPaidAmount: 0,
-                            totalCreditAmount: 0,
-                            remainingBalance: matchedInvoice.DocTotal,
-                        };
-                    }
-
-                    matchedInvoice.paymentTracking.totalPaidAmount += amountToAllocate;
-                    matchedInvoice.paymentTracking.remainingBalance -= amountToAllocate;
-
-                    if (matchedInvoice.paymentTracking.remainingBalance <= 0.01) {
-                        matchedInvoice.paymentStatus = "Fully Paid";
-                    } else {
-                        matchedInvoice.paymentStatus = "Partially Paid";
-                    }
-
-                    await matchedInvoice.save();
-
-                    results.matched++;
-                    results.matches.push({
-                        paymentId: payment._id,
-                        invoiceDocNum: matchedInvoice.DocNum,
-                        amount: amountToAllocate,
-                        confidence: confidence,
-                    });
-
-                    console.log(`✅ Matched payment ${payment._id} to invoice ${matchedInvoice.DocNum} (confidence: ${confidence}%)`);
-                }
-
-            } catch (error) {
-                console.error(`Error processing payment ${payment._id}:`, error);
+            } catch (err) {
+                console.error(`Error processing payment ${payment._id}:`, err);
                 results.failed++;
             }
         }
 
-        // Update customer totals for all affected customers
-        const affectedCustomers = new Set(unmatchedPayments.map(p => p.cardCode));
-        for (const customerCode of affectedCustomers) {
-            await updateCustomerPaymentTotals([customerCode]);
-            await updateCustomerInvoiceTotals(customerCode);
+        // Update customer payment totals
+        const affectedCardCodes = [...new Set(results.matches.map(m => m.cardCode))];
+        for (const cc of affectedCardCodes) {
+            await updateCustomerPaymentTotals([cc]);
         }
 
-        console.log(`Auto-match completed: ${results.matched} matched out of ${results.processed} processed`);
+        console.log(`\n===== AUTO MATCH COMPLETE =====`);
+        console.log(`Processed : ${results.processed}`);
+        console.log(`Matched   : ${results.matched}`);
+        console.log(`Skipped   : ${results.skipped}`);
+        console.log(`Failed    : ${results.failed}`);
+        console.log(`===============================\n`);
 
         return res.status(200).json({
             success: true,
-            message: `Auto-matched ${results.matched} payments`,
+            message: `Auto-matched ${results.matched} out of ${results.processed} payments`,
             data: results,
         });
 
@@ -1438,6 +1535,94 @@ exports.autoMatchPayments = async (req, res) => {
             message: "Failed to auto-match payments",
             error: error.message,
         });
+    }
+};
+
+exports.resetAllPaymentsToUnmatched = async (req, res) => {
+    try {
+        const result = await FlattenedPayment.updateMany(
+            {},
+            {
+                $set: {
+                    cardCode: null,
+                    cardName: null,
+                    autoMatchConfidence: null,
+                    autoMatchReason: null,
+                    autoMatchedAt: null,
+                    reconciliationStatus: 'Unmatched',
+                },
+                $unset: {
+                    matchedInvoices: "",
+                }
+            },
+            { strict: false }
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: `Reset ${result.modifiedCount} payments to unmatched`,
+            data: { modifiedCount: result.modifiedCount }
+        });
+    } catch (error) {
+        console.error("Error resetting payments:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to reset payments",
+            error: error.message
+        });
+    }
+};
+
+/**
+ * Get auto-matched payments (for the auto-match review tab)
+ */
+exports.getAutoMatchedPayments = async (req, res) => {
+    try {
+        const { page = 1, limit = 50, cardCode, source, minConfidence = 0 } = req.query;
+
+        const filter = {
+            autoMatchedAt: { $exists: true },
+            autoMatchConfidence: { $gte: parseInt(minConfidence) },
+        };
+
+        if (cardCode) filter.cardCode = cardCode;
+        if (source) filter.source = source;
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        const payments = await FlattenedPayment.find(filter)
+            .sort({ autoMatchedAt: -1 })
+            .skip(skip)
+            .limit(parseInt(limit))
+            .lean();
+
+        const total = await FlattenedPayment.countDocuments(filter);
+
+        // Stats
+        const stats = await FlattenedPayment.aggregate([
+            { $match: { autoMatchedAt: { $exists: true } } },
+            {
+                $group: {
+                    _id: null,
+                    avgConfidence: { $avg: "$autoMatchConfidence" },
+                    total: { $sum: 1 },
+                    highConfidence: { $sum: { $cond: [{ $gte: ["$autoMatchConfidence", 80] }, 1, 0] } },
+                    medConfidence: { $sum: { $cond: [{ $and: [{ $gte: ["$autoMatchConfidence", 60] }, { $lt: ["$autoMatchConfidence", 80] }] }, 1, 0] } },
+                }
+            }
+        ]);
+
+        return res.status(200).json({
+            success: true,
+            data: {
+                payments,
+                stats: stats[0] || {},
+                pagination: { total, page: parseInt(page), limit: parseInt(limit), pages: Math.ceil(total / parseInt(limit)) },
+            },
+        });
+    } catch (error) {
+        console.error("Error fetching auto-matched payments:", error);
+        return res.status(500).json({ success: false, message: "Failed to fetch auto-matched payments", error: error.message });
     }
 };
 

@@ -6,7 +6,7 @@ const multer = require("multer");
 
 // Configure multer for file uploads
 const upload = multer({ storage: multer.memoryStorage() });
-
+router.post("/reset-all-payments", financialStatementsController2.resetAllPaymentsToUnmatched);
 // Import salary sheet
 router.post("/import-salary-sheet", upload.single("file"),
     financialStatementsController2.importSalarySheet);
@@ -32,8 +32,9 @@ router.get("/payments/customer/:cardCode",
 // Payment allocation
 router.post("/allocate-payment",
     financialStatementsController2.allocatePaymentToInvoice);
-router.post("/payments/auto-match",
+router.post("/auto-match",
     financialStatementsController2.autoMatchPayments);
+router.get("/auto-matched-payments", financialStatementsController2.getAutoMatchedPayments);
 // Import routes
 router.post(
     "/import-bank-statements",
