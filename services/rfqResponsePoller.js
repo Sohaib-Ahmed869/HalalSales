@@ -264,12 +264,38 @@ class RFQResponsePoller {
 
                 console.log('AI Response:', JSON.stringify(parsedData, null, 2));
 
-                if (parsedData.isValidResponse && parsedData.totalQuotedAmount) {
-                    console.log(`✅ AI extracted price: ${parsedData.currency} ${parsedData.totalQuotedAmount}`);
+                if (parsedData.isValidResponse && (parsedData.totalQuotedAmount || (parsedData.quotedItems && parsedData.quotedItems.length > 0))) {
+                    // Fill missing quantities/totals from RFQ items
+                    const quotedItems = parsedData.quotedItems || [];
+                    for (const qi of quotedItems) {
+                        if (qi.unitPrice && (!qi.quantity || qi.quantity === 0)) {
+                            const matchName = (qi.productName || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                            const rfqMatch = rfq.items.find(ri => {
+                                const riName = (ri.productName || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                                return riName.includes(matchName) || matchName.includes(riName);
+                            });
+                            if (rfqMatch) { qi.quantity = rfqMatch.quantity; qi.unit = qi.unit || rfqMatch.unit; }
+                        }
+                        if (qi.unitPrice && qi.quantity && (!qi.totalPrice || qi.totalPrice === 0)) {
+                            qi.totalPrice = Math.round(qi.unitPrice * qi.quantity * 100) / 100;
+                        }
+                        if (qi.totalPrice && qi.quantity && (!qi.unitPrice || qi.unitPrice === 0)) {
+                            qi.unitPrice = Math.round(qi.totalPrice / qi.quantity * 100) / 100;
+                        }
+                    }
+
+                    // Compute total if AI returned 0
+                    let totalQuotedAmount = parsedData.totalQuotedAmount || 0;
+                    if (!totalQuotedAmount || totalQuotedAmount === 0) {
+                        totalQuotedAmount = quotedItems.reduce((sum, qi) => sum + (qi.totalPrice || 0), 0);
+                        totalQuotedAmount = Math.round(totalQuotedAmount * 100) / 100;
+                    }
+
+                    console.log(`✅ AI extracted price: ${parsedData.currency} ${totalQuotedAmount}`);
 
                     vendor.quotationData = {
-                        quotedItems: parsedData.quotedItems || [],
-                        totalQuotedAmount: parsedData.totalQuotedAmount,
+                        quotedItems,
+                        totalQuotedAmount,
                         currency: parsedData.currency || 'EUR',
                         deliveryTimeInDays: parsedData.deliveryTimeInDays,
                         deliveryDate: parsedData.deliveryDate,
@@ -280,7 +306,7 @@ class RFQResponsePoller {
                         parsingStatus: 'success'
                     };
 
-                    vendor.quotedTotal = parsedData.totalQuotedAmount;
+                    vendor.quotedTotal = totalQuotedAmount;
                     vendor.paymentTerms = parsedData.paymentTerms;
 
                     if (parsedData.deliveryDate) {

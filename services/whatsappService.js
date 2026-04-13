@@ -171,9 +171,9 @@ function containsInappropriateLanguage(message) {
  * Send RFQ to vendor via WhatsApp
  */
 async function sendRFQViaWhatsApp(rfqId, vendorCode) {
+    let vendor;
     try {
         console.log(`📱 Sending RFQ ${rfqId} to vendor ${vendorCode} via WhatsApp`);
-
         // Validate Twilio config
         if (!accountSid || !authToken || !twilioWhatsAppNumber) {
             throw new Error('Twilio is not configured. Please check your .env file.');
@@ -181,7 +181,7 @@ async function sendRFQViaWhatsApp(rfqId, vendorCode) {
 
         // Get RFQ and Vendor details
         const rfq = await RFQ.findById(rfqId);
-        const vendor = await Vendor.findOne({ CardCode: vendorCode });
+        vendor = await Vendor.findOne({ CardCode: vendorCode });
 
         if (!rfq) throw new Error('RFQ not found');
         if (!vendor) throw new Error('Vendor not found');
@@ -583,7 +583,7 @@ async function generateGeneralChatResponse(message, contact, phoneNumber) {
                 // Delivery time query
                 return `${greeting}` +
                     `For delivery timeframes and scheduling, please contact our procurement team directly:\n\n` +
-                   // `For delivery timeframes and scheduling, please contact our procurement team directly:\n\n` +
+                    // `For delivery timeframes and scheduling, please contact our procurement team directly:\n\n` +
                     `📞 +33 1 79 64 84 05\n\n` +
                     `They will provide you with accurate delivery estimates based on your location and order details.\n\n` +
                     `Best regards,\nHalal Foods Team`;

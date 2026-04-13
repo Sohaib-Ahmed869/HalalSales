@@ -108,6 +108,12 @@ router.get(
   salesAgentJourneyController.getOrdersInvoicesAnalytics
 );
 
+router.get(
+  "/:agentId/customer-engagement",
+  checkRole(["admin", "sales_manager", "sales_agent"]),
+  salesAgentJourneyController.getAgentCustomerEngagement
+);
+
 module.exports = router;
 
 // Add this in your main app.js or server.js file:

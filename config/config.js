@@ -22,7 +22,7 @@ module.exports = {
   },
   openai: {
     apiKey: process.env.NEW_OPENAI_API_KEY,
-    model: process.env.OPENAI_MODEL || 'gpt-4-turbo-preview',
+    model: process.env.OPENAI_MODEL || 'gpt-4o',
   },
   // RFQ Configuration
   rfq: {

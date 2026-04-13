@@ -67,6 +67,14 @@ router.get('/gmail/get-token', async (req, res) => {
 router.get('/items', rfqController.getInventoryItems);
 
 /**
+ * @route   GET /api/rfq/recommend-products
+ * @desc    Get related product recommendations based on a product name
+ * @access  Private
+ * @query   { productName: string, limit: number }
+ */
+router.get('/recommend-products', rfqController.getProductRecommendations);
+
+/**
  * @route   POST /api/rfq/:rfqId/vendor-response
  * @desc    Record vendor quotation response
  * @access  Private
@@ -84,11 +92,27 @@ router.post('/:rfqId/vendor-response', rfqController.recordVendorResponse);
 
 /**
  * @route   POST /api/rfq/:rfqId/select-vendor
- * @desc    Select winning vendor
+ * @desc    Select winning vendor (admin final acceptance)
  * @access  Private
  * @body    { vendorCode: string, notes: string }
  */
 router.post('/:rfqId/select-vendor', rfqController.selectWinningVendor);
+
+/**
+ * @route   POST /api/rfq/:rfqId/override-recommendation
+ * @desc    Admin overrides the bot's acceptance recommendation (continue, reject, or defer)
+ * @access  Private
+ * @body    { vendorCode: string, action: 'continue_negotiating'|'reject'|'review_later', reason?: string }
+ */
+router.post('/:rfqId/override-recommendation', rfqController.overrideBotRecommendation);
+
+/**
+ * @route   GET /api/rfq/pending-attention
+ * @desc    List RFQs where bot flagged acceptance (admin must review) or negotiation stalled
+ * @query   countOnly=true for just the count (used by sidebar badge)
+ * @access  Private
+ */
+router.get('/pending-attention', rfqController.getPendingAttentionRFQs);
 
 /**
  * @route   GET /api/rfq
@@ -111,6 +135,14 @@ router.get('/:rfqId', rfqController.getRFQById);
  * @access  Private
  */
 router.get('/:rfqId/compare', rfqController.compareVendorResponses);
+
+/**
+ * @route   POST /api/rfq/:rfqId/rerun
+ * @desc    Clone/re-run an existing RFQ with fresh dates
+ * @access  Private
+ * @body    { quotationDueDate, deliveryBy, includeVendors, additionalVendorCodes, excludeVendorCodes }
+ */
+router.post('/:rfqId/rerun', rfqController.rerunRFQ);
 
 /**
  * @route   POST /api/rfq/:rfqId/cancel

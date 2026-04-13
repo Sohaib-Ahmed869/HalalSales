@@ -28,6 +28,17 @@ const RFQItemSchema = new Schema({
         type: Number,
         min: 0,
     },
+    // MANDATORY target price — INTERNAL ONLY, never sent to suppliers
+    targetPrice: {
+        type: Number,
+        required: true,
+        min: 0,
+    },
+    // Free text for per-item specs, certifications (halal, organic), packaging notes
+    additionalInfo: {
+        type: String,
+        trim: true,
+    },
 }, { _id: true });
 
 // Main RFQ Schema
@@ -79,6 +90,19 @@ const RFQSchema = new Schema({
         },
     },
 
+    // Incoterms (delivery/transport terms)
+    incoterm: {
+        type: String,
+        enum: ['EXW', 'FCA', 'CPT', 'CIP', 'DAP', 'DPU', 'DDP', 'FAS', 'FOB', 'CFR', 'CIF'],
+        default: 'EXW',
+    },
+
+    // Delivery destination
+    destination: {
+        type: String,
+        default: 'Paris, France',
+    },
+
     // Special Requirements
     packagingRequirements: String,
     paymentTermsPreference: {
@@ -101,8 +125,20 @@ const RFQSchema = new Schema({
             },
             vendorSource: {
                 type: String,
-                enum: ['SAP', 'EMAIL', 'PDA_SCRAPER'],
+                enum: ['SAP', 'EMAIL', 'PDA_SCRAPER', 'NEW_SUPPLIER'],
                 default: 'SAP'
+            },
+            // When the AI agent believes the quotation is acceptable, it sets this flag
+            // and notifies an admin. The admin makes the final call via selectWinningVendor.
+            pendingAdminReview: {
+                type: Boolean,
+                default: false,
+            },
+            botRecommendation: {
+                decision: String,           // e.g., "accept", "counter", "reject"
+                reasoning: String,
+                recommendedAt: Date,
+                suggestedTotalPrice: Number,
             },
             sentDate: Date,
             responseDate: Date,
@@ -132,6 +168,24 @@ const RFQSchema = new Schema({
                 messageSid: String,
                 mediaUrl: String
             },
+
+            // Negotiation tracking
+            negotiationRound: {
+                type: Number,
+                default: 0,
+            },
+            negotiationStatus: {
+                type: String,
+                enum: ['awaiting_initial_quote', 'negotiating', 'awaiting_admin_approval', 'accepted', 'rejected', 'stalled'],
+                default: 'awaiting_initial_quote',
+            },
+            negotiationHistory: [{
+                round: Number,
+                offeredPrice: Number,
+                ourCounterOffer: Number,
+                timestamp: { type: Date, default: Date.now },
+                message: String,
+            }],
 
             // Email fields
             emailMessageId: String,
@@ -163,6 +217,12 @@ const RFQSchema = new Schema({
             }
         }
     ],
+
+    // If this RFQ was re-run from a previous one
+    clonedFrom: {
+        type: Schema.Types.ObjectId,
+        ref: 'RFQ',
+    },
 
     // Status Tracking
     status: {

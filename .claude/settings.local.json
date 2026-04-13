@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm ls:*)",
+      "Bash(node -e ':*)",
+      "Bash(node -c services/knowledgeBase.js)",
+      "Bash(node -c services/rfqResponsePoller.js)",
+      "Bash(node -c services/rfqEmailMonitor.js)",
+      "Read(//d/Calcite Codes/SalesFrontend/**)",
+      "WebSearch",
+      "Bash(npm install:*)",
+      "Bash(node -c src/pages/Dashboard/SalesAgent/WhatsApp/WhatsAppMessenger.jsx)",
+      "Bash(node -e \"const m = require\\('./models/NewSupplier'\\); console.log\\('Model loaded:', m.modelName\\);\")",
+      "Bash(node -e \"const c = require\\('./controllers/newSupplier.controller'\\); console.log\\('Controller loaded, functions:', Object.keys\\(c\\)\\);\")",
+      "Bash(node -e \"const c = require\\('./controllers/rfqController'\\); console.log\\('OK, funcs:', ['getPendingAttentionRFQs', 'overrideBotRecommendation'].map\\(f => f + '=' + \\(typeof c[f]\\)\\).join\\(', '\\)\\);\")",
+      "Bash(OPENAI_API_KEY=dummy node -e \"const c = require\\('./controllers/rfqController'\\); console.log\\('OK, funcs:', ['getPendingAttentionRFQs', 'overrideBotRecommendation'].map\\(f => f + '=' + \\(typeof c[f]\\)\\).join\\(', '\\)\\);\")",
+      "Bash(NEW_OPENAI_API_KEY=dummy OPENAI_API_KEY=dummy node -e \"const c = require\\('./controllers/rfqController'\\); console.log\\('OK, funcs:', ['getPendingAttentionRFQs', 'overrideBotRecommendation'].map\\(f => f + '=' + \\(typeof c[f]\\)\\).join\\(', '\\)\\);\")",
+      "Bash(node -e \"const m = require\\('./models/NewSupplier'\\); const c = require\\('./controllers/newSupplier.controller'\\); console.log\\('OK:', Object.keys\\(c\\).length, 'funcs'\\);\")",
+      "Bash(node -e \"const c = require\\('./controllers/whatsappAgent.controller'\\); console.log\\('whatsappAgent exports:', Object.keys\\(c\\).length, 'listTemplates:', typeof c.listTemplates, 'sendTemplateMessage:', typeof c.sendTemplateMessage, 'sendMessage:', typeof c.sendMessage\\);\")",
+      "Bash(node -e \"const r = require\\('./routes/whatsappAgent.routes'\\); console.log\\('routes OK'\\); const w = require\\('./controllers/whatsapp.controller'\\); console.log\\('webhook controller OK, saveIncomingMessage:', typeof w.saveIncomingMessage\\);\")",
+      "Bash(node -e \"const c = require\\('./controllers/whatsappAgent.controller'\\); console.log\\('OK markAsRead:', typeof c.markAsRead\\);\")",
+      "Bash(node -e \"const c = require\\('./controllers/rfqController'\\); console.log\\('createRFQDraft:', typeof c.createRFQDraft\\);\")",
+      "Bash(node --check controllers/rfqController.js)",
+      "Bash(node --check agents/outboundAgent.js)",
+      "Bash(node --check agents/inboundAgent.js)",
+      "Bash(node --check services/aiService.js)",
+      "Bash(node --check services/rfqService.js)",
+      "Bash(node --check utils/bilingualFoodGlossary.js)",
+      "Bash(node -e \"const { buildBilingualQuery, expandKeywords } = require\\('./utils/bilingualFoodGlossary'\\); console.log\\('chicken →', expandKeywords\\('chicken filet'\\)\\); console.log\\('beef →', expandKeywords\\('beef'\\)\\); console.log\\('poulet →', expandKeywords\\('poulet'\\)\\); console.log\\('unknown →', expandKeywords\\('xyzzy123'\\)\\); console.log\\('query:', JSON.stringify\\(buildBilingualQuery\\('chicken filet'\\), null, 2\\)\\);\")",
+      "Bash(node -e \"const { expandKeywords } = require\\('./utils/bilingualFoodGlossary'\\); console.log\\(expandKeywords\\('Filet de poulet frais x kg'\\)\\);\")",
+      "Bash(npx --yes esbuild src/pages/Dashboard/RFQManagement.jsx --bundle=false --loader=jsx)",
+      "Bash(npx --yes esbuild --loader:.jsx=jsx src/pages/Dashboard/RFQManagement.jsx)",
+      "Bash(node --check utils/notificationService.js)"
+    ],
+    "additionalDirectories": [
+      "d:\\Calcite Codes\\SalesFrontend\\src\\pages\\Dashboard\\SalesAgent\\WhatsApp",
+      "d:\\Calcite Codes\\SalesFrontend\\src\\services",
+      "d:\\Calcite Codes\\SalesFrontend\\src\\pages\\Dashboard",
+      "d:\\Calcite Codes\\SalesFrontend\\src\\components\\RFQ",
+      "d:\\Calcite Codes\\SalesFrontend\\src\\components\\common"
+    ]
+  }
+}

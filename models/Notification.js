@@ -21,8 +21,11 @@ const NotificationSchema = new Schema({
       "task_completed",
       "task_approved",
       "task_rejected",
-      "restaurant_assigned", // ADD
-      "restaurant_updated"   // ADD
+      "restaurant_assigned",
+      "restaurant_updated",
+      "rfq_needs_attention",    // AI bot flagged an RFQ for admin approval
+      "rfq_stalled",            // Negotiation stalled — human intervention needed
+      "rfq_accepted",           // Admin accepted a vendor quotation
     ],
     required: true,
   },
@@ -31,6 +34,11 @@ const NotificationSchema = new Schema({
   relatedRestaurant: {
     type: Schema.Types.ObjectId,
     ref: "RestaurantAssignment",
+  },
+  // Link to the RFQ this notification is about
+  relatedRFQ: {
+    type: Schema.Types.ObjectId,
+    ref: "RFQ",
   },
   title: {
     type: String,

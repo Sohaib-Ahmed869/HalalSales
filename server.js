@@ -71,7 +71,8 @@ const { fetchCallsFromMay2UntilToday } = require("./jobs/mayScript");
 const targetScheduler = require("./services/targetScheduler");
 const truckRouteRoutes = require('./routes/truckRoute.routes');
 const callAcceptanceRoutes = require('./routes/callAcceptance.routes');
-const rfqResponsePoller = require('./services/rfqResponsePoller');
+// const rfqResponsePoller = require('./services/rfqResponsePoller'); // REPLACED by orchestratorAgent
+const orchestratorAgent = require('./agents/orchestratorAgent');
 require('./jobs/updateRestaurantAnalysis');
 const SuperChatCronService = require('./services/superChatCronService');
 const rfqRoutes = require('./routes/rfqRoutes'); // RFQ routes
@@ -80,6 +81,9 @@ const whatsappBusinessRoutes = require("./routes/whatsapp.routes");
 const whatsappAgentRoutes = require("./routes/whatsappAgent.routes");
 const sapSyncRoutes = require("./routes/sapSyncRoutes");
 const mainAdminDashboardRoutes = require("./routes/mainAdminDashboard.routes");
+const whatsappAdminRoutes = require("./routes/whatsappAdmin.routes");
+const agentRoutes = require('./routes/agentRoutes');
+const newSupplierRoutes = require('./routes/newSupplier.routes');
 // Initialize express app
 const app = express();
 
@@ -241,6 +245,9 @@ app.use('/api/vendor-email', vendorEmailRoutes);
 app.use('/api/whatsapp', whatsappRoutes);
 app.use("/api/whatsapp-business", whatsappBusinessRoutes);
 app.use("/api/whatsapp-agent", whatsappAgentRoutes);
+app.use("/api/whatsapp-admin", whatsappAdminRoutes);
+app.use("/api/agents", agentRoutes);
+app.use("/api/new-suppliers", newSupplierRoutes);
 // Health check route
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });
@@ -260,8 +267,8 @@ initSocket(httpServer);
 httpServer.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 
-  // Start RFQ response polling
-  rfqResponsePoller.start();
+  // Start AI Agent Orchestrator (replaces old rfqResponsePoller)
+  orchestratorAgent.start();
 });
 // Handle unhandled promise rejections
 process.on("unhandledRejection", (err) => {

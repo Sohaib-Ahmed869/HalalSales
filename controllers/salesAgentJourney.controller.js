@@ -2197,7 +2197,799 @@ const salesAgentJourneyController = {
       });
     }
   },
+  /**
+ * Get customer engagement data - calls per customer, WhatsApp activity, contact recency
+ */
+  getAgentCustomerEngagement: async (req, res) => {
+    try {
+      const { agentId } = req.params;
+      const {
+        page = 1,
+        limit = 10,
+        search,
+        sortBy = "lastContactDate",
+        sortOrder = "desc",
+        startDate,
+        endDate,
+      } = req.query;
+
+      console.log(`\n📊 ===== Customer Engagement Request =====`);
+      console.log(`  Agent ID: ${agentId}`);
+      console.log(`  Page: ${page}, Limit: ${limit}, Sort: ${sortBy} ${sortOrder}`);
+      console.log(`  Search: ${search || "none"}`);
+      console.log(`  Date Range: ${startDate || "default"} to ${endDate || "default"}`);
+
+      const agent = await User.findById(agentId);
+      if (!agent || agent.role !== "sales_agent") {
+        console.log(`  ❌ Agent not found or not a sales_agent`);
+        return res.status(404).json({ success: false, message: "Sales agent not found" });
+      }
+      console.log(`  ✅ Agent: ${agent.firstName} ${agent.lastName} (${agent.email})`);
+      console.log(`  📞 Agent Phone: ${agent.phone || "none"}`);
+
+      const customers = await Customer.find({ assignedTo: agentId }).lean();
+      let filteredCustomers = customers;
+      console.log(`  👥 Total customers assigned: ${customers.length}`);
+
+      if (search) {
+        const q = search.toLowerCase();
+        filteredCustomers = customers.filter(
+          (c) =>
+            (c.CardName || "").toLowerCase().includes(q) ||
+            (c.CardCode || "").toLowerCase().includes(q) ||
+            (c.Phone1 || c.phoneNumber || "").includes(q)
+        );
+        console.log(`  🔍 Filtered by search "${search}": ${filteredCustomers.length} customers`);
+      }
+
+      const customerCodes = filteredCustomers.map((c) => c.CardCode);
+
+      // Date filter for period-specific stats
+      const end = endDate ? new Date(endDate) : new Date();
+      const start = startDate
+        ? new Date(startDate)
+        : new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
+      console.log(`  📅 Effective date range: ${start.toISOString()} to ${end.toISOString()}`);
+
+      // Helper: get ALL phone numbers for a customer from every possible field
+      const getCustomerPhones = (c) => {
+        const phones = [
+          c.Phone1,
+          c.Phone2,
+          c.Cellular,
+          c.phoneNumber,
+          ...(c.additionalPhoneNumbers || []),
+        ].filter(Boolean);
+        return [...new Set(phones)]; // deduplicate
+      };
+
+      // Optional WhatsApp-specific customer phone links via contact records
+      const WhatsAppContact = require("../models/WhatsAppContact");
+      const whatsappContacts = await WhatsAppContact.find({
+        salesAgent: agentId,
+        customerId: { $in: customerCodes },
+        phoneNumber: { $exists: true, $ne: null },
+      })
+        .select("customerId phoneNumber")
+        .lean();
+      const whatsappContactPhonesByCardCode = {};
+      whatsappContacts.forEach((contact) => {
+        if (!contact?.customerId || !contact?.phoneNumber) return;
+        if (!whatsappContactPhonesByCardCode[contact.customerId]) {
+          whatsappContactPhonesByCardCode[contact.customerId] = [];
+        }
+        whatsappContactPhonesByCardCode[contact.customerId].push(contact.phoneNumber);
+      });
+      console.log(`  💬 WhatsApp contacts linked: ${whatsappContacts.length}`);
+
+      // Build phone-to-customer map (for call matching)
+      const phoneToCustomerMap = {};
+      let totalPhoneEntries = 0;
+      filteredCustomers.forEach((c) => {
+        const phones = getCustomerPhones(c);
+        phones.forEach((p) => {
+          const normalized = p.replace(/[\s\-\(\)\+]/g, "");
+          phoneToCustomerMap[normalized] = c.CardCode;
+          phoneToCustomerMap["+" + normalized] = c.CardCode;
+          if (normalized.length > 10) {
+            phoneToCustomerMap[normalized.slice(-10)] = c.CardCode;
+          }
+          totalPhoneEntries++;
+        });
+      });
+      console.log(`  📱 Phone-to-customer map: ${totalPhoneEntries} phones → ${Object.keys(phoneToCustomerMap).length} entries`);
+
+      // Log a sample customer's phones for debugging
+      const sampleCustomer = filteredCustomers.find((c) => {
+        const phones = getCustomerPhones(c);
+        return phones.length > 0;
+      });
+      if (sampleCustomer) {
+        console.log(`  📱 Sample customer ${sampleCustomer.CardCode} (${sampleCustomer.CardName}):`);
+        console.log(`     Phone1: "${sampleCustomer.Phone1 || ""}"`);
+        console.log(`     Phone2: "${sampleCustomer.Phone2 || ""}"`);
+        console.log(`     Cellular: "${sampleCustomer.Cellular || ""}"`);
+        console.log(`     phoneNumber: "${sampleCustomer.phoneNumber || ""}"`);
+        console.log(`     additionalPhoneNumbers: ${JSON.stringify(sampleCustomer.additionalPhoneNumbers || [])}`);
+      }
+
+      // Build normalized phone variants for WhatsApp query matching
+      const customerPhoneVariants = [];
+      const phoneToCardCodeForWhatsapp = {};
+
+      const resolveCardCodeFromConversationId = (conversationId) => {
+        if (!conversationId) return null;
+        const raw = String(conversationId);
+        const direct = phoneToCardCodeForWhatsapp[raw];
+        if (direct) return direct;
+
+        const digits = raw.replace(/\D/g, "");
+        if (!digits) return null;
+
+        return (
+          phoneToCardCodeForWhatsapp[digits] ||
+          phoneToCardCodeForWhatsapp["+" + digits] ||
+          (digits.length > 10
+            ? phoneToCardCodeForWhatsapp[digits.slice(-10)] ||
+            phoneToCardCodeForWhatsapp["+" + digits.slice(-10)]
+            : null) ||
+          null
+        );
+      };
+
+      filteredCustomers.forEach((c) => {
+        const phones = [
+          ...getCustomerPhones(c),
+          ...(whatsappContactPhonesByCardCode[c.CardCode] || []),
+        ];
+        phones.forEach((p) => {
+          const stripped = p.replace(/[\s\-\(\)]/g, "");
+          // Generate all possible formats
+          const variants = new Set([stripped]);
+          // With and without +
+          if (stripped.startsWith("+")) {
+            variants.add(stripped.slice(1));
+          } else {
+            variants.add("+" + stripped);
+          }
+          // Last 10 digits (local number)
+          const digits = stripped.replace(/\D/g, "");
+          if (digits.length > 10) {
+            variants.add(digits.slice(-10));
+            variants.add("+" + digits);
+            variants.add(digits);
+          }
+
+          variants.forEach((v) => {
+            customerPhoneVariants.push(v);
+            phoneToCardCodeForWhatsapp[v] = c.CardCode;
+          });
+        });
+      });
+
+      const customerPhones = [...new Set(customerPhoneVariants)];
+      console.log(`  📲 WhatsApp phone variants: ${customerPhones.length} unique numbers`);
+      if (customerPhones.length <= 15) {
+        console.log(`     Variants: ${JSON.stringify(customerPhones)}`);
+      } else {
+        console.log(`     First 15: ${JSON.stringify(customerPhones.slice(0, 15))}...`);
+      }
+
+      // ===== FETCH CALLS =====
+      console.log(`\n  📞 ===== Fetching Calls =====`);
+      const callQuery = {
+        $or: [
+          { userName: `${agent.firstName} ${agent.lastName}` },
+          { userName: agent.email },
+          ...(agent.phone
+            ? [{ fromNumber: agent.phone }, { toNumber: agent.phone }]
+            : []),
+        ],
+      };
+
+      const allCalls = await CallData.find({
+        startTime: { $gte: start, $lte: end },
+        ...callQuery,
+      })
+        .sort({ startTime: -1 })
+        .lean();
+      console.log(`  📞 Period calls found: ${allCalls.length}`);
+
+      // All-time calls
+      const allTimeCalls = await CallData.find(callQuery)
+        .sort({ startTime: -1 })
+        .lean();
+      console.log(`  📞 All-time calls found: ${allTimeCalls.length}`);
+
+      // ===== FETCH WHATSAPP =====
+      console.log(`\n  💬 ===== Fetching WhatsApp =====`);
+      const WhatsAppMessage = require("../models/WhatsAppMessage");
+
+      const whatsappAgentMatch = {
+        salesAgent: agent._id,
+        conversationId: { $exists: true, $ne: null },
+      };
+
+      // Quick count check
+      const whatsappTotalCount = await WhatsAppMessage.countDocuments(whatsappAgentMatch);
+      console.log(`  💬 Agent-scoped WhatsApp messages: ${whatsappTotalCount}`);
+
+      // If 0, do a broader debug check
+      if (whatsappTotalCount === 0 && customerPhones.length > 0) {
+        console.log(`  ⚠️  Zero WhatsApp matches! Checking broader...`);
+        // Check what conversationIds actually exist for a sample phone
+        const samplePhone = customerPhones[0];
+        const sampleRegex = samplePhone.replace(/\D/g, "").slice(-10);
+        const broadCheck = await WhatsAppMessage.find({
+          conversationId: { $regex: sampleRegex },
+        })
+          .limit(5)
+          .select("conversationId from to")
+          .lean();
+        if (broadCheck.length > 0) {
+          console.log(`  🔍 Found messages with regex "${sampleRegex}":`);
+          broadCheck.forEach((m) => {
+            console.log(`     conversationId: "${m.conversationId}", from: "${m.from}", to: "${m.to}"`);
+          });
+          console.log(`  💡 The conversationId format in DB is: "${broadCheck[0].conversationId}"`);
+        } else {
+          console.log(`  🔍 No messages found even with regex for "${sampleRegex}"`);
+        }
+      }
+
+      // All-time WhatsApp stats per conversation
+      const allTimeWhatsapp = await WhatsAppMessage.aggregate([
+        {
+          $match: whatsappAgentMatch,
+        },
+        { $sort: { timestamp: -1 } },
+        {
+          $group: {
+            _id: "$conversationId",
+            lastMessageDate: { $first: "$timestamp" },
+            lastMessageDirection: { $first: "$direction" },
+            lastMessageBody: { $first: "$body" },
+            totalMessages: { $sum: 1 },
+            sentMessages: {
+              $sum: { $cond: [{ $eq: ["$direction", "outbound"] }, 1, 0] },
+            },
+            receivedMessages: {
+              $sum: { $cond: [{ $eq: ["$direction", "inbound"] }, 1, 0] },
+            },
+            unreadMessages: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ["$direction", "inbound"] },
+                      { $ne: ["$status", "read"] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+          },
+        },
+      ]);
+      console.log(`  💬 WhatsApp conversations grouped: ${allTimeWhatsapp.length}`);
+      allTimeWhatsapp.forEach((wa) => {
+        console.log(`     ConversationId: "${wa._id}" → ${wa.totalMessages} msgs (last: ${wa.lastMessageDate})`);
+      });
+
+      // All-time WhatsApp call logs grouped per conversationId
+      const allTimeWhatsappCalls = await WhatsAppMessage.aggregate([
+        {
+          $match: {
+            ...whatsappAgentMatch,
+            messageType: "call",
+          },
+        },
+        { $sort: { timestamp: -1 } },
+        {
+          $group: {
+            _id: "$conversationId",
+            totalCalls: {
+              $sum: {
+                $cond: [{ $eq: ["$content.permissionStatus", "permission_sent"] }, 0, 1],
+              },
+            },
+            lastCallDate: { $first: "$timestamp" },
+            answeredCalls: {
+              $sum: {
+                $cond: [{ $eq: ["$content.callStatus", "ended"] }, 1, 0],
+              },
+            },
+            missedCalls: {
+              $sum: {
+                $cond: [{ $in: ["$content.callStatus", ["missed", "rejected"]] }, 1, 0],
+              },
+            },
+            totalCallDuration: { $sum: { $ifNull: ["$content.duration", 0] } },
+            callLogs: {
+              $push: {
+                messageId: "$messageId",
+                callId: { $ifNull: ["$content.callId", "$messageId"] },
+                conversationId: "$conversationId",
+                eventType: {
+                  $cond: [
+                    { $eq: ["$content.permissionStatus", "permission_sent"] },
+                    "permission_request",
+                    "call_session",
+                  ],
+                },
+                timestamp: "$timestamp",
+                status: "$status",
+                direction: "$direction",
+                callStatus: {
+                  $ifNull: [
+                    "$content.callStatus",
+                    {
+                      $cond: [
+                        { $eq: ["$content.permissionStatus", "permission_sent"] },
+                        "permission_sent",
+                        {
+                          $cond: [
+                            { $eq: ["$status", "failed"] },
+                            "failed",
+                            {
+                              $cond: [{ $eq: ["$status", "sent"] }, "initiating", "unknown"],
+                            },
+                          ],
+                        },
+                      ],
+                    },
+                  ],
+                },
+                callDirection: {
+                  $ifNull: [
+                    "$content.callDirection",
+                    {
+                      $cond: [
+                        { $eq: ["$direction", "outbound"] },
+                        "outgoing",
+                        {
+                          $cond: [{ $eq: ["$direction", "inbound"] }, "incoming", "unknown"],
+                        },
+                      ],
+                    },
+                  ],
+                },
+                startedAt: {
+                  $cond: [
+                    { $eq: ["$content.permissionStatus", "permission_sent"] },
+                    null,
+                    { $ifNull: ["$content.startedAt", "$timestamp"] },
+                  ],
+                },
+                endedAt: "$content.endedAt",
+                duration: {
+                  $ifNull: [
+                    "$content.duration",
+                    {
+                      $cond: [
+                        {
+                          $and: [
+                            { $ne: ["$content.startedAt", null] },
+                            { $ne: ["$content.endedAt", null] },
+                          ],
+                        },
+                        {
+                          $round: [
+                            {
+                              $divide: [
+                                { $subtract: ["$content.endedAt", "$content.startedAt"] },
+                                1000,
+                              ],
+                            },
+                            0,
+                          ],
+                        },
+                        0,
+                      ],
+                    },
+                  ],
+                },
+                text: { $ifNull: ["$content.text", "$body"] },
+                from: "$from",
+                to: "$to",
+              },
+            },
+          },
+        },
+      ]);
+      console.log(`  📞 WhatsApp call conversations grouped: ${allTimeWhatsappCalls.length}`);
+
+      // Build WhatsApp map keyed by cardCode
+      const whatsappByCardCode = {};
+      let whatsappMatched = 0;
+      let whatsappUnmatched = 0;
+      allTimeWhatsapp.forEach((wa) => {
+        const cardCode = resolveCardCodeFromConversationId(wa._id);
+        if (cardCode) {
+          // If already have data for this customer, merge (customer might have multiple phones)
+          if (whatsappByCardCode[cardCode]) {
+            const existing = whatsappByCardCode[cardCode];
+            existing.totalMessages += wa.totalMessages;
+            existing.sentMessages += wa.sentMessages;
+            existing.receivedMessages += wa.receivedMessages;
+            existing.unreadMessages += wa.unreadMessages;
+            // Keep the most recent message date
+            if (new Date(wa.lastMessageDate) > new Date(existing.lastMessageDate)) {
+              existing.lastMessageDate = wa.lastMessageDate;
+              existing.lastMessageDirection = wa.lastMessageDirection;
+              existing.lastMessageBody = wa.lastMessageBody;
+            }
+          } else {
+            whatsappByCardCode[cardCode] = { ...wa };
+          }
+          whatsappMatched++;
+          console.log(`     ✅ Matched "${wa._id}" → ${cardCode}`);
+        } else {
+          whatsappUnmatched++;
+          console.log(`     ❌ No customer match for conversationId "${wa._id}"`);
+          // Debug: show what keys we have that are close
+          const digits = wa._id.replace(/\D/g, "").slice(-10);
+          const possibleMatch = phoneToCardCodeForWhatsapp[digits];
+          if (possibleMatch) {
+            console.log(`     💡 But last-10-digits "${digits}" matches ${possibleMatch}`);
+          }
+        }
+      });
+      console.log(`  💬 WhatsApp mapped: ${whatsappMatched} matched, ${whatsappUnmatched} unmatched`);
+
+      // Build WhatsApp call map keyed by cardCode
+      const whatsappCallsByCardCode = {};
+      let whatsappCallsMatched = 0;
+      let whatsappCallsUnmatched = 0;
+
+      allTimeWhatsappCalls.forEach((waCallGroup) => {
+        const cardCode = resolveCardCodeFromConversationId(waCallGroup._id);
+        if (!cardCode) {
+          whatsappCallsUnmatched++;
+          return;
+        }
+
+        const normalizedGroup = {
+          conversationId: waCallGroup._id,
+          totalCalls: waCallGroup.totalCalls || 0,
+          answeredCalls: waCallGroup.answeredCalls || 0,
+          missedCalls: waCallGroup.missedCalls || 0,
+          failedCalls: Math.max((waCallGroup.totalCalls || 0) - (waCallGroup.answeredCalls || 0), 0),
+          totalCallDuration: waCallGroup.totalCallDuration || 0,
+          lastCallDate: waCallGroup.lastCallDate || null,
+          callLogs: waCallGroup.callLogs || [],
+        };
+
+        if (!whatsappCallsByCardCode[cardCode]) {
+          whatsappCallsByCardCode[cardCode] = {
+            totalCalls: 0,
+            answeredCalls: 0,
+            missedCalls: 0,
+            failedCalls: 0,
+            totalCallDuration: 0,
+            lastCallDate: null,
+            conversationIds: [],
+            callLogs: [],
+          };
+        }
+
+        const target = whatsappCallsByCardCode[cardCode];
+        target.totalCalls += normalizedGroup.totalCalls;
+        target.answeredCalls += normalizedGroup.answeredCalls;
+        target.missedCalls += normalizedGroup.missedCalls;
+        target.failedCalls += normalizedGroup.failedCalls;
+        target.totalCallDuration += normalizedGroup.totalCallDuration;
+        target.conversationIds.push(normalizedGroup.conversationId);
+        target.callLogs.push(...normalizedGroup.callLogs);
+
+        if (!target.lastCallDate || (normalizedGroup.lastCallDate && new Date(normalizedGroup.lastCallDate) > new Date(target.lastCallDate))) {
+          target.lastCallDate = normalizedGroup.lastCallDate;
+        }
+
+        whatsappCallsMatched++;
+      });
+
+      Object.values(whatsappCallsByCardCode).forEach((group) => {
+        group.conversationIds = [...new Set(group.conversationIds)];
+        group.callLogs = group.callLogs
+          .sort((a, b) => new Date(b.timestamp || 0) - new Date(a.timestamp || 0))
+          .slice(0, 200);
+      });
+
+      console.log(`  📞 WhatsApp calls mapped: ${whatsappCallsMatched} matched groups, ${whatsappCallsUnmatched} unmatched groups`);
+
+      // ===== MATCH CALLS TO CUSTOMERS =====
+      console.log(`\n  📞 ===== Matching Calls to Customers =====`);
+      const matchCallToCustomer = (call) => {
+        const otherNumber =
+          call.direction === "out" ? call.toNumber : call.fromNumber;
+        if (!otherNumber) return null;
+        const normalized = otherNumber.replace(/[\s\-\(\)\+]/g, "");
+        return (
+          phoneToCustomerMap[normalized] ||
+          phoneToCustomerMap["+" + normalized] ||
+          phoneToCustomerMap[normalized.slice(-10)] ||
+          null
+        );
+      };
+
+      // Period calls per customer
+      const customerCallMap = {};
+      let periodCallsMatched = 0;
+      let periodCallsUnmatched = 0;
+      allCalls.forEach((call) => {
+        const cardCode = matchCallToCustomer(call);
+        if (cardCode) {
+          if (!customerCallMap[cardCode]) {
+            customerCallMap[cardCode] = [];
+          }
+          customerCallMap[cardCode].push(call);
+          periodCallsMatched++;
+        } else {
+          periodCallsUnmatched++;
+        }
+      });
+      console.log(`  📞 Period calls: ${periodCallsMatched} matched, ${periodCallsUnmatched} unmatched`);
+
+      // All-time last call per customer
+      const allTimeCallMap = {};
+      let allTimeCallsMatched = 0;
+      allTimeCalls.forEach((call) => {
+        const cardCode = matchCallToCustomer(call);
+        if (cardCode && !allTimeCallMap[cardCode]) {
+          allTimeCallMap[cardCode] = call;
+          allTimeCallsMatched++;
+        }
+      });
+      console.log(`  📞 All-time last call: ${allTimeCallsMatched} customers have at least one call`);
+
+      // ===== BUILD ENGAGEMENT DATA =====
+      console.log(`\n  🔨 ===== Building Engagement Data =====`);
+      const now = new Date();
+      const engagementData = filteredCustomers.map((customer) => {
+        const cardCode = customer.CardCode;
+        const phone = customer.Phone1 || customer.phoneNumber || customer.Phone2 || customer.Cellular || "";
+        const periodCalls = customerCallMap[cardCode] || [];
+        const lastCall = allTimeCallMap[cardCode] || null;
+        const whatsapp = whatsappByCardCode[cardCode] || null;
+        const whatsappCalls = whatsappCallsByCardCode[cardCode] || null;
+
+        // Call stats for the period
+        const totalCallsInPeriod = periodCalls.length;
+        const inboundCalls = periodCalls.filter((c) => c.direction === "in").length;
+        const outboundCalls = periodCalls.filter((c) => c.direction === "out").length;
+        const missedCalls = periodCalls.filter((c) => c.missed).length;
+        const answeredCalls = totalCallsInPeriod - missedCalls;
+        const totalCallDuration = periodCalls.reduce(
+          (sum, c) => sum + (c.inCallDuration || 0),
+          0
+        );
+        const avgCallDuration =
+          answeredCalls > 0 ? totalCallDuration / answeredCalls : 0;
+
+        // Unique call days
+        const callDays = new Set(
+          periodCalls.map((c) =>
+            new Date(c.startTime).toISOString().split("T")[0]
+          )
+        );
+
+        // Last contact date (most recent of: last call, last WhatsApp)
+        const lastCallDate = lastCall ? new Date(lastCall.startTime) : null;
+        const lastWhatsappDate = whatsapp ? new Date(whatsapp.lastMessageDate) : null;
+
+        let lastContactDate = null;
+        let lastContactType = null;
+        if (lastCallDate && lastWhatsappDate) {
+          if (lastCallDate > lastWhatsappDate) {
+            lastContactDate = lastCallDate;
+            lastContactType = "call";
+          } else {
+            lastContactDate = lastWhatsappDate;
+            lastContactType = "whatsapp";
+          }
+        } else if (lastCallDate) {
+          lastContactDate = lastCallDate;
+          lastContactType = "call";
+        } else if (lastWhatsappDate) {
+          lastContactDate = lastWhatsappDate;
+          lastContactType = "whatsapp";
+        }
+
+        const daysSinceLastContact = lastContactDate
+          ? Math.floor((now - lastContactDate) / (1000 * 60 * 60 * 24))
+          : null;
+
+        const daysSinceLastCall = lastCallDate
+          ? Math.floor((now - lastCallDate) / (1000 * 60 * 60 * 24))
+          : null;
+
+        const daysSinceLastWhatsapp = lastWhatsappDate
+          ? Math.floor((now - lastWhatsappDate) / (1000 * 60 * 60 * 24))
+          : null;
+
+        return {
+          cardCode: customer.CardCode,
+          cardName: customer.CardName,
+          phone,
+          status: customer.status,
+          whatsappConversationIds: whatsappCalls?.conversationIds || [],
+          whatsappPhoneNumber: whatsappCalls?.conversationIds?.[0] || null,
+          callMetrics: {
+            totalCallsInPeriod,
+            inboundCalls,
+            outboundCalls,
+            missedCalls,
+            answeredCalls,
+            totalCallDuration,
+            avgCallDuration: parseFloat(avgCallDuration.toFixed(2)),
+            uniqueCallDays: callDays.size,
+            lastCallDate,
+            daysSinceLastCall,
+          },
+          whatsappMetrics: {
+            totalMessages: whatsapp?.totalMessages || 0,
+            sentMessages: whatsapp?.sentMessages || 0,
+            receivedMessages: whatsapp?.receivedMessages || 0,
+            unreadMessages: whatsapp?.unreadMessages || 0,
+            lastMessageDate: whatsapp?.lastMessageDate || null,
+            lastMessageDirection: whatsapp?.lastMessageDirection || null,
+            daysSinceLastWhatsapp,
+          },
+          whatsappCallMetrics: {
+            totalCalls: whatsappCalls?.totalCalls || 0,
+            answeredCalls: whatsappCalls?.answeredCalls || 0,
+            missedCalls: whatsappCalls?.missedCalls || 0,
+            failedCalls: whatsappCalls?.failedCalls || 0,
+            totalCallDuration: whatsappCalls?.totalCallDuration || 0,
+            lastCallDate: whatsappCalls?.lastCallDate || null,
+            callLogs: whatsappCalls?.callLogs || [],
+          },
+          engagement: {
+            lastContactDate,
+            lastContactType,
+            daysSinceLastContact,
+            engagementScore: calculateEngagementScore(
+              totalCallsInPeriod,
+              whatsapp?.totalMessages || 0,
+              daysSinceLastContact
+            ),
+          },
+        };
+      });
+
+      // Log engagement summary
+      const withWhatsapp = engagementData.filter((e) => e.whatsappMetrics.totalMessages > 0);
+      const withCalls = engagementData.filter((e) => e.callMetrics.totalCallsInPeriod > 0);
+      const withAnyContact = engagementData.filter((e) => e.engagement.lastContactDate !== null);
+      console.log(`  📊 Engagement built for ${engagementData.length} customers`);
+      console.log(`     With WhatsApp messages: ${withWhatsapp.length}`);
+      console.log(`     With calls (period): ${withCalls.length}`);
+      console.log(`     With any contact (all-time): ${withAnyContact.length}`);
+      console.log(`     Never contacted: ${engagementData.length - withAnyContact.length}`);
+
+      withWhatsapp.slice(0, 5).forEach((e) => {
+        console.log(`     💬 ${e.cardCode} (${e.cardName}): ${e.whatsappMetrics.totalMessages} msgs, last ${e.whatsappMetrics.daysSinceLastWhatsapp}d ago`);
+      });
+      withCalls.slice(0, 5).forEach((e) => {
+        console.log(`     📞 ${e.cardCode} (${e.cardName}): ${e.callMetrics.totalCallsInPeriod} calls, last ${e.callMetrics.daysSinceLastCall}d ago`);
+      });
+
+      // Sort
+      engagementData.sort((a, b) => {
+        const dir = sortOrder === "desc" ? -1 : 1;
+        switch (sortBy) {
+          case "totalCalls":
+            return dir * (a.callMetrics.totalCallsInPeriod - b.callMetrics.totalCallsInPeriod);
+          case "lastCallDate":
+            return dir * ((a.callMetrics.lastCallDate || 0) - (b.callMetrics.lastCallDate || 0));
+          case "daysSinceLastContact":
+            return dir * ((a.engagement.daysSinceLastContact ?? 9999) - (b.engagement.daysSinceLastContact ?? 9999));
+          case "lastContactDate":
+            return dir * ((a.engagement.lastContactDate || 0) - (b.engagement.lastContactDate || 0));
+          case "engagementScore":
+            return dir * (a.engagement.engagementScore - b.engagement.engagementScore);
+          case "totalMessages":
+            return dir * (a.whatsappMetrics.totalMessages - b.whatsappMetrics.totalMessages);
+          case "CardName":
+          default:
+            return dir * (a.cardName || "").localeCompare(b.cardName || "");
+        }
+      });
+
+      // Pagination
+      const total = engagementData.length;
+      const skip = (parseInt(page) - 1) * parseInt(limit);
+      const paginatedData = engagementData.slice(skip, skip + parseInt(limit));
+
+      // Summary KPIs
+      const totalCustomers = engagementData.length;
+      const customersContacted = engagementData.filter(
+        (c) => c.engagement.lastContactDate !== null
+      ).length;
+      const customersNeverContacted = totalCustomers - customersContacted;
+      const avgDaysSinceContact =
+        customersContacted > 0
+          ? engagementData
+            .filter((c) => c.engagement.daysSinceLastContact !== null)
+            .reduce((sum, c) => sum + c.engagement.daysSinceLastContact, 0) /
+          customersContacted
+          : null;
+      const totalCallsMade = engagementData.reduce(
+        (sum, c) => sum + c.callMetrics.totalCallsInPeriod,
+        0
+      );
+      const totalWhatsappMessages = engagementData.reduce(
+        (sum, c) => sum + c.whatsappMetrics.totalMessages,
+        0
+      );
+      const totalWhatsappCalls = engagementData.reduce(
+        (sum, c) => sum + (c.whatsappCallMetrics?.totalCalls || 0),
+        0
+      );
+      const staleCustomers = engagementData.filter(
+        (c) =>
+          c.engagement.daysSinceLastContact === null ||
+          c.engagement.daysSinceLastContact > 30
+      ).length;
+
+      console.log(`\n  📊 ===== Summary KPIs =====`);
+      console.log(`     Total Customers: ${totalCustomers}`);
+      console.log(`     Contacted: ${customersContacted}`);
+      console.log(`     Never Contacted: ${customersNeverContacted}`);
+      console.log(`     Avg Days Since Contact: ${avgDaysSinceContact?.toFixed(1) || "N/A"}`);
+      console.log(`     Total Calls (period): ${totalCallsMade}`);
+      console.log(`     Total WhatsApp Messages: ${totalWhatsappMessages}`);
+      console.log(`     Total WhatsApp Calls: ${totalWhatsappCalls}`);
+      console.log(`     Stale (30+ days or never): ${staleCustomers}`);
+      console.log(`     Returning page ${page}: ${paginatedData.length} of ${total} records`);
+      console.log(`  ===== End Customer Engagement =====\n`);
+
+      return res.status(200).json({
+        success: true,
+        summary: {
+          totalCustomers,
+          customersContacted,
+          customersNeverContacted,
+          avgDaysSinceContact: avgDaysSinceContact
+            ? parseFloat(avgDaysSinceContact.toFixed(1))
+            : null,
+          totalCallsMade,
+          totalWhatsappMessages,
+          totalWhatsappCalls,
+          staleCustomers,
+        },
+        data: paginatedData,
+        pagination: {
+          total,
+          page: parseInt(page),
+          pages: Math.ceil(total / parseInt(limit)),
+          limit: parseInt(limit),
+        },
+        dateRange: { start, end },
+      });
+    } catch (error) {
+      console.error("❌ Error fetching customer engagement:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Error fetching customer engagement",
+        error: error.message,
+      });
+    }
+  },
 };
+
+function calculateEngagementScore(callCount, messageCount, daysSinceContact) {
+  // Simple weighted score: higher is better
+  // Calls worth 3 points each, messages 1 point each
+  // Recency penalty: lose 1 point per day since last contact (capped at 50)
+  const activityScore = callCount * 3 + messageCount * 1;
+  const recencyPenalty =
+    daysSinceContact !== null ? Math.min(daysSinceContact, 50) : 50;
+  return Math.max(0, parseFloat((activityScore - recencyPenalty).toFixed(1)));
+}
 
 function processMonthlyData(orderData, invoiceData, startDate, endDate) {
   // Create a map of months
@@ -2729,5 +3521,7 @@ async function getRecentActivities(agentId, agent, startDate, endDate) {
     return [];
   }
 }
+
+
 
 module.exports = salesAgentJourneyController;

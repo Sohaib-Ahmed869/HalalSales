@@ -114,16 +114,17 @@ async function generateRFQPDF(rfq) {
             const rightCardX = 310;
             const cardWidth = 245;
 
-            // Left card - Timeline Information
+            // Left card - Timeline & Terms
+            const leftCardHeight = 155;
             doc
-                .roundedRect(leftCardX, cardY, cardWidth, cardHeight, 6)
+                .roundedRect(leftCardX, cardY, cardWidth, leftCardHeight, 6)
                 .fillAndStroke(colors.white, colors.border);
 
             doc
                 .fontSize(12)
                 .font('Helvetica-Bold')
                 .fillColor(colors.primary)
-                .text('Timeline', leftCardX + 15, cardY + 15);
+                .text('Timeline & Terms', leftCardX + 15, cardY + 15);
 
             let detailY = cardY + 38;
             const lineSpacing = 22;
@@ -135,10 +136,16 @@ async function generateRFQPDF(rfq) {
             detailY += lineSpacing;
 
             drawDetailRow(doc, leftCardX + 15, detailY, 'Delivery By', formatDate(rfq.deliveryBy), colors, false);
+            detailY += lineSpacing;
+
+            drawDetailRow(doc, leftCardX + 15, detailY, 'Incoterm', rfq.incoterm || 'EXW', colors, false);
+            detailY += lineSpacing;
+
+            drawDetailRow(doc, leftCardX + 15, detailY, 'Destination', rfq.destination || 'Paris, France', colors, false);
 
             // Right card - Contact Information
             doc
-                .roundedRect(rightCardX, cardY, cardWidth, cardHeight, 6)
+                .roundedRect(rightCardX, cardY, cardWidth, leftCardHeight, 6)
                 .fillAndStroke(colors.white, colors.border);
 
             doc
@@ -157,7 +164,7 @@ async function generateRFQPDF(rfq) {
 
             drawDetailRow(doc, rightCardX + 15, detailY, 'Location', rfq.location || 'Paris, France', colors, false);
 
-            doc.y = cardY + cardHeight + 25;
+            doc.y = cardY + leftCardHeight + 25;
 
             // Products Section Header
             doc
@@ -246,9 +253,11 @@ async function generateRFQPDF(rfq) {
                     ellipsis: true
                 });
 
+                // Combine specifications and additionalInfo (never include targetPrice)
+                const specsText = [item.specifications, item.additionalInfo].filter(Boolean).join(' | ') || '—';
                 doc
                     .fillColor(colors.textMuted)
-                    .text(item.specifications || '—', colX.specs + 8, currentY + 10, {
+                    .text(specsText, colX.specs + 8, currentY + 10, {
                         width: colWidths.specs - 10,
                         ellipsis: true
                     });

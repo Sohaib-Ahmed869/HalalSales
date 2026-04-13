@@ -243,13 +243,6 @@ const generateOrderPage = async (doc, order, logoBuffer, isFirstOrder = false, c
         // RIGHT COLUMN - Delivery Address with customer name on top
         const deliveryX = pageWidth / 2 + 20;
 
-        let deliveryAddress = null;
-        if (customer && customer.addresses && customer.addresses.length > 0) {
-            deliveryAddress = customer.addresses.find(addr =>
-                addr.addressType === "bo_ShipTo"
-            ) || customer.addresses.find(addr => addr.addressType === "bo_ShipTo");
-        }
-
         doc.fontSize(10).font("Helvetica-Bold").fillColor("#000000");
         doc.text(order.CardName || "", deliveryX, startY, {
             width: (pageWidth / 2) - margin - 20,
@@ -259,30 +252,53 @@ const generateOrderPage = async (doc, order, logoBuffer, isFirstOrder = false, c
         doc.fontSize(8).font("Helvetica").fillColor("#666666");
         doc.text("Addresse de livraison", deliveryX, startY + 15, { continued: false });
 
-        if (deliveryAddress) {
-            // Clean and split the address properly
+        // Use the ORDER's delivery address (Address2) first — this is the address
+        // specific to this order from SAP. Only fall back to customer default if empty.
+        if (order.Address2) {
+            // Address2 is a single string with \r or \n separators from SAP
+            const addressLines = order.Address2
+                .split(/[\r\n]+/)
+                .map(line => sanitizeText(line))
+                .filter(line => line.length > 0);
+
             let yOffset = startY + 30;
             doc.fontSize(9).font("Helvetica").fillColor("#000000");
-            if (deliveryAddress.street) {
-                doc.text(sanitizeText(deliveryAddress.street).substring(0, 50), deliveryX, yOffset, { continued: false });
+            for (const line of addressLines.slice(0, 4)) {
+                doc.text(line.substring(0, 50), deliveryX, yOffset, { continued: false });
                 yOffset += 12;
             }
-            const cityLine = [deliveryAddress.zipCode, deliveryAddress.city]
-                .filter(Boolean)
-                .join(" ");
-            if (cityLine) {
-                doc.text(sanitizeText(cityLine).substring(0, 50), deliveryX, yOffset, { continued: false });
-                yOffset += 12;
-            }
-            if (deliveryAddress.country) {
-                doc.text(sanitizeText(deliveryAddress.country).substring(0, 50), deliveryX, yOffset, { continued: false });
+        } else {
+            // Fallback: use customer's default ShipTo address
+            let deliveryAddress = null;
+            if (customer && customer.addresses && customer.addresses.length > 0) {
+                deliveryAddress = customer.addresses.find(addr =>
+                    addr.addressType === "bo_ShipTo"
+                );
             }
 
-        } else {
-            doc.font("Helvetica").fontSize(9);
-            doc.text("2 avenue emilie zola", deliveryX, startY + 30, { continued: false });
-            doc.text("75015 PARIS", deliveryX, startY + 42, { continued: false });
-            doc.text("FRANCE", deliveryX, startY + 54, { continued: false });
+            if (deliveryAddress) {
+                let yOffset = startY + 30;
+                doc.fontSize(9).font("Helvetica").fillColor("#000000");
+                if (deliveryAddress.street) {
+                    doc.text(sanitizeText(deliveryAddress.street).substring(0, 50), deliveryX, yOffset, { continued: false });
+                    yOffset += 12;
+                }
+                const cityLine = [deliveryAddress.zipCode, deliveryAddress.city]
+                    .filter(Boolean)
+                    .join(" ");
+                if (cityLine) {
+                    doc.text(sanitizeText(cityLine).substring(0, 50), deliveryX, yOffset, { continued: false });
+                    yOffset += 12;
+                }
+                if (deliveryAddress.country) {
+                    doc.text(sanitizeText(deliveryAddress.country).substring(0, 50), deliveryX, yOffset, { continued: false });
+                }
+            } else {
+                doc.font("Helvetica").fontSize(9);
+                doc.text("2 avenue emilie zola", deliveryX, startY + 30, { continued: false });
+                doc.text("75015 PARIS", deliveryX, startY + 42, { continued: false });
+                doc.text("FRANCE", deliveryX, startY + 54, { continued: false });
+            }
         }
 
         return startY + 75;

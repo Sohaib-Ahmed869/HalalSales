@@ -62,4 +62,12 @@ const emitMessageStatus = (agentId, payload) => {
     io.to(`agent:${agentId}`).emit("message_status", payload);
 };
 
-module.exports = { initSocket, getIO, emitNewMessage, emitMessageStatus };
+const emitToAgent = (agentId, event, data) => {
+    if (!io) { console.warn("[Socket] emitToAgent: io not initialized"); return; }
+    const room = `agent:${agentId}`;
+    const sockets = io.sockets.adapter.rooms.get(room);
+    console.log(`[Socket] emitToAgent → room="${room}", event="${event}", sockets=${sockets ? sockets.size : 0}`);
+    io.to(room).emit(event, data);
+};
+
+module.exports = { initSocket, getIO, emitNewMessage, emitMessageStatus, emitToAgent };

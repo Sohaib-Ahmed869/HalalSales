@@ -10,10 +10,17 @@ class NotificationService {
     message,
     relatedTask = null,
     relatedLead = null,
+    relatedRFQ = null,
+    allowSelfNotify = false,
   }) {
     try {
-      // Don't create notification if sender and recipient are the same
-      if (sender.toString() === recipient.toString()) {
+      // Don't create notification if sender and recipient are the same — UNLESS this is a
+      // system-triggered notification (e.g., AI agent flagging an RFQ for admin review) where
+      // the admin receives the notification even though they're recorded as the nominal sender.
+      if (
+        !allowSelfNotify &&
+        sender && recipient && sender.toString() === recipient.toString()
+      ) {
         return null;
       }
 
@@ -25,6 +32,7 @@ class NotificationService {
         message,
         relatedTask,
         relatedLead,
+        relatedRFQ,
       });
 
       await notification.save();
@@ -32,6 +40,43 @@ class NotificationService {
     } catch (error) {
       console.error("Error creating notification:", error);
       throw error;
+    }
+  }
+
+  /**
+   * Notify all admins when an RFQ needs human attention (AI recommended acceptance,
+   * negotiation stalled, or similar). The AI bot is the sender — use a system sender ID.
+   */
+  static async notifyAdminsAboutRFQ({ rfq, vendor, type, title, message, systemSenderId }) {
+    try {
+      const User = require("../models/User");
+      const admins = await User.find({
+        role: { $in: ["admin", "sales_manager"] },
+      }).select("_id").lean();
+
+      if (!admins.length) {
+        console.warn("[NotificationService] notifyAdminsAboutRFQ: no admins / sales_managers to notify");
+        return [];
+      }
+
+      const notifications = await Promise.all(
+        admins.map(admin =>
+          this.createNotification({
+            recipient: admin._id,
+            sender: systemSenderId || admin._id, // fall back to self so it still saves when no system user exists
+            type,
+            title,
+            message,
+            relatedRFQ: rfq._id,
+            allowSelfNotify: true, // bypass the self-notify guard — this is a system-triggered alert, not a user-to-user ping
+          })
+        )
+      );
+      const saved = notifications.filter(Boolean);
+      console.log(`[NotificationService] notifyAdminsAboutRFQ: created ${saved.length}/${admins.length} notifications (type=${type}, rfq=${rfq.rfqNumber})`);
+      return saved;
+    } catch (error) {
+      console.error("Error notifying admins about RFQ:", error);
     }
   }
 

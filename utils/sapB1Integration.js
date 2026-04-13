@@ -20,6 +20,74 @@ const ENABLE_SAP_SYNC = true;
 let sessionId = null;
 let sessionTimeout = null;
 
+exports.pushBusinessPartnerToSAP = async (customer) => {
+  try {
+    const sessionId = await getSessionId();
+
+    // ✅ FIX: Truncate/sanitize CardCode to SAP's 15 char limit
+    let cardCode = customer.CardCode;
+    if (cardCode && cardCode.length > 15) {
+      // Take last 15 chars (usually the unique part) or use a hash
+      cardCode = cardCode.replace("TEMP-", "C").slice(-15);
+    }
+
+    const bpData = {
+      CardCode: cardCode,
+      CardName: customer.CardName,
+      CardType: "cCustomer",
+      Phone1: customer.Phone1 || "",
+      EmailAddress: customer.EmailAddress || "",
+    };
+
+    const exists = await exports.checkBusinessPartnerExists(cardCode);
+
+    if (exists) {
+      await axios.patch(
+        `${SAP_CONFIG.serviceLayerUrl}/BusinessPartners('${cardCode}')`,
+        bpData,
+        {
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: `B1SESSION=${sessionId}`,
+          },
+        }
+      );
+      console.log(`Business partner ${cardCode} updated in SAP`);
+    } else {
+      await axios.post(
+        `${SAP_CONFIG.serviceLayerUrl}/BusinessPartners`,
+        bpData,
+        {
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: `B1SESSION=${sessionId}`,
+          },
+        }
+      );
+      console.log(`Business partner ${cardCode} created in SAP`);
+    }
+
+    // ✅ Also update the local customer record with the sanitized CardCode
+    if (cardCode !== customer.CardCode) {
+      const Customer = require("../models/Customer");
+      await Customer.findByIdAndUpdate(customer._id, { CardCode: cardCode });
+      console.log(`Updated local CardCode from ${customer.CardCode} to ${cardCode}`);
+    }
+
+    return { success: true, CardCode: cardCode };
+  } catch (error) {
+    console.error("Error pushing business partner to SAP:", error.message);
+    if (error.response) {
+      console.error("SAP Error details:", error.response.data);
+    }
+    if (error.response?.status === 401) {
+      sessionId = null;
+      await getSessionId();
+      return exports.pushBusinessPartnerToSAP(customer);
+    }
+    return { success: false, error: error.message };
+  }
+};
 // Login to SAP B1 Service Layer and get session ID
 async function loginToSAP() {
   try {

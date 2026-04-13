@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -c models/RFQ.js)",
+      "Bash(node -c controllers/rfqController.js)",
+      "Bash(node -c services/rfqService.js)",
+      "Bash(node -c agents/inboundAgent.js)",
+      "Bash(node -c agents/comparisonAgent.js)"
+    ]
+  }
+}

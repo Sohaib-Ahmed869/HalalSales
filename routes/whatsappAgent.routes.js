@@ -21,9 +21,25 @@ router.get("/conversations/:phoneNumber/messages", auth, whatsappAgentController
 
 // Messaging
 router.post("/messages/send", auth, whatsappAgentController.sendMessage);
+router.post("/messages/send-template", auth, whatsappAgentController.sendTemplateMessage);
 router.post("/messages/read", auth, whatsappAgentController.markAsRead);
+
+// Approved Meta templates (for re-engagement after the 24h window)
+router.get("/templates", auth, whatsappAgentController.listTemplates);
 
 // Statistics
 router.get("/stats", auth, whatsappAgentController.getAgentStats);
+
+// ── Calling ───────────────────────────────────────────────────────────────────
+// POST /calls/permission  — send call permission request to customer (outbound pre-auth)
+router.post("/calls/permission", auth, whatsappAgentController.requestCallPermission);
+// POST /calls/initiate    — create outbound call with SDP offer after permission granted
+router.post("/calls/initiate", auth, whatsappAgentController.initiateCall);
+// POST /calls/action      — accept (with SDP answer) | reject | terminate
+router.post("/calls/action", auth, whatsappAgentController.handleCallAction);
+// GET  /calls/:callId/status — poll for SDP answer (fallback if socket missed)
+router.get("/calls/:callId/status", auth, whatsappAgentController.getCallStatus);
+// GET  /calls/logs        — call history for a conversation or all
+router.get("/calls/logs", auth, whatsappAgentController.getCallLogs);
 
 module.exports = router;

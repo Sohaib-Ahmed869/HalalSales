@@ -180,12 +180,32 @@ const UserSchema = new Schema({
       type: Date,
     },
     totalMessagesSent: {
-      type: Number,
+       type: Number,
       default: 0,
     },
     totalMessagesReceived: {
       type: Number,
       default: 0,
+    },
+    // Call KPIs
+    totalCalls: {
+      type: Number,
+      default: 0,
+    },
+    answeredCalls: {
+      type: Number,
+      default: 0,
+    },
+    failedCalls: {
+      type: Number,
+      default: 0,
+    },
+    totalCallDuration: {
+      type: Number,
+      default: 0,
+    },
+    lastCallAt: {
+      type: Date,
     },
   },
 });

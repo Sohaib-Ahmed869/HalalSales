@@ -20,10 +20,12 @@ const whatsappContactSchema = new Schema(
         },
         tags: [String],
         notes: String,
+        // salesAgent is optional — unassigned contacts are visible to all agents
+        // until one of them claims the conversation by replying.
         salesAgent: {
             type: Schema.Types.ObjectId,
             ref: "User",
-            required: true,
+            default: null,
             index: true,
         },
         isCustomer: {
@@ -34,6 +36,11 @@ const whatsappContactSchema = new Schema(
             type: String,
         },
         lastMessageAt: {
+            type: Date,
+        },
+        // Timestamp of the last INBOUND message from this contact.
+        // Drives the Meta 24h customer-service-window check.
+        lastInboundMessageAt: {
             type: Date,
         },
         totalMessages: {
@@ -58,7 +65,7 @@ const whatsappContactSchema = new Schema(
     }
 );
 
-// Compound index for unique contact per agent
+// Unique per (phoneNumber, salesAgent) — unassigned contacts collapse into one doc (salesAgent=null)
 whatsappContactSchema.index({ phoneNumber: 1, salesAgent: 1 }, { unique: true });
 
 module.exports = mongoose.model("WhatsAppContact", whatsappContactSchema);

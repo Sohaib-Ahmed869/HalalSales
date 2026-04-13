@@ -6,7 +6,46 @@ const crypto = require("crypto");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const { v4: uuidv4 } = require("uuid");
 const { emitNewMessage, emitMessageStatus } = require("../socket");
-const { resolveAgentForConversation } = require("./whatsappAgent.controller");
+const { resolveAgentForConversation, processCallWebhook } = require("./whatsappAgent.controller");
+const os = require("os");
+const fs = require("fs");
+const pathLib = require("path");
+const ffmpeg = require("fluent-ffmpeg");
+const ffmpegPath = require("ffmpeg-static");
+if (ffmpegPath) ffmpeg.setFfmpegPath(ffmpegPath);
+
+// Convert inbound OGG/Opus (or any audio) to MP3 for universal browser playback
+const convertInboundAudioToMp3 = (inputBuffer) => {
+    return new Promise((resolve, reject) => {
+        const tmpIn = pathLib.join(os.tmpdir(), `wa-inbound-${uuidv4()}`);
+        const tmpOut = pathLib.join(os.tmpdir(), `wa-inbound-${uuidv4()}.mp3`);
+        try { fs.writeFileSync(tmpIn, inputBuffer); } catch (err) { return reject(err); }
+
+        ffmpeg(tmpIn)
+            .audioCodec("libmp3lame")
+            .audioChannels(1)
+            .audioFrequency(44100)
+            .audioBitrate("64k")
+            .format("mp3")
+            .on("error", (err) => {
+                try { fs.unlinkSync(tmpIn); } catch (_) {}
+                try { fs.unlinkSync(tmpOut); } catch (_) {}
+                reject(err);
+            })
+            .on("end", () => {
+                try {
+                    const outBuffer = fs.readFileSync(tmpOut);
+                    resolve(outBuffer);
+                } catch (err) {
+                    reject(err);
+                } finally {
+                    try { fs.unlinkSync(tmpIn); } catch (_) {}
+                    try { fs.unlinkSync(tmpOut); } catch (_) {}
+                }
+            })
+            .save(tmpOut);
+    });
+};
 
 const findAgentByPhone = async (phoneNumberId) => {
     const agent = await User.findOne({
@@ -21,11 +60,13 @@ const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 
 // ── S3 client (reused across all media uploads) ──────────────────────────────
+// Use the same config as the outbound upload (whatsappAgent.controller.js) to avoid mismatches
+const S3_REGION = process.env.AWS_REGION || "eu-north-1";
 const s3 = new S3Client({
-    region: process.env.AWS_REGION,
+    region: S3_REGION,
     credentials: {
-        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_KEY,
     },
 });
 
@@ -62,6 +103,35 @@ const whatsappController = {
                     for (const change of entry.changes) {
                         if (change.field === "messages") {
                             await whatsappController.processMessage(change.value);
+                        }
+                    }
+
+                    // Handle call events
+                    for (const change of entry.changes) {
+                        const val = change.value;
+                        if (val?.calls) {
+                            console.log(`[Webhook] Received ${val.calls.length} call event(s)`);
+                            for (const callEvent of val.calls) {
+                                console.log("[Webhook] Call event:", JSON.stringify(callEvent, null, 2));
+                                const callId = callEvent.call_id || callEvent.id;
+                                const fromNumber = callEvent.from;
+
+                                // Try 1: resolve agent from conversation history (with + prefix)
+                                let agentId = await resolveAgentForConversation(fromNumber);
+                                if (!agentId) agentId = await resolveAgentForConversation("+" + fromNumber);
+
+                                // Try 2: resolve from the stored call message by call_id
+                                if (!agentId && callId) {
+                                    const callMsg = await WhatsAppMessage.findOne({ messageId: callId }).lean();
+                                    agentId = callMsg?.salesAgent || null;
+                                }
+
+                                if (agentId) {
+                                    await processCallWebhook(callEvent, agentId.toString());
+                                } else {
+                                    console.warn("[Webhook] No agent found for call from:", fromNumber, "callId:", callId);
+                                }
+                            }
                         }
                     }
                 }
@@ -129,13 +199,17 @@ const whatsappController = {
                 case "document":
                 case "sticker":
                     content.mediaId = message[messageType].id;
-                    content.mimeType = message[messageType].mime_type;
                     content.caption = message[messageType].caption;
                     if (messageType === "document") {
                         content.filename = message[messageType].filename;
                     }
                     // Download from Meta and re-upload to S3 for a permanent URL
+                    // (audio is converted to MP3 inside getMediaUrl for universal browser playback)
                     content.mediaUrl = await whatsappController.getMediaUrl(message[messageType].id);
+                    // Store the stripped/final mime type. Audio files are now MP3.
+                    content.mimeType = messageType === "audio"
+                        ? "audio/mpeg"
+                        : (message[messageType].mime_type || "").split(";")[0].trim();
                     break;
 
                 case "location":
@@ -184,31 +258,55 @@ const whatsappController = {
 
             await newMessage.save();
 
+            // Resolve agent: direct phoneNumberId match, or fallback via conversation history
+            let resolvedAgentId = agent?._id || null;
+            if (!resolvedAgentId) {
+                resolvedAgentId = await resolveAgentForConversation(messageFrom);
+            }
+
+            const nowDate = new Date();
+
+            // Update agent counters (only for direct phoneNumberId match)
             if (agent) {
                 await User.findByIdAndUpdate(agent._id, {
                     $inc: { "whatsappSettings.totalMessagesReceived": 1 },
-                    $set: { "whatsappSettings.lastMessageAt": new Date() },
+                    $set: { "whatsappSettings.lastMessageAt": nowDate },
                 });
+            }
 
-                await WhatsAppContact.findOneAndUpdate(
-                    { phoneNumber: messageFrom, salesAgent: agent._id },
-                    {
-                        $set: {
-                            name: contact?.profile?.name || messageFrom,
-                            lastMessageAt: new Date(),
-                            "metadata.waId": contact?.wa_id,
-                        },
-                        $inc: { totalMessages: 1 },
+            // Upsert contact — use resolved agent if available, otherwise null (unassigned).
+            // Unassigned contacts are visible to all agents in the inbox.
+            await WhatsAppContact.findOneAndUpdate(
+                { phoneNumber: messageFrom, salesAgent: resolvedAgentId || null },
+                {
+                    $set: {
+                        name: contact?.profile?.name || messageFrom,
+                        lastMessageAt: nowDate,
+                        lastInboundMessageAt: nowDate,
+                        "metadata.waId": contact?.wa_id,
                     },
-                    { upsert: true, setDefaultsOnInsert: true }
-                );
+                    $inc: { totalMessages: 1 },
+                },
+                { upsert: true, setDefaultsOnInsert: true }
+            );
 
-                emitNewMessage(String(agent._id), newMessage.toObject());
+            // Ensure the message has salesAgent set if we resolved one
+            if (resolvedAgentId && !newMessage.salesAgent) {
+                newMessage.salesAgent = resolvedAgentId;
+                await newMessage.save();
+            }
+
+            if (resolvedAgentId) {
+                emitNewMessage(String(resolvedAgentId), newMessage.toObject());
+                console.log(`[Webhook] New message from ${messageFrom} emitted to agent ${resolvedAgentId}`);
             } else {
-                // Agent not found via phoneNumberId — try resolving from conversation history
-                const fallbackAgentId = await resolveAgentForConversation(messageFrom);
-                if (fallbackAgentId) {
-                    emitNewMessage(String(fallbackAgentId), newMessage.toObject());
+                // Broadcast unassigned inbound to every connected agent so whoever is online can pick it up
+                try {
+                    const io = require("../socket").getIO();
+                    io.emit("new_unassigned_message", newMessage.toObject());
+                    console.log(`[Webhook] Unassigned message from ${messageFrom} broadcast to all agents`);
+                } catch (e) {
+                    console.warn("[Webhook] Could not broadcast unassigned message:", e.message);
                 }
             }
 
@@ -249,7 +347,11 @@ const whatsappController = {
                         conversationId: msg.conversationId,
                     });
                 }
-                console.log(`[Webhook] Message ${status.id} → ${status.status}`);
+                if (status.status === "failed" && status.errors?.length) {
+                    console.error(`[Webhook] Message ${status.id} FAILED:`, JSON.stringify(status.errors, null, 2));
+                } else {
+                    console.log(`[Webhook] Message ${status.id} → ${status.status}`);
+                }
             }
         } catch (error) {
             console.error("[Webhook] Error updating status:", error);
@@ -266,7 +368,9 @@ const whatsappController = {
                 headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
             });
             const tempUrl = metaResponse.data.url;
-            const mimeType = metaResponse.data.mime_type || "application/octet-stream";
+            const rawMimeType = metaResponse.data.mime_type || "application/octet-stream";
+            // Strip codec parameters (e.g., "audio/ogg; codecs=opus" → "audio/ogg")
+            const mimeType = rawMimeType.split(";")[0].trim();
 
             // Step 2: Download actual media bytes from Meta
             const mediaResponse = await axios.get(tempUrl, {
@@ -274,19 +378,34 @@ const whatsappController = {
                 responseType: "arraybuffer",
             });
 
-            // Step 3: Upload to S3
-            const ext = mimeType.split("/")[1]?.split(";")[0] || "bin";
-            const key = `whatsapp-inbound/${uuidv4()}.${ext}`;
+            let buffer = Buffer.from(mediaResponse.data);
+            let finalMime = mimeType;
+            let ext = mimeType.split("/")[1] || "bin";
 
+            // Convert incoming audio (esp. OGG/Opus from WhatsApp voice notes) to MP3 for universal browser playback
+            if (mimeType.startsWith("audio/")) {
+                try {
+                    console.log(`[Media] Converting inbound audio (${rawMimeType}) to MP3...`);
+                    buffer = await convertInboundAudioToMp3(buffer);
+                    finalMime = "audio/mpeg";
+                    ext = "mp3";
+                    console.log(`[Media] Audio conversion complete (${buffer.length} bytes)`);
+                } catch (convErr) {
+                    console.error(`[Media] Audio conversion failed, uploading original:`, convErr.message);
+                }
+            }
+
+            // Step 3: Upload to S3
+            const key = `whatsapp-inbound/${uuidv4()}.${ext}`;
             await s3.send(new PutObjectCommand({
                 Bucket: process.env.AWS_S3_BUCKET,
                 Key: key,
-                Body: Buffer.from(mediaResponse.data),
-                ContentType: mimeType,
+                Body: buffer,
+                ContentType: finalMime,
                 ACL: "public-read",
             }));
 
-            const s3Url = `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
+            const s3Url = `https://${process.env.AWS_S3_BUCKET}.s3.${S3_REGION}.amazonaws.com/${key}`;
             console.log(`[Media] ${mediaId} → S3: ${s3Url}`);
             return s3Url;
 

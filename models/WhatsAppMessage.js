@@ -20,7 +20,7 @@ const whatsappMessageSchema = new mongoose.Schema(
         },
         to: {
             type: String,
-            required: true,
+            required: false,
         },
         direction: {
             type: String,
@@ -29,25 +29,13 @@ const whatsappMessageSchema = new mongoose.Schema(
         },
         messageType: {
             type: String,
-            enum: ["text", "image", "video", "audio", "document", "location", "contacts", "interactive", "template", "reaction", "sticker"],
+            enum: ["text", "image", "video", "audio", "document", "location", "contacts", "interactive", "template", "reaction","call", "sticker"],
             required: true,
         },
+        // Keep content flexible so call lifecycle payloads are not dropped by schema strictness.
         content: {
-            text: String,
-            caption: String,
-            mediaUrl: String,
-            mediaId: String,
-            mimeType: String,
-            filename: String,
-            latitude: Number,
-            longitude: Number,
-            locationName: String,
-            locationAddress: String,
-            contacts: [Object],
-            interactive: Object,
-            template: Object,
-            reaction: Object,
-            stickerUrl: String,
+            type: Schema.Types.Mixed,
+            default: {},
         },
         status: {
             type: String,

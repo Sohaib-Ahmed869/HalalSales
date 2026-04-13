@@ -266,8 +266,20 @@ async function analyzeHistoricalPurchasesMultiKeyword(keywords, quantity, search
         return [];
     }
 
-    // Generate keyword variations for better matching
-    const expandedKeywords = generateKeywordVariations(keywords);
+    // Generate keyword variations for better matching (stems + casing)
+    const stemVariations = generateKeywordVariations(keywords);
+
+    // Bilingual expansion: translate each keyword between French ↔ English using the food glossary.
+    // This is what makes a French inventory term ("Filet de poulet frais") match vendors whose
+    // product categories are in English ("chicken fillet") and vice versa.
+    const { expandKeywords: expandBilingual } = require('../utils/bilingualFoodGlossary');
+    const bilingualSet = new Set();
+    [...keywords, ...stemVariations].forEach(k => {
+        if (!k) return;
+        expandBilingual(k).forEach(t => bilingualSet.add(t));
+        bilingualSet.add(k);
+    });
+    const expandedKeywords = Array.from(bilingualSet);
     console.log(`>> Expanded keywords: ${JSON.stringify(expandedKeywords)}`);
 
     const regexPatterns = expandedKeywords.map(keyword => ({
@@ -386,7 +398,11 @@ async function analyzeHistoricalPurchasesMultiKeyword(keywords, quantity, search
 
             // ===== FETCH EMAIL VENDORS =====
             try {
-                const keywordRegex = new RegExp(keywords.join('|'), 'i');
+                // Use the bilingual-expanded keyword list so an inventory item in French
+                // ("poulet") still matches an English-tagged product category ("chicken").
+                const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const safeKeywords = expandedKeywords.filter(k => k && String(k).trim().length >= 2);
+                const keywordRegex = new RegExp(safeKeywords.map(escapeRegex).join('|'), 'i');
 
                 const emailVendorDetails = await Vendor.find({
                     'customFields.isEmailVendor': true,
@@ -472,7 +488,11 @@ async function analyzeHistoricalPurchasesMultiKeyword(keywords, quantity, search
             // ===== FETCH PDA SUPPLIERS =====
             try {
                 const PDA_Supplier = require('../models/PDA_Supplier');
-                const keywordRegex = new RegExp(keywords.join('|'), 'i');
+                // Same bilingual-expanded regex used for email vendors — scraped suppliers may
+                // have been indexed from English-language sources while the RFQ is in French.
+                const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const safeKeywords = expandedKeywords.filter(k => k && String(k).trim().length >= 2);
+                const keywordRegex = new RegExp(safeKeywords.map(escapeRegex).join('|'), 'i');
 
                 const pdaSupplierDetails = await PDA_Supplier.find({
                     isActive: true,
@@ -651,12 +671,16 @@ async function createRFQFromAnalysis(analysisResult, additionalData = {}) {
         contactEmail: additionalData.contactEmail || 'contact@halalfoods.fr',
         contactPhone: additionalData.contactPhone || '+33 1 XX XX XX XX',
         location: 'Paris, France',
+        incoterm: additionalData.incoterm || 'EXW',
+        destination: additionalData.destination || 'Paris, France',
 
         items: analysisResult.parsedData.items.map(item => ({
             productName: item.productName,
             specifications: item.specifications,
             quantity: item.quantity,
             unit: item.unit,
+            targetPrice: item.targetPrice || 0,
+            additionalInfo: item.additionalInfo || '',
         })),
 
         packagingRequirements: analysisResult.parsedData.specialRequirements?.packaging,
@@ -805,16 +829,21 @@ async function syncEmailVendors() {
  * @param {Array<number>} targetPrices - Optional target prices
  * @param {string} userId - User ID
  */
-async function processFormBasedRFQ(itemCodes, quantities, targetPrices, userId) {
+async function processFormBasedRFQ(itemCodes, quantities, targetPrices, userId, additionalInfos, customItems = []) {
     console.log('=== Starting Form-Based RFQ Processing (SAP Vendors Only) ===');
 
     const Item = require('../models/item');
 
-    // Fetch item details from inventory
-    const items = await Item.find({ ItemCode: { $in: itemCodes } });
+    // Fetch item details from inventory (if any inventory codes provided)
+    const items = itemCodes?.length
+        ? await Item.find({ ItemCode: { $in: itemCodes } })
+        : [];
 
-    if (items.length === 0) {
-        throw new Error('No items found with provided item codes');
+    const hasInventory = items.length > 0;
+    const hasCustom = Array.isArray(customItems) && customItems.length > 0;
+
+    if (!hasInventory && !hasCustom) {
+        throw new Error('No items provided — supply itemCodes from inventory or customItems with a product name');
     }
 
     const itemsWithVendors = [];
@@ -823,6 +852,7 @@ async function processFormBasedRFQ(itemCodes, quantities, targetPrices, userId) 
         const item = items[i];
         const quantity = quantities[i] || 1;
         const targetPrice = targetPrices?.[i] || null;
+        const additionalInfo = additionalInfos?.[i] || '';
 
         console.log(`\n--- Analyzing item: ${item.ItemName} (${item.ItemCode}) ---`);
 
@@ -863,6 +893,47 @@ async function processFormBasedRFQ(itemCodes, quantities, targetPrices, userId) 
             quantity,
             unit: item.SalesUnit || 'kg',
             targetPrice,
+            additionalInfo,
+            vendors: enrichedVendors,
+            vendorsFound: enrichedVendors.length,
+        });
+    }
+
+    // Process custom (not-in-inventory) items — look up vendors by the typed product name only.
+    for (const ci of customItems) {
+        const productName = (ci.productName || '').trim();
+        if (!productName) continue;
+        const quantity = ci.quantity || 1;
+        const targetPrice = ci.targetPrice ?? null;
+        const additionalInfo = ci.additionalInfo || '';
+        const unit = ci.unit || 'kg';
+
+        const keywords = [productName];
+        let vendorAnalysis = await analyzeHistoricalPurchasesMultiKeyword(keywords, quantity, 'existing');
+        vendorAnalysis = vendorAnalysis.filter(v => v.vendorSource === 'SAP');
+
+        const sapVendorCodes = vendorAnalysis.map(v => v._id);
+        const vendors = await Vendor.find({ CardCode: { $in: sapVendorCodes } });
+
+        const enrichedVendors = vendorAnalysis.map(historical => {
+            const vendorDetails = vendors.find(v => v.CardCode === historical._id);
+            return {
+                ...historical,
+                email: vendorDetails?.email,
+                phone: vendorDetails?.phone,
+                hasEmail: !!vendorDetails?.email,
+            };
+        }).filter(v => v.hasEmail);
+
+        itemsWithVendors.push({
+            itemCode: null,
+            isCustom: true,
+            productName,
+            specifications: '',
+            quantity,
+            unit,
+            targetPrice,
+            additionalInfo,
             vendors: enrichedVendors,
             vendorsFound: enrichedVendors.length,
         });
@@ -928,11 +999,13 @@ async function processFormBasedRFQ(itemCodes, quantities, targetPrices, userId) 
         parsedData: {
             items: itemsWithVendors.map(i => ({
                 itemCode: i.itemCode,
+                isCustom: !!i.isCustom,
                 productName: i.productName,
                 specifications: i.specifications,
                 quantity: i.quantity,
                 unit: i.unit,
-                targetPrice: i.targetPrice
+                targetPrice: i.targetPrice,
+                additionalInfo: i.additionalInfo,
             }))
         },
         itemsAnalysis: itemsWithVendors,
@@ -944,9 +1017,200 @@ async function processFormBasedRFQ(itemCodes, quantities, targetPrices, userId) 
         createdBy: userId,
     };
 }
+/**
+ * Form-based RFQ for NEW suppliers (Web / Email mode).
+ * Uses the product form input (itemCode + quantity + targetPrice) to look up inventory,
+ * then searches Email + PDA suppliers instead of SAP vendors.
+ */
+async function processFormBasedRFQForNewSuppliers(itemCodes, quantities, targetPrices, userId, additionalInfos, customItems = []) {
+    console.log('=== Starting Form-Based RFQ Processing (Web / Email Suppliers) ===');
+
+    const Item = require('../models/item');
+    const PDA_Supplier = require('../models/PDA_Supplier');
+
+    const items = itemCodes?.length
+        ? await Item.find({ ItemCode: { $in: itemCodes } })
+        : [];
+
+    const hasInventory = items.length > 0;
+    const hasCustom = Array.isArray(customItems) && customItems.length > 0;
+
+    if (!hasInventory && !hasCustom) {
+        throw new Error('No items provided — supply itemCodes from inventory or customItems with a product name');
+    }
+
+    const itemsWithVendors = [];
+
+    // Helper shared by inventory + custom items
+    const findVendorsFor = async (keywords, quantity) => {
+        let vendorAnalysis = await analyzeHistoricalPurchasesMultiKeyword(keywords, quantity, 'new');
+        if (vendorAnalysis.length === 0) {
+            const broader = [keywords[0]].filter(Boolean);
+            vendorAnalysis = await analyzeHistoricalPurchasesMultiKeyword(broader, quantity, 'new');
+            if (vendorAnalysis.length === 0) {
+                const words = (keywords[0] || '').split(' ').filter(w => w.length > 3);
+                if (words.length) {
+                    vendorAnalysis = await analyzeHistoricalPurchasesMultiKeyword(words, quantity, 'new');
+                }
+            }
+        }
+
+        const sapOrEmailCodes = vendorAnalysis
+            .filter(v => v.vendorSource === 'SAP' || v.vendorSource === 'EMAIL')
+            .map(v => v._id);
+        const pdaIds = vendorAnalysis
+            .filter(v => v.vendorSource === 'PDA_SCRAPER')
+            .map(v => v._id);
+
+        const [vendors, pdaSuppliers] = await Promise.all([
+            Vendor.find({ CardCode: { $in: sapOrEmailCodes } }),
+            PDA_Supplier.find({ _id: { $in: pdaIds }, isActive: true }),
+        ]);
+
+        return vendorAnalysis.map(historical => {
+            if (historical.vendorSource === 'PDA_SCRAPER') {
+                return { ...historical, hasEmail: !!historical.email };
+            }
+            const vd = vendors.find(v => v.CardCode === historical._id);
+            return {
+                ...historical,
+                email: vd?.email,
+                phone: vd?.phone,
+                productCategories: vd?.productCategories,
+                certifications: vd?.certifications,
+                isEmailVendor: vd?.customFields?.isEmailVendor || false,
+                vendorSource: historical.vendorSource || 'SAP',
+                hasEmail: !!vd?.email,
+            };
+        }).filter(v => v.hasEmail);
+    };
+
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const quantity = quantities[i] || 1;
+        const targetPrice = targetPrices?.[i] || null;
+        const additionalInfo = additionalInfos?.[i] || '';
+
+        const keywords = [item.ItemName, item.ForeignName].filter(Boolean);
+        const enrichedVendors = await findVendorsFor(keywords, quantity);
+
+        itemsWithVendors.push({
+            itemCode: item.ItemCode,
+            isCustom: false,
+            productName: item.ItemName,
+            specifications: item.ForeignName || '',
+            quantity,
+            unit: item.SalesUnit || 'kg',
+            targetPrice,
+            additionalInfo,
+            keywords,
+            vendors: enrichedVendors,
+            vendorsFound: enrichedVendors.length,
+        });
+    }
+
+    // Custom (typed-in) products that aren't in the inventory DB
+    for (const ci of customItems) {
+        const productName = (ci.productName || '').trim();
+        if (!productName) continue;
+        const quantity = ci.quantity || 1;
+        const targetPrice = ci.targetPrice ?? null;
+        const additionalInfo = ci.additionalInfo || '';
+        const unit = ci.unit || 'kg';
+
+        const keywords = [productName];
+        const enrichedVendors = await findVendorsFor(keywords, quantity);
+
+        itemsWithVendors.push({
+            itemCode: null,
+            isCustom: true,
+            productName,
+            specifications: '',
+            quantity,
+            unit,
+            targetPrice,
+            additionalInfo,
+            keywords,
+            vendors: enrichedVendors,
+            vendorsFound: enrichedVendors.length,
+        });
+    }
+
+    // Consolidate unique vendors
+    const allVendorCodes = new Set();
+    itemsWithVendors.forEach(it => it.vendors.forEach(v => allVendorCodes.add(v._id)));
+
+    const topVendorsAcrossItems = itemsWithVendors
+        .flatMap(it => it.vendors)
+        .reduce((acc, vendor) => {
+            const existing = acc.find(v => v._id === vendor._id);
+            if (existing) {
+                existing.itemsCanSupply = (existing.itemsCanSupply || 1) + 1;
+                existing.totalScore += (vendor.scores?.total || 0);
+                existing.avgScore = existing.totalScore / existing.itemsCanSupply;
+            } else {
+                acc.push({
+                    ...vendor,
+                    itemsCanSupply: 1,
+                    totalScore: vendor.scores?.total || 0,
+                    avgScore: vendor.scores?.total || 0,
+                });
+            }
+            return acc;
+        }, [])
+        .sort((a, b) =>
+            (b.itemsCanSupply - a.itemsCanSupply) || (b.avgScore - a.avgScore)
+        );
+
+    const rfqContext = {
+        items: itemsWithVendors.map(i => ({
+            productName: i.productName,
+            quantity: i.quantity,
+            unit: i.unit,
+            targetPrice: i.targetPrice,
+        })),
+        totalVendorsFound: allVendorCodes.size,
+    };
+
+    const aiRecommendations = topVendorsAcrossItems.length > 0
+        ? await analyzeVendorRecommendations(topVendorsAcrossItems, rfqContext)
+        : {
+            topRecommendations: [],
+            priceInsights: 'No matching Email/PDA vendors for these items. Try broader product names or upload new suppliers.',
+            riskFactors: 'No web/email vendor history found.',
+            suggestedVendorCount: 0,
+            suggestedVendorCodes: [],
+        };
+
+    console.log('=== Form-Based (New Suppliers) Processing Complete ===\n');
+
+    return {
+        parsedData: {
+            items: itemsWithVendors.map(i => ({
+                itemCode: i.itemCode,
+                isCustom: !!i.isCustom,
+                productName: i.productName,
+                specifications: i.specifications,
+                quantity: i.quantity,
+                unit: i.unit,
+                targetPrice: i.targetPrice,
+                additionalInfo: i.additionalInfo,
+            })),
+        },
+        itemsAnalysis: itemsWithVendors,
+        vendorRecommendations: {
+            total: allVendorCodes.size,
+            topVendors: topVendorsAcrossItems,
+            aiInsights: aiRecommendations,
+        },
+        createdBy: userId,
+    };
+}
+
 module.exports = {
     processNaturalLanguageRFQ,
     processFormBasedRFQ,
+    processFormBasedRFQForNewSuppliers,
     analyzeHistoricalPurchasesMultiKeyword,
     createRFQFromAnalysis,
     syncEmailVendors,

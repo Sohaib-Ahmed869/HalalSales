@@ -449,6 +449,12 @@ Return as JSON:
  * @returns {Object} Email subject and body
  */
 async function generateRFQEmail(rfqData, vendor, language = 'both', isExistingVendor = true) {
+    // Ensure incoterm/destination are accessible on rfqData for templates
+    if (rfqData.specialRequirements) {
+        rfqData.specialRequirements.incoterm = rfqData.specialRequirements.incoterm || rfqData.incoterm;
+        rfqData.specialRequirements.destination = rfqData.specialRequirements.destination || rfqData.destination;
+    }
+
     // If existing vendor, send simple professional email
     if (isExistingVendor) {
         return generateSimpleRFQEmail(rfqData, vendor);
@@ -464,40 +470,67 @@ async function generateRFQEmail(rfqData, vendor, language = 'both', isExistingVe
 function generateSimpleRFQEmail(rfqData, vendor) {
     const subject = `RFQ ${rfqData.rfqNumber} - Request for Quotation`;
 
+    // Build items table (NO target prices — those are internal only)
+    const itemsTableRows = (rfqData.items || []).map((item, i) => `
+                    <tr>
+                        <td style="padding:8px;border-bottom:1px solid #eee;">${i + 1}</td>
+                        <td style="padding:8px;border-bottom:1px solid #eee;">${item.productName}</td>
+                        <td style="padding:8px;border-bottom:1px solid #eee;">${item.quantity} ${item.unit}</td>
+                        <td style="padding:8px;border-bottom:1px solid #eee;">${item.specifications || item.additionalInfo || '-'}</td>
+                    </tr>`).join('');
+
+    const itemsTable = (rfqData.items && rfqData.items.length > 0) ? `
+            <table style="width:100%;border-collapse:collapse;margin:15px 0;">
+                <tr style="background:#f3f4f6;">
+                    <th style="padding:8px;text-align:left;">#</th>
+                    <th style="padding:8px;text-align:left;">Product</th>
+                    <th style="padding:8px;text-align:left;">Quantity</th>
+                    <th style="padding:8px;text-align:left;">Specifications</th>
+                </tr>
+                ${itemsTableRows}
+            </table>` : '';
+
     const bodyHtml = `
         <div style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;">
             <h2 style="color: #1a4d2e; margin-bottom: 15px;">Dear ${vendor.vendorName},</h2>
-            
+
             <p style="color: #4b5563; line-height: 1.6; margin-bottom: 15px;">
-                Please find attached our Request for Quotation for the products we discussed.
+                Please find attached our Request for Quotation for the products listed below.
             </p>
-            
+
             <div style="background-color: #f0f9ff; border-left: 4px solid #3b82f6; padding: 15px; margin: 20px 0; border-radius: 4px;">
                 <p style="margin: 0; color: #1e40af; font-weight: 600;">
-                    📋 RFQ Number: ${rfqData.rfqNumber}<br/>
-                    📅 Quotation Due: ${new Date(rfqData.quotationDueDate).toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' })}<br/>
-                    🚚 Delivery By: ${new Date(rfqData.deliveryBy).toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' })}
+                    RFQ Number: ${rfqData.rfqNumber}<br/>
+                    Quotation Due: ${new Date(rfqData.quotationDueDate).toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' })}<br/>
+                    Delivery By: ${new Date(rfqData.deliveryBy).toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' })}<br/>
+                    Incoterm: ${rfqData.specialRequirements?.incoterm || rfqData.incoterm || 'EXW'}<br/>
+                    Destination: ${rfqData.specialRequirements?.destination || rfqData.destination || 'Paris, France'}
                 </p>
             </div>
-            
+
+            ${itemsTable}
+
             ${rfqData.customMessage ? `<p style="color: #4b5563; line-height: 1.6; margin-bottom: 15px; font-style: italic;">${rfqData.customMessage}</p>` : ''}
-            
+
             <p style="color: #4b5563; line-height: 1.6; margin-bottom: 15px;">
-                Please include:
+                Please include in your quotation:
             </p>
             <ul style="color: #4b5563; line-height: 1.8;">
                 <li>Unit and total prices</li>
-                <li>Delivery terms</li>
+                <li>Delivery terms and timeline</li>
                 <li>Payment terms</li>
                 <li>Product availability</li>
             </ul>
-            
+
             <p style="color: #4b5563; line-height: 1.6; margin-top: 20px;">
                 Best regards,<br/>
                 <strong>Halal Foods - Procurement Team</strong>
             </p>
         </div>
     `;
+
+    const incoterm = rfqData.specialRequirements?.incoterm || rfqData.incoterm || 'EXW';
+    const destination = rfqData.specialRequirements?.destination || rfqData.destination || 'Paris, France';
 
     const bodyText = `
 Dear ${vendor.vendorName},
@@ -507,6 +540,8 @@ Please find attached our Request for Quotation.
 RFQ Number: ${rfqData.rfqNumber}
 Quotation Due: ${new Date(rfqData.quotationDueDate).toLocaleDateString('en-GB')}
 Delivery By: ${new Date(rfqData.deliveryBy).toLocaleDateString('en-GB')}
+Incoterm: ${incoterm}
+Destination: ${destination}
 
 ${rfqData.customMessage ? `\n${rfqData.customMessage}\n` : ''}
 
@@ -533,6 +568,24 @@ Paris, France | www.halalfoods.fr
 async function generateDetailedRFQEmail(rfqData, vendor) {
     const relationshipContext = `We are reaching out to establish a new business relationship.`;
 
+    const incoterm = rfqData.specialRequirements?.incoterm || rfqData.incoterm || 'EXW';
+    const destination = rfqData.specialRequirements?.destination || rfqData.destination || 'Paris, France';
+
+    // Product list (names + qty) so the email can reference actual products, not "[Product Name]"
+    const productList = (rfqData.items || [])
+        .slice(0, 10)
+        .map(it => `- ${it.productName} (${it.quantity} ${it.unit || 'units'})`)
+        .join('\n');
+    const moreProducts = (rfqData.items || []).length > 10 ? `\n- …and ${rfqData.items.length - 10} more (see attached PDF)` : '';
+
+    // Real sender / company details — the LLM must use these verbatim, not placeholders.
+    const senderName = 'Procurement Team';
+    const senderTitle = 'Procurement Team';
+    const companyEmail = 'contact@halalfoods.fr';
+    const companyPhone = '+33 1 XX XX XX XX';
+    const companyWebsite = 'www.halalfoods.fr';
+    const companyAddress = 'Paris, France';
+
     const prompt = `Generate a professional bilingual RFQ email (French and English) for Halal Foods, a premium food wholesaler in Paris.
 
 This is for a NEW SUPPLIER we haven't worked with before.
@@ -545,8 +598,30 @@ RFQ Details:
 - Items: ${rfqData.items.length} products
 - Quotation Due: ${new Date(rfqData.quotationDueDate).toLocaleDateString('fr-FR', { year: 'numeric', month: 'long', day: 'numeric' })}
 - Delivery By: ${new Date(rfqData.deliveryBy).toLocaleDateString('fr-FR', { year: 'numeric', month: 'long', day: 'numeric' })}
+- Incoterm: ${incoterm}
+- Destination: ${destination}
+
+Products requested (use these actual names — never write "[Product Name]"):
+${productList}${moreProducts}
 
 ${rfqData.customMessage ? `Additional Message: ${rfqData.customMessage}` : ''}
+
+Sender / Company details (use these EXACT values — never write placeholders like "[Votre Nom]", "[Your Name]", "[Phone]"):
+- Greeting to vendor: "Bonjour équipe ${vendor.vendorName}," (French) / "Hello ${vendor.vendorName} team," (English) — address the company, not an unknown individual contact
+- Sender signature name: ${senderName}
+- Sender title: ${senderTitle}
+- Company email: ${companyEmail}
+- Company phone: ${companyPhone}
+- Company website: ${companyWebsite}
+- Company address: ${companyAddress}
+
+=== STRICT RULES ===
+1. NEVER output placeholder brackets of any kind — no [Nom du contact], [Contact Name], [Votre Nom], [Your Name], [Product Name], [Nom du produit], [Phone], [Numéro de téléphone], [Adresse e-mail], [Normes et certifications], [Liens vers les réseaux sociaux], [XX], [TBD], [...], etc. If you don't have a real value for something, OMIT that line entirely.
+2. Address the vendor by their COMPANY name (${vendor.vendorName}), not by an individual contact name. Use phrasing like "Bonjour équipe ${vendor.vendorName}," / "Hello ${vendor.vendorName} team,".
+3. Sign the email with "${senderName}" — Procurement Team, Halal Foods. Do NOT invent or ask for a personal name.
+4. In the footer / contact block, use only the real values above. Do not invent social media links or certification lists; omit them instead of using placeholders.
+5. Refer to the actual products from the list above when mentioning "Product" — or write "the products listed in the attached PDF" if you'd otherwise need to name a single one.
+6. Do NOT include any target prices or budget information. Only product names, quantities, and specifications.
 
 Create an email that:
 1. INTRODUCES Halal Foods (premium wholesaler, 600+ products, 100+ suppliers, established brand)
@@ -554,18 +629,14 @@ Create an email that:
 3. Contains BOTH French and English versions (French first, then separator, then English)
 4. Highlights the attached RFQ PDF document
 5. Emphasizes quality, trust, and potential long-term partnership
-6. Has clear call-to-action with deadline
-7. Features an impressive, professional footer with:
-   - Company motto/values
-   - Contact information
-   - Social proof (600+ products, 100+ suppliers)
-   - Professional certifications/standards
+6. Has a clear call-to-action with the quotation deadline
+7. Ends with a clean signature block using the real contact details above (no placeholders).
 
 Return as JSON:
 {
   "subject": "New Partnership Opportunity - RFQ ${rfqData.rfqNumber} | Halal Foods",
-  "bodyHtml": "string (HTML formatted with modern design)",
-  "bodyText": "string (plain text version)"
+  "bodyHtml": "string (HTML formatted with modern design, NO placeholder brackets)",
+  "bodyText": "string (plain text version, NO placeholder brackets)"
 }`;
 
     try {
@@ -591,6 +662,12 @@ Return as JSON:
         const responseText = completion.choices[0].message.content;
         const parsedResponse = JSON.parse(responseText);
 
+        // Post-process: scrub any stray placeholder brackets the model left in.
+        // Matches [Anything], [...], [Your Name], [Nom du contact], etc.
+        parsedResponse.bodyHtml = scrubPlaceholders(parsedResponse.bodyHtml, vendor, rfqData);
+        parsedResponse.bodyText = scrubPlaceholders(parsedResponse.bodyText, vendor, rfqData);
+        parsedResponse.subject = scrubPlaceholders(parsedResponse.subject, vendor, rfqData);
+
         // Enhance the HTML with professional footer
         parsedResponse.bodyHtml = enhanceEmailHTML(parsedResponse.bodyHtml, rfqData);
 
@@ -600,6 +677,66 @@ Return as JSON:
         // Fallback to professional template
         return generateFallbackDetailedEmail(rfqData, vendor);
     }
+}
+
+/**
+ * Strip leftover LLM placeholders like [Contact Name], [Your Name], [Numéro de téléphone]
+ * and replace them with real values or drop the line entirely. Keeps numeric refs like
+ * "600+" and currency values intact — only bracketed placeholder text is removed.
+ */
+function scrubPlaceholders(text, vendor, rfqData) {
+    if (!text || typeof text !== 'string') return text;
+
+    const realValues = {
+        // sender identity
+        'votre nom': 'Procurement Team',
+        'your name': 'Procurement Team',
+        'nom de l\'expéditeur': 'Procurement Team',
+        'sender name': 'Procurement Team',
+        'agent name': 'Procurement Team',
+
+        // vendor contact — address the company, no invented contact person
+        'nom du contact': `équipe ${vendor.vendorName}`,
+        'nom de contact': `équipe ${vendor.vendorName}`,
+        'contact name': `${vendor.vendorName} team`,
+        'recipient name': `${vendor.vendorName} team`,
+
+        // phone/email/web
+        'numéro de téléphone': '+33 1 XX XX XX XX',
+        'phone number': '+33 1 XX XX XX XX',
+        'phone': '+33 1 XX XX XX XX',
+        'téléphone': '+33 1 XX XX XX XX',
+        'adresse e-mail': 'contact@halalfoods.fr',
+        'adresse email': 'contact@halalfoods.fr',
+        'email': 'contact@halalfoods.fr',
+        'e-mail': 'contact@halalfoods.fr',
+
+        // product
+        'nom du produit': 'see attached PDF',
+        'product name': 'see attached PDF',
+    };
+
+    // Replace exact-match known placeholders first (e.g., "[Votre Nom]" → "Procurement Team")
+    let cleaned = text.replace(/\[([^\[\]\n]{1,80})\]/g, (full, inner) => {
+        const key = inner.trim().toLowerCase();
+        if (realValues[key] !== undefined) return realValues[key];
+        // Unknown placeholder — drop it. If the whole line becomes orphaned punctuation, a later sweep handles it.
+        return '';
+    });
+
+    // Remove empty "label:" lines created by dropped placeholders (e.g., "Phone: " or "Product: ")
+    cleaned = cleaned
+        .split('\n')
+        .filter(line => {
+            const trimmed = line.trim();
+            if (!trimmed) return true; // preserve blank lines for spacing
+            // Drop lines that are just "Label:" (no value after the colon, ignoring HTML tags)
+            const stripped = trimmed.replace(/<[^>]+>/g, '').trim();
+            return !/^[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’\s\-]*:\s*$/.test(stripped);
+        })
+        .join('\n');
+
+    return cleaned;
 }
 
 /**
