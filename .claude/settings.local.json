@@ -30,7 +30,9 @@
       "Bash(node -e \"const { expandKeywords } = require\\('./utils/bilingualFoodGlossary'\\); console.log\\(expandKeywords\\('Filet de poulet frais x kg'\\)\\);\")",
       "Bash(npx --yes esbuild src/pages/Dashboard/RFQManagement.jsx --bundle=false --loader=jsx)",
       "Bash(npx --yes esbuild --loader:.jsx=jsx src/pages/Dashboard/RFQManagement.jsx)",
-      "Bash(node --check utils/notificationService.js)"
+      "Bash(node --check utils/notificationService.js)",
+      "Bash(xargs grep:*)",
+      "Bash(find \"d:\\\\Calcite Codes\\\\SalesFrontend\\\\src\" -type f \\\\\\( -name \"*.jsx\" -o -name \"*.js\" \\\\\\) -exec grep -l \"Convert.*Lead\\\\|convert.*lead\" {} \\\\;)"
     ],
     "additionalDirectories": [
       "d:\\Calcite Codes\\SalesFrontend\\src\\pages\\Dashboard\\SalesAgent\\WhatsApp",

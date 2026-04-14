@@ -534,10 +534,12 @@ exports.generateBulkOrderPDFs = async (req, res) => {
 // Get orders for PDF generation (with filters)
 exports.getOrdersForPDF = async (req, res) => {
     try {
-        const { fromDate, toDate, cardCode, status, search } = req.query;
+        const { fromDate, toDate, cardCode, status, search, sortBy, sortOrder } = req.query;
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 50;
         const skip = (page - 1) * limit;
+
+        console.log("📋 [getOrdersForPDF] PARAMS RECEIVED:", { sortBy, sortOrder, search, page, limit, status });
 
         // Build query
         const query = {};
@@ -565,17 +567,52 @@ exports.getOrdersForPDF = async (req, res) => {
             ];
         }
 
-        // Get orders
+        console.log("🔍 QUERY:", JSON.stringify(query, null, 2));
+
+        // Build sort - use aggregation pipeline for case-insensitive sorting by CardName
+        let pipeline = [
+            { $match: query }
+        ];
+
+        // Build sort stage
+        let sortStage = {};
+        if (sortBy === "CardName") {
+            console.log("✅ SORTING BY CARDNAME (CASE-INSENSITIVE)");
+            // For case-insensitive CardName sorting, convert to lowercase in the sort
+            // Add a field with lowercase version BEFORE sorting
+            pipeline.push({
+                $addFields: {
+                    CardNameLower: { $toLower: "$CardName" }
+                }
+            });
+            sortStage = {
+                $sort: {
+                    CardNameLower: sortOrder === "asc" ? 1 : -1
+                }
+            };
+            console.log("🔤 Sort stage:", JSON.stringify(sortStage, null, 2));
+        } else {
+            console.log(`✅ SORTING BY ${sortBy} (${sortOrder})`);
+            const direction = sortOrder === "asc" ? 1 : -1;
+            sortStage = {
+                $sort: { [sortBy]: direction }
+            };
+        }
+
+        pipeline.push(sortStage);
+        pipeline.push({ $skip: skip });
+        pipeline.push({ $limit: limit });
+
+        console.log("📊 AGGREGATION PIPELINE:", JSON.stringify(pipeline, null, 2));
+
+        // Get orders using aggregation pipeline
         const [orders, total] = await Promise.all([
-            SalesOrder.find(query)
-                .select("DocNum DocDate CardCode CardName DocTotal DocCurrency DocumentStatus")
-                .populate("salesAgent", "firstName lastName")
-                .sort({ DocDate: -1 })
-                .skip(skip)
-                .limit(limit)
-                .lean(),
+            SalesOrder.aggregate(pipeline).lean(),
             SalesOrder.countDocuments(query)
         ]);
+
+        console.log(`📦 RETURNED ${orders.length} ORDERS OUT OF ${total} TOTAL`);
+        console.log("👥 ORDERS (First 3):", orders.slice(0, 3).map(o => ({ CardName: o.CardName, DocNum: o.DocNum })));
 
         res.json({
             success: true,
@@ -589,7 +626,7 @@ exports.getOrdersForPDF = async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Error fetching orders:", error);
+        console.error("❌ ERROR in getOrdersForPDF:", error);
         res.status(500).json({
             success: false,
             message: "Error fetching orders",

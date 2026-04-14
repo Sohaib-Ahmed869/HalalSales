@@ -1181,7 +1181,6 @@ exports.getAllOrders = async (req, res) => {
     if (req.query.deliveryDateFrom && req.query.deliveryDateTo) {
       const fromDate = new Date(req.query.deliveryDateFrom);
       const toDate = new Date(req.query.deliveryDateTo);
-
       query.$or = query.$or || [];
       query.$or.push(
         { StartDeliveryDate: { $gte: fromDate, $lte: toDate } },
@@ -1189,7 +1188,6 @@ exports.getAllOrders = async (req, res) => {
       );
     } else if (req.query.deliveryDateFrom) {
       const fromDate = new Date(req.query.deliveryDateFrom);
-
       query.$or = query.$or || [];
       query.$or.push(
         { StartDeliveryDate: { $gte: fromDate } },
@@ -1197,7 +1195,6 @@ exports.getAllOrders = async (req, res) => {
       );
     } else if (req.query.deliveryDateTo) {
       const toDate = new Date(req.query.deliveryDateTo);
-
       query.$or = query.$or || [];
       query.$or.push(
         { StartDeliveryDate: { $lte: toDate } },
@@ -1224,23 +1221,21 @@ exports.getAllOrders = async (req, res) => {
 
     console.log("Query:", JSON.stringify(query, null, 2));
 
-    // *** ENHANCED SORTING LOGIC ***
-    let sortObj = {};
+    // Case-insensitive collation for alphabetical sorting regardless of letter case
+    const collation = { locale: "en", strength: 2 };
 
-    // Special handling for delivery date sorting
+    // Delivery date sorting (aggregation with coalesce logic)
     if (sortBy === "StartDeliveryDate" || sortBy === "deliveryDate") {
-      // We need to use aggregation to handle the coalesce logic
       const orders = await SalesOrder.aggregate([
         { $match: query },
         {
           $addFields: {
-            // Create a computed field that uses StartDeliveryDate if it exists, otherwise RequriedDate
             effectiveDeliveryDate: {
-              $ifNull: ["$StartDeliveryDate", "$RequriedDate"]
-            }
-          }
+              $ifNull: ["$StartDeliveryDate", "$RequriedDate"],
+            },
+          },
         },
-        { $sort: { effectiveDeliveryDate: sortOrder, CardName: 1 } }, // *** ADDED CardName: 1 ***
+        { $sort: { effectiveDeliveryDate: sortOrder, CardName: 1 } },
         { $skip: skip },
         { $limit: limit },
         {
@@ -1248,27 +1243,29 @@ exports.getAllOrders = async (req, res) => {
             from: "users",
             localField: "salesAgent",
             foreignField: "_id",
-            as: "salesAgent"
-          }
+            as: "salesAgent",
+          },
         },
         {
           $unwind: {
             path: "$salesAgent",
-            preserveNullAndEmptyArrays: true
-          }
+            preserveNullAndEmptyArrays: true,
+          },
         },
         {
           $project: {
             "salesAgent.password": 0,
             "salesAgent.resetPasswordToken": 0,
-            "salesAgent.resetPasswordExpire": 0
-          }
-        }
-      ]);
+            "salesAgent.resetPasswordExpire": 0,
+          },
+        },
+      ]).collation(collation);
 
-      const total = await SalesOrder.countDocuments(query);
+      const total = await SalesOrder.countDocuments(query).collation(collation);
 
-      console.log(`Found ${orders.length} orders out of ${total} total (sorted by delivery date)`);
+      console.log(
+        `Found ${orders.length} orders out of ${total} total (sorted by delivery date)`
+      );
 
       return res.status(200).json({
         success: true,
@@ -1278,62 +1275,61 @@ exports.getAllOrders = async (req, res) => {
         pages: Math.ceil(total / limit),
         data: orders,
       });
+
+      // DocDate sorting (aggregation sorting by date only, ignoring time)
+    } else if (sortBy === "DocDate") {
+      const orders = await SalesOrder.aggregate([
+        { $match: query },
+        {
+          $addFields: {
+            dateOnly: {
+              $dateToString: { format: "%Y-%m-%d", date: "$DocDate" },
+            },
+          },
+        },
+        { $sort: { dateOnly: sortOrder, CardName: 1 } },
+        { $skip: skip },
+        { $limit: limit },
+        {
+          $lookup: {
+            from: "users",
+            localField: "salesAgent",
+            foreignField: "_id",
+            as: "salesAgent",
+          },
+        },
+        {
+          $unwind: {
+            path: "$salesAgent",
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $project: {
+            "salesAgent.password": 0,
+            "salesAgent.resetPasswordToken": 0,
+            "salesAgent.resetPasswordExpire": 0,
+          },
+        },
+      ]).collation(collation);
+
+      const total = await SalesOrder.countDocuments(query).collation(collation);
+
+      console.log(
+        `Found ${orders.length} orders out of ${total} total (sorted by date only + CardName)`
+      );
+
+      return res.status(200).json({
+        success: true,
+        count: orders.length,
+        total,
+        page,
+        pages: Math.ceil(total / limit),
+        data: orders,
+      });
+
+      // All other fields (standard find with collation)
     } else {
-      // Standard sorting for other fields
-
-      // *** SPECIAL HANDLING FOR DocDate - sort by date only, not time ***
-      if (sortBy === "DocDate") {
-        const orders = await SalesOrder.aggregate([
-          { $match: query },
-          {
-            $addFields: {
-              // Extract just the date part (no time)
-              dateOnly: {
-                $dateToString: { format: "%Y-%m-%d", date: "$DocDate" }
-              }
-            }
-          },
-          { $sort: { dateOnly: sortOrder, CardName: 1 } },
-          { $skip: skip },
-          { $limit: limit },
-          {
-            $lookup: {
-              from: "users",
-              localField: "salesAgent",
-              foreignField: "_id",
-              as: "salesAgent"
-            }
-          },
-          {
-            $unwind: {
-              path: "$salesAgent",
-              preserveNullAndEmptyArrays: true
-            }
-          },
-          {
-            $project: {
-              "salesAgent.password": 0,
-              "salesAgent.resetPasswordToken": 0,
-              "salesAgent.resetPasswordExpire": 0
-            }
-          }
-        ]);
-
-        const total = await SalesOrder.countDocuments(query);
-
-        console.log(`Found ${orders.length} orders out of ${total} total (sorted by date only + CardName)`);
-
-        return res.status(200).json({
-          success: true,
-          count: orders.length,
-          total,
-          page,
-          pages: Math.ceil(total / limit),
-          data: orders,
-        });
-      }
-
-      // Regular sorting for other fields
       const sortObj = {};
       sortObj[sortBy] = sortOrder;
       sortObj.CardName = 1;
@@ -1344,9 +1340,10 @@ exports.getAllOrders = async (req, res) => {
         .populate("salesAgent", "firstName lastName email")
         .skip(skip)
         .limit(limit)
-        .sort(sortObj);
+        .sort(sortObj)
+        .collation(collation);
 
-      const total = await SalesOrder.countDocuments(query);
+      const total = await SalesOrder.countDocuments(query).collation(collation);
 
       console.log(`Found ${orders.length} orders out of ${total} total`);
 
