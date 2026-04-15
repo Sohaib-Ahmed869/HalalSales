@@ -20,7 +20,9 @@ const Vendor = require("../models/Vendor");
 const User = require("../models/User");
 const axios = require("axios");
 const multer = require("multer");
-const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+const { pipeline } = require("stream/promises");
 const { v4: uuidv4 } = require("uuid");
 const path = require("path");
 const os = require("os");
@@ -28,6 +30,10 @@ const fs = require("fs");
 const ffmpeg = require("fluent-ffmpeg");
 const ffmpegPath = require("ffmpeg-static");
 const { emitNewMessage, emitMessageStatus, emitToAgent } = require("../socket");
+const {
+    importWhatsAppChatExportFromFile,
+    normalizePhone: normalizeImportPhone,
+} = require("../services/whatsappExportImportService");
 
 // Point fluent-ffmpeg at the bundled static binary
 if (ffmpegPath) ffmpeg.setFfmpegPath(ffmpegPath);
@@ -83,6 +89,70 @@ const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: 25 * 1024 * 1024 },
 });
+
+const importZipMiddleware = multer({
+    storage: multer.diskStorage({
+        destination: (req, file, cb) => cb(null, os.tmpdir()),
+        filename: (req, file, cb) => cb(null, `wa-import-${uuidv4()}.zip`),
+    }),
+    limits: { fileSize: 350 * 1024 * 1024 },
+    fileFilter: (req, file, cb) => {
+        const name = (file.originalname || "").toLowerCase();
+        const ok =
+            name.endsWith(".zip") ||
+            file.mimetype === "application/zip" ||
+            file.mimetype === "application/x-zip-compressed";
+        if (!ok) return cb(new Error("Only .zip WhatsApp exports are allowed"));
+        cb(null, true);
+    },
+}).single("file");
+
+/** Derive S3 object key from our public virtual-hosted URL (for older imports without importMediaS3Key). */
+function extractS3KeyFromPublicUrl(url) {
+    if (!url || typeof url !== "string") return null;
+    try {
+        const u = new URL(url);
+        if (!String(u.hostname || "").includes("amazonaws.com")) return null;
+        return u.pathname.replace(/^\/+/, "") || null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Same access rules as streamImportedMedia / signed-url: only whatsapp-imports/* for ZIP-import messages.
+ * @returns {{ ok: true, msg, key, bucket }} | {{ ok: false, status: number, error: string }}
+ */
+async function assertAgentCanAccessImportedMedia(agentId, messageId) {
+    const msg = await WhatsAppMessage.findOne({ messageId }).lean();
+    if (!msg) return { ok: false, status: 404, error: "Not found" };
+
+    const key =
+        msg.metadata?.importMediaS3Key || extractS3KeyFromPublicUrl(msg.content?.mediaUrl);
+    if (!key || !String(key).startsWith("whatsapp-imports/")) {
+        return { ok: false, status: 404, error: "No media key" };
+    }
+
+    const mediaUrl = typeof msg.content?.mediaUrl === "string" ? msg.content.mediaUrl : "";
+    const isZipImportMedia =
+        msg?.metadata?.importedFromWhatsAppExport === true ||
+        (typeof msg.messageId === "string" && msg.messageId.startsWith("wexp_")) ||
+        mediaUrl.includes("/whatsapp-imports/");
+    if (!isZipImportMedia) return { ok: false, status: 404, error: "Not found" };
+
+    const agent = await User.findById(agentId).select("phone").lean();
+    const canAccess =
+        String(msg.salesAgent) === String(agentId) ||
+        msg.salesAgent === null ||
+        msg.salesAgent === undefined ||
+        (agent?.phone && msg.salesAgentPhone === agent.phone);
+    if (!canAccess) return { ok: false, status: 403, error: "Forbidden" };
+
+    const bucket = process.env.AWS_S3_BUCKET;
+    if (!bucket) return { ok: false, status: 500, error: "S3 not configured" };
+
+    return { ok: true, msg, key, bucket };
+}
 
 const uploadToS3 = async (file) => {
     const ext = path.extname(file.originalname);
@@ -277,6 +347,102 @@ const whatsappAgentController = {
         } catch (error) {
             console.error("S3 upload error:", error);
             return res.status(500).json({ error: "Upload failed", details: error.message });
+        }
+    },
+
+    importZipMiddleware,
+
+    importChatExport: async (req, res) => {
+        const cleanupFile = () => {
+            try {
+                if (req.file?.path) fs.unlinkSync(req.file.path);
+            } catch (_) {}
+        };
+        try {
+            const agentId = req.user.id;
+            if (!req.file?.path) {
+                cleanupFile();
+                return res.status(400).json({ error: "ZIP file is required (field name: file)" });
+            }
+
+            const phoneNumber = req.body.phoneNumber;
+            const myDisplayName = req.body.myDisplayName;
+            const contactName = req.body.contactName;
+
+            if (!phoneNumber || !String(phoneNumber).trim()) {
+                cleanupFile();
+                return res.status(400).json({ error: "phoneNumber is required (customer E.164)" });
+            }
+            if (!myDisplayName || !String(myDisplayName).trim()) {
+                cleanupFile();
+                return res.status(400).json({ error: "myDisplayName is required (your name exactly as in the export)" });
+            }
+
+            const agent = await User.findById(agentId).select("phone whatsappSettings").lean();
+            if (!agent?.whatsappSettings?.enabled) {
+                cleanupFile();
+                return res.status(403).json({ error: "WhatsApp not enabled" });
+            }
+            const phoneNumberId =
+                agent.whatsappSettings?.phoneNumberId || process.env.WHATSAPP_PHONE_NUMBER_ID;
+            if (!phoneNumberId) {
+                cleanupFile();
+                return res.status(400).json({ error: "WhatsApp phone number ID is not configured" });
+            }
+
+            const normPhone = normalizeImportPhone(phoneNumber);
+            if (!normPhone) {
+                cleanupFile();
+                return res.status(400).json({ error: "Invalid phone number" });
+            }
+
+            const importBatchId = uuidv4();
+            const result = await importWhatsAppChatExportFromFile(req.file.path, {
+                phoneNumber: normPhone,
+                myDisplayName: String(myDisplayName).trim(),
+                phoneNumberId: String(phoneNumberId),
+                salesAgentId: agentId,
+                salesAgentPhone: agent.phone || null,
+                exportFileName: req.file.originalname || null,
+                importBatchId,
+            });
+
+            // Do not overwrite an existing saved contact name on import unless the user
+            // explicitly passes contactName. New contacts still get a name from the export title or phone.
+            const trimmedContactName = contactName && String(contactName).trim();
+            const update = {
+                $set: { lastMessageAt: new Date() },
+                $inc: { totalMessages: result.inserted },
+            };
+            if (trimmedContactName) {
+                update.$set.name = trimmedContactName;
+            } else {
+                update.$setOnInsert = {
+                    name: result.parsedChatTitle || normPhone,
+                };
+            }
+
+            await WhatsAppContact.findOneAndUpdate(
+                { phoneNumber: normPhone, salesAgent: agentId },
+                update,
+                { upsert: true, setDefaultsOnInsert: true }
+            );
+
+            cleanupFile();
+            return res.status(200).json({ success: true, data: result });
+        } catch (error) {
+            cleanupFile();
+            if (error.code === "group_chat_not_supported") {
+                return res.status(400).json({
+                    error: "group_chat_not_supported",
+                    message: error.message || "Group chat exports are not supported",
+                });
+            }
+            console.error("importChatExport error:", error);
+            return res.status(500).json({
+                error: "Import failed",
+                details: error.message || String(error),
+            });
         }
     },
 
@@ -477,6 +643,49 @@ const whatsappAgentController = {
             });
         } catch (error) {
             return res.status(500).json({ error: "Error fetching messages", details: error.message });
+        }
+    },
+
+    /**
+     * Short-lived presigned GET for imported ZIP media so the browser can stream video (range requests).
+     * Avoids downloading the whole file into Node or the SPA as one blob (which could take minutes).
+     */
+    getImportedMediaSignedUrl: async (req, res) => {
+        try {
+            const gate = await assertAgentCanAccessImportedMedia(req.user.id, req.params.messageId);
+            if (!gate.ok) return res.status(gate.status).json({ error: gate.error });
+
+            const getParams = { Bucket: gate.bucket, Key: gate.key };
+            const mime = gate.msg.content?.mimeType;
+            if (mime) getParams.ResponseContentType = mime;
+            const cmd = new GetObjectCommand(getParams);
+            const url = await getSignedUrl(s3, cmd, { expiresIn: 3600 });
+            return res.status(200).json({ success: true, url, expiresIn: 3600 });
+        } catch (error) {
+            return res.status(500).json({ error: "Could not create media URL", details: error.message || String(error) });
+        }
+    },
+
+    /**
+     * Stream imported-chat media through the API (fallback). Prefer signed-url from the client for large video.
+     */
+    streamImportedMedia: async (req, res) => {
+        try {
+            const gate = await assertAgentCanAccessImportedMedia(req.user.id, req.params.messageId);
+            if (!gate.ok) return res.status(gate.status).json({ error: gate.error });
+
+            const { msg, key, bucket } = gate;
+            const out = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+            const ct = out.ContentType || msg.content?.mimeType || "application/octet-stream";
+            res.setHeader("Content-Type", ct);
+            res.setHeader("Cache-Control", "private, max-age=300");
+            if (out.ContentLength != null) res.setHeader("Content-Length", String(out.ContentLength));
+
+            await pipeline(out.Body, res);
+        } catch (error) {
+            if (!res.headersSent) {
+                return res.status(500).json({ error: "Media stream failed", details: error.message || String(error) });
+            }
         }
     },
 

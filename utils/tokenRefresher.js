@@ -27,4 +27,9 @@ const getValidToken = async () => {
     }
 };
 
-module.exports = { getValidToken };
+/** Force the next getValidToken() to run the OAuth exchange (e.g. after a Graph 401 on media fetch). */
+function invalidateCachedToken() {
+    tokenExpiry = 0;
+}
+
+module.exports = { getValidToken, invalidateCachedToken };
