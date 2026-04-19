@@ -5,6 +5,7 @@ const inboundAgent = require('./inboundAgent');
 const outboundAgent = require('./outboundAgent');
 const discoveryAgent = require('./discoveryAgent');
 const comparisonAgent = require('./comparisonAgent');
+const whatsappOutboundAgent = require('./whatsappOutboundAgent');
 
 // Known events that map directly to agents
 const EVENT_MAP = {
@@ -13,6 +14,7 @@ const EVENT_MAP = {
     check_inbox: 'inbound',
     rfq_closed: 'comparison',
     vendor_missing_contact: 'discovery',
+    wa_rfq_send_requested: 'wa_outbound',
 };
 
 class OrchestratorAgent extends BaseAgent {
@@ -104,8 +106,43 @@ class OrchestratorAgent extends BaseAgent {
             case 'discovery':
                 return await this._runDiscovery(payload);
 
+            case 'wa_outbound':
+                return await this._runWhatsAppOutbound(payload);
+
             default:
                 throw new Error(`Unknown agent type: ${agentType}`);
+        }
+    }
+
+    /**
+     * Run WhatsApp Outbound Agent — send RFQ via Meta Cloud API.
+     */
+    async _runWhatsAppOutbound(payload) {
+        const { rfqId, vendorCodes, customMessage } = payload;
+        if (!rfqId) throw new Error('rfqId is required for wa_rfq_send_requested events');
+
+        let codes = vendorCodes;
+        if (!codes || codes.length === 0) {
+            const RFQ = require('../models/RFQ');
+            const rfq = await RFQ.findById(rfqId);
+            if (rfq) {
+                codes = rfq.vendorsContacted
+                    .filter(v => v.status === 'draft' || !v.status)
+                    .map(v => v.vendorCode);
+            }
+        }
+
+        if (!codes || codes.length === 0) {
+            return { agent: 'wa_outbound', success: false, error: 'No vendor codes to send to' };
+        }
+
+        this.log(`Routing to WhatsAppOutboundAgent for RFQ ${rfqId}`);
+        try {
+            const result = await whatsappOutboundAgent.sendRFQ({ rfqId, vendorCodes: codes, customMessage });
+            return { agent: 'wa_outbound', success: true, result };
+        } catch (error) {
+            this.logError('WhatsAppOutboundAgent error:', error);
+            return { agent: 'wa_outbound', success: false, error: error.message };
         }
     }
 
@@ -225,7 +262,8 @@ class OrchestratorAgent extends BaseAgent {
 
 Available agents:
 - inbound: Checks inbox for vendor email responses
-- outbound: Sends RFQs to vendors via email/whatsapp
+- outbound: Sends RFQs to vendors via email
+- wa_outbound: Sends RFQs to vendors via WhatsApp (Meta Cloud API) in a conversational style
 - comparison: Compares vendor quotes and picks a winner
 - discovery: Finds vendor contact info via web search
 
@@ -240,7 +278,7 @@ Which agent should handle this?`,
             const text = this.extractText(response);
             const result = this.extractJSON(text);
 
-            if (result?.agent && ['inbound', 'outbound', 'comparison', 'discovery'].includes(result.agent)) {
+            if (result?.agent && ['inbound', 'outbound', 'comparison', 'discovery', 'wa_outbound'].includes(result.agent)) {
                 this.log(`AI routed "${event}" to ${result.agent}: ${result.reasoning}`);
                 this.addToActionLog('ai_routed', { event, agent: result.agent, reasoning: result.reasoning });
                 return await this._routeToAgent(result.agent, event, payload);

@@ -310,6 +310,35 @@ const whatsappController = {
                 }
             }
 
+            // AI-agent hook: if this sender is a vendor on an active RFQ, let the
+            // conversational WhatsApp agent handle the negotiation. Fire-and-forget —
+            // the webhook response has already been sent back to Meta at this point.
+            setImmediate(() => {
+                const whatsappInboundAgent = require("../agents/whatsappInboundAgent");
+                whatsappInboundAgent
+                    .handleIncomingMessage({
+                        conversationId: messageFrom,
+                        incomingMessage: newMessage.toObject(),
+                    })
+                    .then((result) => {
+                        if (result?.handled) {
+                            try {
+                                const io = require("../socket").getIO();
+                                io.emit("wa_ai_conversation_update", {
+                                    conversationId: messageFrom,
+                                    messageId: newMessage.messageId,
+                                });
+                            } catch (_) {}
+                            console.log(`[AI Agent] Handled WhatsApp message ${newMessage.messageId} for RFQ flow`);
+                        } else if (result?.reason && result.reason !== "no_active_rfq") {
+                            console.log(`[AI Agent] Skipped message ${newMessage.messageId}: ${result.reason}`);
+                        }
+                    })
+                    .catch((err) => {
+                        console.error(`[AI Agent] Error handling WhatsApp message ${newMessage.messageId}:`, err);
+                    });
+            });
+
             console.log(`[Webhook] Message ${message.id} saved (type: ${messageType})`);
         } catch (error) {
             if (error.code === 11000) {

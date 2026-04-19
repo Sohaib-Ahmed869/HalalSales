@@ -168,80 +168,33 @@ function containsInappropriateLanguage(message) {
 }
 
 /**
- * Send RFQ to vendor via WhatsApp
+ * Send RFQ to vendor via WhatsApp using the Meta Cloud API + AI outbound agent.
+ * This helper used to call Twilio — it now delegates to the conversational
+ * WhatsApp AI agent (Meta Cloud API) so all WhatsApp RFQ traffic goes through
+ * a single code path. The legacy Twilio helpers below are kept only for
+ * non-RFQ general-chat use cases.
  */
 async function sendRFQViaWhatsApp(rfqId, vendorCode) {
-    let vendor;
-    try {
-        console.log(`📱 Sending RFQ ${rfqId} to vendor ${vendorCode} via WhatsApp`);
-        // Validate Twilio config
-        if (!accountSid || !authToken || !twilioWhatsAppNumber) {
-            throw new Error('Twilio is not configured. Please check your .env file.');
-        }
+    console.log(`📱 [Meta] Sending RFQ ${rfqId} to vendor ${vendorCode} via WhatsApp Business`);
+    const whatsappOutboundAgent = require('../agents/whatsappOutboundAgent');
+    const result = await whatsappOutboundAgent.sendRFQ({
+        rfqId,
+        vendorCodes: [vendorCode],
+    });
 
-        // Get RFQ and Vendor details
-        const rfq = await RFQ.findById(rfqId);
-        vendor = await Vendor.findOne({ CardCode: vendorCode });
-
-        if (!rfq) throw new Error('RFQ not found');
-        if (!vendor) throw new Error('Vendor not found');
-        if (!vendor.phone) throw new Error('Vendor phone number not found');
-
-        // Format phone number for WhatsApp
-        const whatsappNumber = formatPhoneForWhatsApp(vendor.phone);
-
-        console.log(`📞 From: ${twilioWhatsAppNumber}`);
-        console.log(`📞 To: ${whatsappNumber}`);
-
-        // Generate message
-        const message = generateRFQWhatsAppMessage(rfq, vendor);
-
-        // Send WhatsApp message
-        const twilioMessage = await client.messages.create({
-            from: twilioWhatsAppNumber,
-            to: whatsappNumber,
-            body: message
-        });
-
-        console.log(`✅ WhatsApp message sent: ${twilioMessage.sid}`);
-
-        // Update RFQ with WhatsApp send status
-        const vendorContact = rfq.vendorsContacted.find(v => v.vendorCode === vendorCode);
-        if (vendorContact) {
-            vendorContact.whatsappMessageId = twilioMessage.sid;
-            vendorContact.whatsappSentDate = new Date();
-            vendorContact.status = 'sent';
-            await rfq.save();
-        }
-
-        return {
-            success: true,
-            messageId: twilioMessage.sid,
-            vendorName: vendor.CardName,
-            phoneNumber: whatsappNumber
-        };
-
-    } catch (error) {
-        console.error('❌ Error sending WhatsApp RFQ:', error);
-
-        // Provide helpful error messages
-        if (error.code === 63007) {
-            throw new Error(
-                `Twilio WhatsApp channel not found. ` +
-                `Make sure TWILIO_WHATSAPP_NUMBER in .env is correct (e.g., whatsapp:+14155238886). ` +
-                `Current value: ${twilioWhatsAppNumber || 'NOT SET'}`
-            );
-        } else if (error.code === 21211) {
-            throw new Error(
-                `Invalid 'To' phone number: ${vendor.phone}. ` +
-                `The recipient must join your Twilio sandbox first by sending "join <sandbox-name>" to your Twilio WhatsApp number.`
-            );
-        } else if (error.code === 20003) {
-            throw new Error('Twilio authentication failed. Check your TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN.');
-        }
-
-        throw error;
+    const vendorResult = result?.results?.[0];
+    if (!vendorResult || !vendorResult.success) {
+        const err = new Error(vendorResult?.error || 'WhatsApp send failed');
+        err.details = vendorResult;
+        throw err;
     }
+
+    return {
+        success: true,
+        messageId: vendorResult.messageId,
+        vendorName: vendorResult.vendorName,
+        phoneNumber: vendorResult.vendorCode,
+    };
 }
 
 /**

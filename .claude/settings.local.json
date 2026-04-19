@@ -32,14 +32,22 @@
       "Bash(npx --yes esbuild --loader:.jsx=jsx src/pages/Dashboard/RFQManagement.jsx)",
       "Bash(node --check utils/notificationService.js)",
       "Bash(xargs grep:*)",
-      "Bash(find \"d:\\\\Calcite Codes\\\\SalesFrontend\\\\src\" -type f \\\\\\( -name \"*.jsx\" -o -name \"*.js\" \\\\\\) -exec grep -l \"Convert.*Lead\\\\|convert.*lead\" {} \\\\;)"
+      "Bash(find \"d:\\\\Calcite Codes\\\\SalesFrontend\\\\src\" -type f \\\\\\( -name \"*.jsx\" -o -name \"*.js\" \\\\\\) -exec grep -l \"Convert.*Lead\\\\|convert.*lead\" {} \\\\;)",
+      "Bash(grep -E \"\\\\.js$|\\\\.ts$\")",
+      "Bash(node --check services/whatsappBusinessApi.js)",
+      "Bash(node --check agents/whatsappOutboundAgent.js)",
+      "Bash(node --check agents/whatsappInboundAgent.js)",
+      "Bash(node --check agents/orchestratorAgent.js)",
+      "Bash(node --check controllers/whatsappAIAgent.controller.js)",
+      "Bash(node -e ' *)"
     ],
     "additionalDirectories": [
       "d:\\Calcite Codes\\SalesFrontend\\src\\pages\\Dashboard\\SalesAgent\\WhatsApp",
       "d:\\Calcite Codes\\SalesFrontend\\src\\services",
       "d:\\Calcite Codes\\SalesFrontend\\src\\pages\\Dashboard",
       "d:\\Calcite Codes\\SalesFrontend\\src\\components\\RFQ",
-      "d:\\Calcite Codes\\SalesFrontend\\src\\components\\common"
+      "d:\\Calcite Codes\\SalesFrontend\\src\\components\\common",
+      "d:\\Calcite Codes\\SalesFrontend\\src"
     ]
   }
 }

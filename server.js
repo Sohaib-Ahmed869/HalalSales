@@ -82,6 +82,7 @@ const whatsappAgentRoutes = require("./routes/whatsappAgent.routes");
 const sapSyncRoutes = require("./routes/sapSyncRoutes");
 const mainAdminDashboardRoutes = require("./routes/mainAdminDashboard.routes");
 const whatsappAdminRoutes = require("./routes/whatsappAdmin.routes");
+const whatsappAIAgentRoutes = require("./routes/whatsappAIAgent.routes");
 const agentRoutes = require('./routes/agentRoutes');
 const newSupplierRoutes = require('./routes/newSupplier.routes');
 // Initialize express app
@@ -246,6 +247,7 @@ app.use('/api/whatsapp', whatsappRoutes);
 app.use("/api/whatsapp-business", whatsappBusinessRoutes);
 app.use("/api/whatsapp-agent", whatsappAgentRoutes);
 app.use("/api/whatsapp-admin", whatsappAdminRoutes);
+app.use("/api/whatsapp-ai", whatsappAIAgentRoutes);
 app.use("/api/agents", agentRoutes);
 app.use("/api/new-suppliers", newSupplierRoutes);
 // Health check route
