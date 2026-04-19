@@ -9,12 +9,21 @@ const multer = require("multer");
 const { v4: uuidv4 } = require("uuid");
 const path = require("path");
 
+const resolveAwsRegion = () => {
+  const r =
+    process.env.AWS_REGION ||
+    process.env.AWS_REGION_LAMBDA ||
+    process.env.AWS_DEFAULT_REGION ||
+    "eu-north-1";
+  return r && r !== "undefined" ? r : "eu-north-1";
+};
+
 // Configure AWS S3 Client (v3)
 const s3Client = new S3Client({
-  region: process.env.AWS_REGION || "eu-north-1",
+  region: resolveAwsRegion(),
   credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY,
-    secretAccessKey: process.env.AWS_SECRET_KEY,
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_KEY,
   },
 });
 
@@ -127,9 +136,7 @@ class S3Storage {
           size: fileBuffer.length,
           bucket: this.bucket,
           key: s3Key,
-          location: `https://${this.bucket}.s3.${
-            process.env.AWS_REGION || "us-east-1"
-          }.amazonaws.com/${s3Key}`,
+          location: `https://${this.bucket}.s3.${resolveAwsRegion()}.amazonaws.com/${s3Key}`,
         };
 
         cb(null, fileInfo);

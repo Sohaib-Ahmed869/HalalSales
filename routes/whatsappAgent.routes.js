@@ -15,6 +15,23 @@ router.delete("/contacts/:contactId", auth, whatsappAgentController.deleteContac
 // Media upload (S3)
 router.post("/upload", auth, whatsappAgentController.uploadMiddleware, whatsappAgentController.uploadMedia);
 
+// Imported ZIP media (S3 private under whatsapp-imports/): presigned URL for streaming, or full stream fallback
+router.get("/imported-media/:messageId/signed-url", auth, whatsappAgentController.getImportedMediaSignedUrl);
+router.get("/imported-media/:messageId", auth, whatsappAgentController.streamImportedMedia);
+
+// Import WhatsApp app export (ZIP + _chat.txt)
+router.post(
+    "/import/chat-export",
+    auth,
+    (req, res, next) => {
+        whatsappAgentController.importZipMiddleware(req, res, (err) => {
+            if (err) return res.status(400).json({ error: err.message || "Invalid upload" });
+            next();
+        });
+    },
+    whatsappAgentController.importChatExport
+);
+
 // Conversations
 router.get("/conversations", auth, whatsappAgentController.getAgentConversations);
 router.get("/conversations/:phoneNumber/messages", auth, whatsappAgentController.getConversationMessages);

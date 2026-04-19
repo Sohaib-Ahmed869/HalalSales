@@ -7,45 +7,11 @@ const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const { v4: uuidv4 } = require("uuid");
 const { emitNewMessage, emitMessageStatus } = require("../socket");
 const { resolveAgentForConversation, processCallWebhook } = require("./whatsappAgent.controller");
+const { getValidToken, invalidateCachedToken } = require("../utils/tokenRefresher");
 const os = require("os");
 const fs = require("fs");
 const pathLib = require("path");
-const ffmpeg = require("fluent-ffmpeg");
-const ffmpegPath = require("ffmpeg-static");
-if (ffmpegPath) ffmpeg.setFfmpegPath(ffmpegPath);
-
-// Convert inbound OGG/Opus (or any audio) to MP3 for universal browser playback
-const convertInboundAudioToMp3 = (inputBuffer) => {
-    return new Promise((resolve, reject) => {
-        const tmpIn = pathLib.join(os.tmpdir(), `wa-inbound-${uuidv4()}`);
-        const tmpOut = pathLib.join(os.tmpdir(), `wa-inbound-${uuidv4()}.mp3`);
-        try { fs.writeFileSync(tmpIn, inputBuffer); } catch (err) { return reject(err); }
-
-        ffmpeg(tmpIn)
-            .audioCodec("libmp3lame")
-            .audioChannels(1)
-            .audioFrequency(44100)
-            .audioBitrate("64k")
-            .format("mp3")
-            .on("error", (err) => {
-                try { fs.unlinkSync(tmpIn); } catch (_) {}
-                try { fs.unlinkSync(tmpOut); } catch (_) {}
-                reject(err);
-            })
-            .on("end", () => {
-                try {
-                    const outBuffer = fs.readFileSync(tmpOut);
-                    resolve(outBuffer);
-                } catch (err) {
-                    reject(err);
-                } finally {
-                    try { fs.unlinkSync(tmpIn); } catch (_) {}
-                    try { fs.unlinkSync(tmpOut); } catch (_) {}
-                }
-            })
-            .save(tmpOut);
-    });
-};
+const { convertInboundAudioToMp3 } = require("../utils/whatsappInboundAudio");
 
 const findAgentByPhone = async (phoneNumberId) => {
     const agent = await User.findOne({
@@ -57,11 +23,15 @@ const findAgentByPhone = async (phoneNumberId) => {
 
 const WHATSAPP_API_URL = `https://graph.facebook.com/${process.env.WHATSAPP_API_VERSION}`;
 const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
-const ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 
 // ── S3 client (reused across all media uploads) ──────────────────────────────
 // Use the same config as the outbound upload (whatsappAgent.controller.js) to avoid mismatches
-const S3_REGION = process.env.AWS_REGION || "eu-north-1";
+const rawRegion =
+    process.env.AWS_REGION ||
+    process.env.AWS_REGION_LAMBDA ||
+    process.env.AWS_DEFAULT_REGION ||
+    "eu-north-1";
+const S3_REGION = rawRegion && rawRegion !== "undefined" ? rawRegion : "eu-north-1";
 const s3 = new S3Client({
     region: S3_REGION,
     credentials: {
@@ -69,6 +39,67 @@ const s3 = new S3Client({
         secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_KEY,
     },
 });
+
+/** File extension from WhatsApp filename when MIME is generic (e.g. octet-stream). */
+function extFromFilename(name) {
+    if (!name || typeof name !== "string") return null;
+    const m = name.match(/\.([a-z0-9]+)$/i);
+    return m ? m[1].toLowerCase() : null;
+}
+
+/**
+ * Step 2 of Meta media ingest: GET the binary URL returned by Graph.
+ * WhatsApp requires `Authorization: Bearer <token>` on this request (same as Step 1).
+ * Large payloads need unlimited axios body limits. On 401/403 we retry once without the header (CDN quirk).
+ */
+async function downloadBinaryFromMetaUrl(tempUrl, graphToken, mediaTimeout) {
+    const big = {
+        ...mediaTimeout,
+        responseType: "arraybuffer",
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+    };
+    try {
+        return await axios.get(tempUrl, {
+            headers: { Authorization: `Bearer ${graphToken}` },
+            ...big,
+        });
+    } catch (err) {
+        const st = err.response?.status;
+        if (st === 401 || st === 403) {
+            try {
+                return await axios.get(tempUrl, big);
+            } catch {
+                throw err;
+            }
+        }
+        throw err;
+    }
+}
+
+/**
+ * Put inbound media to S3. Prefer no ACL (Bucket owner enforced / block public ACLs).
+ * If that fails with an ACL-related or AccessDenied response, retry once with public-read.
+ */
+async function putInboundObjectToS3({ bucket, key, body, contentType }) {
+    const base = { Bucket: bucket, Key: key, Body: body, ContentType: contentType };
+    try {
+        await s3.send(new PutObjectCommand(base));
+        console.log(`[Media] S3 upload OK (no ACL): ${key}`);
+    } catch (err) {
+        const name = err.name || "";
+        const msg = String(err.message || err);
+        const retryWithAcl =
+            name === "AccessDenied" ||
+            /ACL|AccessControlList|AclNotSupported|Cannot use ACL|InvalidAccessControlList/i.test(msg);
+        if (retryWithAcl) {
+            await s3.send(new PutObjectCommand({ ...base, ACL: "public-read" }));
+            console.log(`[Media] S3 upload OK (with ACL): ${key}`);
+        } else {
+            throw err;
+        }
+    }
+}
 
 const whatsappController = {
 
@@ -203,9 +234,28 @@ const whatsappController = {
                     if (messageType === "document") {
                         content.filename = message[messageType].filename;
                     }
+                    console.log(
+                        `[Media DEBUG] Starting ingest for mediaId: ${message[messageType].id}, type: ${messageType}`
+                    );
+                    console.log(`[Media DEBUG] AWS_S3_BUCKET: ${process.env.AWS_S3_BUCKET || "(unset)"}`);
+                    console.log(`[Media DEBUG] AWS_REGION (effective): ${S3_REGION}`);
+                    console.log(`[Media DEBUG] AWS_ACCESS_KEY exists: ${!!process.env.AWS_ACCESS_KEY}`);
+                    console.log(`[Media DEBUG] AWS_ACCESS_KEY_ID exists: ${!!process.env.AWS_ACCESS_KEY_ID}`);
+                    console.log(`[Media DEBUG] AWS_SECRET_KEY exists: ${!!process.env.AWS_SECRET_KEY}`);
+                    console.log(
+                        `[Media DEBUG] AWS_SECRET_ACCESS_KEY exists: ${!!process.env.AWS_SECRET_ACCESS_KEY}`
+                    );
+                    console.log(
+                        `[Media DEBUG] WHATSAPP_ACCESS_TOKEN exists: ${!!process.env.WHATSAPP_ACCESS_TOKEN}`
+                    );
                     // Download from Meta and re-upload to S3 for a permanent URL
                     // (audio is converted to MP3 inside getMediaUrl for universal browser playback)
-                    content.mediaUrl = await whatsappController.getMediaUrl(message[messageType].id);
+                    const ingest = await whatsappController.getMediaUrl(message[messageType].id, {
+                        filename: messageType === "document" ? message.document?.filename : undefined,
+                    });
+                    console.log(`[Media DEBUG] Ingest result:`, JSON.stringify(ingest));
+                    content.mediaUrl = ingest?.url ?? null;
+                    if (ingest?.error) content.mediaIngestError = String(ingest.error).slice(0, 500);
                     // Store the stripped/final mime type. Audio files are now MP3.
                     content.mimeType = messageType === "audio"
                         ? "audio/mpeg"
@@ -232,7 +282,27 @@ const whatsappController = {
                     break;
             }
 
+            const mediaTypes = ["image", "video", "audio", "document", "sticker"];
+            if (mediaTypes.includes(messageType) && content.mediaId && !content.mediaUrl) {
+                console.warn(
+                    `[Media] Inbound save without S3 URL (messageId=${message.id}, mediaId=${content.mediaId}):`,
+                    content.mediaIngestError || "see server log above for Graph/S3 error"
+                );
+            }
+
             const messageFrom = "+" + message.from.replace(/\D/g, "");
+
+            // Owning agent: webhook phone_number_id match first, else prior messages in this thread.
+            // (Previously we patched salesAgent after save but never set salesAgentPhone — left null.)
+            let resolvedAgentId = agent?._id || null;
+            if (!resolvedAgentId) {
+                resolvedAgentId = await resolveAgentForConversation(messageFrom);
+            }
+            let resolvedAgentPhone = agent?.phone || null;
+            if (resolvedAgentId && !resolvedAgentPhone) {
+                const u = await User.findById(resolvedAgentId).select("phone").lean();
+                resolvedAgentPhone = u?.phone || null;
+            }
 
             const newMessage = new WhatsAppMessage({
                 messageId: message.id,
@@ -244,8 +314,8 @@ const whatsappController = {
                 content,
                 status: "delivered",
                 timestamp: new Date(parseInt(message.timestamp) * 1000),
-                salesAgent: agent?._id || null,
-                salesAgentPhone: agent?.phone || null,
+                salesAgent: resolvedAgentId || null,
+                salesAgentPhone: resolvedAgentPhone || null,
                 metadata: {
                     profileName: contact?.profile?.name,
                     waId: contact?.wa_id,
@@ -258,17 +328,10 @@ const whatsappController = {
 
             await newMessage.save();
 
-            // Resolve agent: direct phoneNumberId match, or fallback via conversation history
-            let resolvedAgentId = agent?._id || null;
-            if (!resolvedAgentId) {
-                resolvedAgentId = await resolveAgentForConversation(messageFrom);
-            }
-
             const nowDate = new Date();
 
-            // Update agent counters (only for direct phoneNumberId match)
-            if (agent) {
-                await User.findByIdAndUpdate(agent._id, {
+            if (resolvedAgentId) {
+                await User.findByIdAndUpdate(resolvedAgentId, {
                     $inc: { "whatsappSettings.totalMessagesReceived": 1 },
                     $set: { "whatsappSettings.lastMessageAt": nowDate },
                 });
@@ -289,12 +352,6 @@ const whatsappController = {
                 },
                 { upsert: true, setDefaultsOnInsert: true }
             );
-
-            // Ensure the message has salesAgent set if we resolved one
-            if (resolvedAgentId && !newMessage.salesAgent) {
-                newMessage.salesAgent = resolvedAgentId;
-                await newMessage.save();
-            }
 
             if (resolvedAgentId) {
                 emitNewMessage(String(resolvedAgentId), newMessage.toObject());
@@ -340,6 +397,42 @@ const whatsappController = {
             });
 
             console.log(`[Webhook] Message ${message.id} saved (type: ${messageType})`);
+
+            // If media ingest failed, retry once after a few seconds (transient Meta/S3).
+            if (mediaTypes.includes(messageType) && content.mediaId && !content.mediaUrl) {
+                const wamid = message.id;
+                const graphMediaId = message[messageType].id;
+                const hintFilename = messageType === "document" ? message.document?.filename : undefined;
+                const emitAgentId = resolvedAgentId ? String(resolvedAgentId) : "";
+                setTimeout(async () => {
+                    try {
+                        const doc = await WhatsAppMessage.findOne({ messageId: wamid }).lean();
+                        if (!doc?.content?.mediaId || doc.content?.mediaUrl) return;
+                        const ingest2 = await whatsappController.getMediaUrl(graphMediaId, { filename: hintFilename });
+                        console.log(`[Media DEBUG] Ingest result (delayed retry):`, JSON.stringify(ingest2));
+                        if (!ingest2?.url) return;
+                        const updated = await WhatsAppMessage.findOneAndUpdate(
+                            { messageId: wamid },
+                            { $set: { "content.mediaUrl": ingest2.url }, $unset: { "content.mediaIngestError": "" } },
+                            { new: true }
+                        );
+                        if (!updated) return;
+                        if (emitAgentId) {
+                            emitNewMessage(emitAgentId, updated.toObject());
+                        } else {
+                            try {
+                                const io = require("../socket").getIO();
+                                io.emit("new_unassigned_message", updated.toObject());
+                            } catch {
+                                /* ignore */
+                            }
+                        }
+                        console.log(`[Media] Delayed ingest succeeded for ${wamid}`);
+                    } catch (e) {
+                        console.warn("[Media] Delayed ingest retry failed:", e.message);
+                    }
+                }, 6000);
+            }
         } catch (error) {
             if (error.code === 11000) {
                 console.log(`[Webhook] Message ${message.id} already exists — skipping`);
@@ -389,59 +482,93 @@ const whatsappController = {
 
     // ── Get media from Meta and upload to S3 ──────────────────────────────────
     // Meta's signed media URLs expire within minutes, so we download immediately
-    // and store a permanent S3 URL instead.
-    getMediaUrl: async (mediaId) => {
-        try {
-            // Step 1: Get the temporary signed URL + mime type from Meta
-            const metaResponse = await axios.get(`${WHATSAPP_API_URL}/${mediaId}`, {
-                headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
-            });
-            const tempUrl = metaResponse.data.url;
-            const rawMimeType = metaResponse.data.mime_type || "application/octet-stream";
-            // Strip codec parameters (e.g., "audio/ogg; codecs=opus" → "audio/ogg")
-            const mimeType = rawMimeType.split(";")[0].trim();
+    // and store a permanent S3 URL instead. Returns { url } or { url: null, error } on failure.
+    // hints.filename — optional WhatsApp document filename (helps extension when MIME is generic).
+    getMediaUrl: async (mediaId, hints = {}) => {
+        const mediaTimeout = { timeout: 180000 }; // large inbound videos can be slow
+        const bucket = process.env.AWS_S3_BUCKET;
 
-            // Step 2: Download actual media bytes from Meta
-            const mediaResponse = await axios.get(tempUrl, {
-                headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
-                responseType: "arraybuffer",
-            });
-
-            let buffer = Buffer.from(mediaResponse.data);
-            let finalMime = mimeType;
-            let ext = mimeType.split("/")[1] || "bin";
-
-            // Convert incoming audio (esp. OGG/Opus from WhatsApp voice notes) to MP3 for universal browser playback
-            if (mimeType.startsWith("audio/")) {
-                try {
-                    console.log(`[Media] Converting inbound audio (${rawMimeType}) to MP3...`);
-                    buffer = await convertInboundAudioToMp3(buffer);
-                    finalMime = "audio/mpeg";
-                    ext = "mp3";
-                    console.log(`[Media] Audio conversion complete (${buffer.length} bytes)`);
-                } catch (convErr) {
-                    console.error(`[Media] Audio conversion failed, uploading original:`, convErr.message);
+        for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+                if (!bucket) {
+                    return { url: null, error: "AWS_S3_BUCKET is not configured" };
                 }
+
+                const graphToken = await getValidToken();
+
+                // Step 1: Graph — resolve temporary download URL + mime
+                const metaResponse = await axios.get(`${WHATSAPP_API_URL}/${mediaId}`, {
+                    headers: { Authorization: `Bearer ${graphToken}` },
+                    ...mediaTimeout,
+                    maxBodyLength: Infinity,
+                    maxContentLength: Infinity,
+                });
+                const tempUrl = metaResponse.data.url;
+                if (!tempUrl) {
+                    return { url: null, error: "Meta media response had no url field" };
+                }
+                const rawMimeType = metaResponse.data.mime_type || "application/octet-stream";
+                const mimeType = rawMimeType.split(";")[0].trim();
+
+                // Step 2: Download bytes (unlimited size for video)
+                const mediaResponse = await downloadBinaryFromMetaUrl(tempUrl, graphToken, mediaTimeout);
+
+                let buffer = Buffer.from(mediaResponse.data);
+                let finalMime = mimeType;
+                let ext = (mimeType.split("/")[1] || "bin").replace(/[^a-z0-9]/gi, "") || "bin";
+                const fromName = extFromFilename(hints.filename);
+                if ((ext === "octet-stream" || ext === "bin" || ext === "binary") && fromName) {
+                    ext = fromName;
+                }
+
+                // Convert incoming audio to MP3 where possible
+                if (mimeType.startsWith("audio/")) {
+                    try {
+                        console.log(`[Media] Converting inbound audio (${rawMimeType}) to MP3...`);
+                        buffer = await convertInboundAudioToMp3(buffer);
+                        finalMime = "audio/mpeg";
+                        ext = "mp3";
+                        console.log(`[Media] Audio conversion complete (${buffer.length} bytes)`);
+                    } catch (convErr) {
+                        console.error(`[Media] Audio conversion failed, uploading original:`, convErr.message);
+                    }
+                }
+
+                const key = `whatsapp-inbound/${uuidv4()}.${ext}`;
+                await putInboundObjectToS3({
+                    bucket,
+                    key,
+                    body: buffer,
+                    contentType: finalMime,
+                });
+
+                const s3Url = `https://${bucket}.s3.${S3_REGION}.amazonaws.com/${key}`;
+                console.log(`[Media] ${mediaId} → S3: ${s3Url}`);
+                return { url: s3Url };
+            } catch (error) {
+                const status = error.response?.status;
+                const fbErr = error.response?.data?.error;
+                const code = fbErr?.code;
+                const oauthish =
+                    status === 401 ||
+                    code === 190 ||
+                    code === "OAuthException" ||
+                    (typeof fbErr?.message === "string" && fbErr.message.includes("Session has expired"));
+
+                if (attempt === 0 && oauthish) {
+                    console.warn("[Media] Graph OAuth issue — invalidating token cache and retrying once…");
+                    invalidateCachedToken();
+                    continue;
+                }
+
+                const detail = error.response?.data || error.message || String(error);
+                const errStr = typeof detail === "string" ? detail : JSON.stringify(detail);
+                console.error("Error downloading/uploading media:", errStr);
+                return { url: null, error: errStr.slice(0, 800) };
             }
-
-            // Step 3: Upload to S3
-            const key = `whatsapp-inbound/${uuidv4()}.${ext}`;
-            await s3.send(new PutObjectCommand({
-                Bucket: process.env.AWS_S3_BUCKET,
-                Key: key,
-                Body: buffer,
-                ContentType: finalMime,
-                ACL: "public-read",
-            }));
-
-            const s3Url = `https://${process.env.AWS_S3_BUCKET}.s3.${S3_REGION}.amazonaws.com/${key}`;
-            console.log(`[Media] ${mediaId} → S3: ${s3Url}`);
-            return s3Url;
-
-        } catch (error) {
-            console.error("Error downloading/uploading media:", error.response?.data || error.message);
-            return null;
         }
+
+        return { url: null, error: "Media ingest failed after retry" };
     },
 
     // ── Send text message ─────────────────────────────────────────────────────
@@ -462,7 +589,7 @@ const whatsappController = {
             const response = await axios.post(
                 `${WHATSAPP_API_URL}/${PHONE_NUMBER_ID}/messages`,
                 payload,
-                { headers: { Authorization: `Bearer ${ACCESS_TOKEN}`, "Content-Type": "application/json" } }
+                { headers: { Authorization: `Bearer ${await getValidToken()}`, "Content-Type": "application/json" } }
             );
 
             const newMessage = new WhatsAppMessage({
@@ -515,7 +642,7 @@ const whatsappController = {
             const response = await axios.post(
                 `${WHATSAPP_API_URL}/${PHONE_NUMBER_ID}/messages`,
                 payload,
-                { headers: { Authorization: `Bearer ${ACCESS_TOKEN}`, "Content-Type": "application/json" } }
+                { headers: { Authorization: `Bearer ${await getValidToken()}`, "Content-Type": "application/json" } }
             );
 
             const newMessage = new WhatsAppMessage({
@@ -562,7 +689,7 @@ const whatsappController = {
             const response = await axios.post(
                 `${WHATSAPP_API_URL}/${PHONE_NUMBER_ID}/messages`,
                 payload,
-                { headers: { Authorization: `Bearer ${ACCESS_TOKEN}`, "Content-Type": "application/json" } }
+                { headers: { Authorization: `Bearer ${await getValidToken()}`, "Content-Type": "application/json" } }
             );
 
             const newMessage = new WhatsAppMessage({
@@ -666,7 +793,7 @@ const whatsappController = {
             await axios.post(
                 `${WHATSAPP_API_URL}/${PHONE_NUMBER_ID}/messages`,
                 { messaging_product: "whatsapp", status: "read", message_id: messageId },
-                { headers: { Authorization: `Bearer ${ACCESS_TOKEN}`, "Content-Type": "application/json" } }
+                { headers: { Authorization: `Bearer ${await getValidToken()}`, "Content-Type": "application/json" } }
             );
 
             await WhatsAppMessage.findOneAndUpdate({ messageId }, { status: "read" });

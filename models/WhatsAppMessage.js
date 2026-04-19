@@ -55,15 +55,11 @@ const whatsappMessageSchema = new mongoose.Schema(
                 errorMessage: String,
             },
         ],
+        // Mixed: webhook + ZIP import set many optional fields (import flags, importMediaS3Key, etc.).
+        // A fixed sub-schema would strip unknown keys and break imported media + proxy detection.
         metadata: {
-            profileName: String,
-            waId: String,
-            isForwarded: Boolean,
-            isFrequentlyForwarded: Boolean,
-            context: {
-                messageId: String,
-                from: String,
-            },
+            type: Schema.Types.Mixed,
+            default: {},
         },
         error: {
             code: String,
