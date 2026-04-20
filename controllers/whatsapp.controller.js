@@ -12,6 +12,7 @@ const os = require("os");
 const fs = require("fs");
 const pathLib = require("path");
 const { convertInboundAudioToMp3 } = require("../utils/whatsappInboundAudio");
+const { resolveWhatsAppS3Bucket } = require("../services/whatsappS3Upload");
 
 const findAgentByPhone = async (phoneNumberId) => {
     const agent = await User.findOne({
@@ -237,7 +238,7 @@ const whatsappController = {
                     console.log(
                         `[Media DEBUG] Starting ingest for mediaId: ${message[messageType].id}, type: ${messageType}`
                     );
-                    console.log(`[Media DEBUG] AWS_S3_BUCKET: ${process.env.AWS_S3_BUCKET || "(unset)"}`);
+                    console.log(`[Media DEBUG] S3 bucket (resolved): ${resolveWhatsAppS3Bucket()}`);
                     console.log(`[Media DEBUG] AWS_REGION (effective): ${S3_REGION}`);
                     console.log(`[Media DEBUG] AWS_ACCESS_KEY exists: ${!!process.env.AWS_ACCESS_KEY}`);
                     console.log(`[Media DEBUG] AWS_ACCESS_KEY_ID exists: ${!!process.env.AWS_ACCESS_KEY_ID}`);
@@ -486,12 +487,12 @@ const whatsappController = {
     // hints.filename — optional WhatsApp document filename (helps extension when MIME is generic).
     getMediaUrl: async (mediaId, hints = {}) => {
         const mediaTimeout = { timeout: 180000 }; // large inbound videos can be slow
-        const bucket = process.env.AWS_S3_BUCKET;
+        const bucket = resolveWhatsAppS3Bucket();
 
         for (let attempt = 0; attempt < 2; attempt++) {
             try {
                 if (!bucket) {
-                    return { url: null, error: "AWS_S3_BUCKET is not configured" };
+                    return { url: null, error: "S3 bucket not configured (AWS_S3_BUCKET or S3_BUCKET)" };
                 }
 
                 const graphToken = await getValidToken();

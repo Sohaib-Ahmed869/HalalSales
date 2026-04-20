@@ -11,6 +11,16 @@ const resolveRegion = () => {
 
 const region = resolveRegion();
 
+/** Align with `S3_BUCKET` / default used elsewhere when `AWS_S3_BUCKET` is unset (e.g. production). */
+function resolveWhatsAppS3Bucket() {
+    const b =
+        process.env.AWS_S3_BUCKET ||
+        process.env.S3_BUCKET ||
+        "halalfoodattachments";
+    const t = typeof b === "string" ? b.trim() : "";
+    return t || "halalfoodattachments";
+}
+
 const s3 = new S3Client({
     region,
     credentials: {
@@ -57,8 +67,7 @@ async function putObjectNoAclFirst(paramsBase) {
  * Returns a correctly encoded public URL.
  */
 async function uploadBufferWithKey({ key, buffer, contentType }) {
-    const bucket = process.env.AWS_S3_BUCKET;
-    if (!bucket) throw new Error("AWS_S3_BUCKET is not configured");
+    const bucket = resolveWhatsAppS3Bucket();
     await putObjectNoAclFirst({
         Bucket: bucket,
         Key: key,
@@ -68,4 +77,9 @@ async function uploadBufferWithKey({ key, buffer, contentType }) {
     return buildPublicS3ObjectUrl(bucket, region, key);
 }
 
-module.exports = { uploadBufferWithKey, buildPublicS3ObjectUrl, s3Region: region };
+module.exports = {
+    uploadBufferWithKey,
+    buildPublicS3ObjectUrl,
+    s3Region: region,
+    resolveWhatsAppS3Bucket,
+};

@@ -34,6 +34,7 @@ const {
     importWhatsAppChatExportFromFile,
     normalizePhone: normalizeImportPhone,
 } = require("../services/whatsappExportImportService");
+const { resolveWhatsAppS3Bucket, s3Region } = require("../services/whatsappS3Upload");
 
 // Point fluent-ffmpeg at the bundled static binary
 if (ffmpegPath) ffmpeg.setFfmpegPath(ffmpegPath);
@@ -76,12 +77,12 @@ const convertAudioToOggOpus = (inputBuffer, inputMimeType) => {
     });
 };
 
-// ── AWS S3 ────────────────────────────────────────────────────────────────────
+// ── AWS S3 (same bucket + region as whatsappS3Upload / inbound media) ───────────
 const s3 = new S3Client({
-    region: "eu-north-1",
+    region: s3Region,
     credentials: {
-        accessKeyId: process.env.AWS_ACCESS_KEY,
-        secretAccessKey: process.env.AWS_SECRET_KEY,
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_KEY,
     },
 });
 
@@ -148,23 +149,24 @@ async function assertAgentCanAccessImportedMedia(agentId, messageId) {
         (agent?.phone && msg.salesAgentPhone === agent.phone);
     if (!canAccess) return { ok: false, status: 403, error: "Forbidden" };
 
-    const bucket = process.env.AWS_S3_BUCKET;
+    const bucket = resolveWhatsAppS3Bucket();
     if (!bucket) return { ok: false, status: 500, error: "S3 not configured" };
 
     return { ok: true, msg, key, bucket };
 }
 
 const uploadToS3 = async (file) => {
+    const bucket = resolveWhatsAppS3Bucket();
     const ext = path.extname(file.originalname);
     const key = `whatsapp-media/${uuidv4()}${ext}`;
     await s3.send(new PutObjectCommand({
-        Bucket: process.env.AWS_S3_BUCKET,
+        Bucket: bucket,
         Key: key,
         Body: file.buffer,
         ContentType: file.mimetype,
         ACL: "public-read",
     }));
-    return `https://${process.env.AWS_S3_BUCKET}.s3.eu-north-1.amazonaws.com/${key}`;
+    return `https://${bucket}.s3.${s3Region}.amazonaws.com/${key}`;
 };
 
 const WHATSAPP_API_URL = `https://graph.facebook.com/${process.env.WHATSAPP_API_VERSION}`;
