@@ -83,22 +83,18 @@ async function downloadBinaryFromMetaUrl(tempUrl, graphToken, mediaTimeout) {
  * If that fails with an ACL-related or AccessDenied response, retry once with public-read.
  */
 async function putInboundObjectToS3({ bucket, key, body, contentType }) {
-    const base = { Bucket: bucket, Key: key, Body: body, ContentType: contentType };
+    const base = { 
+        Bucket: bucket, 
+        Key: key, 
+        Body: body, 
+        ContentType: contentType,
+        ACL: "public-read"  // ← add this
+    };
     try {
         await s3.send(new PutObjectCommand(base));
-        console.log(`[Media] S3 upload OK (no ACL): ${key}`);
+        console.log(`[Media] S3 upload OK: ${key}`);
     } catch (err) {
-        const name = err.name || "";
-        const msg = String(err.message || err);
-        const retryWithAcl =
-            name === "AccessDenied" ||
-            /ACL|AccessControlList|AclNotSupported|Cannot use ACL|InvalidAccessControlList/i.test(msg);
-        if (retryWithAcl) {
-            await s3.send(new PutObjectCommand({ ...base, ACL: "public-read" }));
-            console.log(`[Media] S3 upload OK (with ACL): ${key}`);
-        } else {
-            throw err;
-        }
+        throw err;
     }
 }
 
