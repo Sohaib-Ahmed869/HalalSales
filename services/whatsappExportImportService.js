@@ -25,7 +25,14 @@ const TIMESTAMPED_NON_MESSAGE_RE =
 
 const ATTACH_RE = /^(.+?)\s\(file attached\)$/i;
 
+/** With `m`, `$` is end-of-line so this matches the first line of a multiline "(file attached)" body. */
+const ATTACH_LINE_RE = /^(.+?)\s\(file attached\)$/m;
+
 const EDITED_SUFFIX = /<this message was edited>$/i;
+
+function stripInvisible(s) {
+    return String(s || "").replace(/[\u200B-\u200D\uFEFF]/g, "");
+}
 
 function normalizePhone(p) {
     const digits = String(p).replace(/\D/g, "");
@@ -277,69 +284,82 @@ async function importWhatsAppChatExportFromFile(zipPath, opts) {
         let content = {};
         let metaExtra = {};
 
-        const trimmed = body.trim();
+        const trimmed = stripInvisible(body.trim()).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+        // WhatsApp writes these placeholders into _chat.txt; they are not real messages — skip so imports
+        // (and any PDF/CSV built from the thread) do not list deleted or omitted media.
         const deletedPhrases = /^(this message was deleted|you deleted this message)\.?$/i;
         if (deletedPhrases.test(trimmed)) {
-            messageType = "text";
-            content = { text: "[Message deleted]" };
-            metaExtra.deleted = true;
-        } else if (/^<media omitted>$/i.test(trimmed)) {
-            messageType = "text";
-            content = { text: "[Media not included in export]" };
-            metaExtra.mediaOmitted = true;
-        } else {
-            const attachMatch = trimmed.match(ATTACH_RE);
-            if (attachMatch) {
-                const innerName = attachMatch[1].trim();
-                const baseKey = path.basename(innerName).toLowerCase();
-                const zipFile = byBasename.get(baseKey);
-                messageType = messageTypeForFile(innerName);
+            continue;
+        }
+        if (/^<media omitted>$/i.test(trimmed)) {
+            continue;
+        }
 
-                if (zipFile) {
-                    try {
-                        let buf = await zipFile.buffer();
-                        const ext = extOf(innerName);
-                        let mime = mimeForExt(ext);
-                        const safeName = sanitizeKeyFilename(innerName);
-                        let fileKeyName = safeName;
-                        if (messageType === "audio") {
-                            try {
-                                buf = await convertInboundAudioToMp3(buf);
-                                mime = "audio/mpeg";
-                                fileKeyName = safeName.replace(/\.[^.]+$/i, ".mp3") || `voice-${uuidv4().slice(0, 8)}.mp3`;
-                            } catch (convErr) {
-                                errors.push({
-                                    file: innerName,
-                                    phase: "audio_convert",
-                                    error: convErr.message || String(convErr),
-                                });
-                            }
+        // "file.pdf (file attached)\nfile.pdf" — multiline `$` fails on full string; `m` + `$` matches end of first line.
+        const firstLine = trimmed.split(/\r?\n/)[0]?.trim() || trimmed;
+        let attachMatch = trimmed.match(ATTACH_LINE_RE) || firstLine.match(ATTACH_RE);
+        if (attachMatch) {
+            const innerName = attachMatch[1].trim();
+            const baseKey = path.basename(innerName).toLowerCase();
+            const zipFile = byBasename.get(baseKey);
+            messageType = messageTypeForFile(innerName);
+
+            if (zipFile) {
+                try {
+                    let buf = await zipFile.buffer();
+                    const ext = extOf(innerName);
+                    let mime = mimeForExt(ext);
+                    const safeName = sanitizeKeyFilename(innerName);
+                    let fileKeyName = safeName;
+                    if (messageType === "audio") {
+                        try {
+                            buf = await convertInboundAudioToMp3(buf);
+                            mime = "audio/mpeg";
+                            fileKeyName = safeName.replace(/\.[^.]+$/i, ".mp3") || `voice-${uuidv4().slice(0, 8)}.mp3`;
+                        } catch (convErr) {
+                            errors.push({
+                                file: innerName,
+                                phase: "audio_convert",
+                                error: convErr.message || String(convErr),
+                            });
                         }
-                        const key = `${s3Prefix}/${uuidv4().slice(0, 8)}_${fileKeyName}`;
-                        const url = await uploadBufferWithKey({ key, buffer: buf, contentType: mime });
-                        importMediaS3Key = key;
-                        if (messageType === "document" || messageType === "contacts") {
-                            content = { mediaUrl: url, filename: path.basename(innerName), mimeType: mime };
-                        } else {
-                            content = { mediaUrl: url, mimeType: mime };
-                        }
-                        mediaUploaded += 1;
-                    } catch (e) {
-                        errors.push({ file: innerName, error: e.message });
-                        content = { text: `[Attachment upload failed: ${path.basename(innerName)}]` };
-                        messageType = "text";
-                        metaExtra.mediaUnavailable = true;
-                        mediaUnavailable += 1;
                     }
-                } else {
-                    content = { text: `[Attachment file not included: ${path.basename(innerName)}]` };
-                    metaExtra.mediaUnavailable = true;
+                    const key = `${s3Prefix}/${uuidv4().slice(0, 8)}_${fileKeyName}`;
+                    const url = await uploadBufferWithKey({ key, buffer: buf, contentType: mime });
+                    importMediaS3Key = key;
+                    if (messageType === "document" || messageType === "contacts") {
+                        content = { mediaUrl: url, filename: path.basename(innerName), mimeType: mime };
+                    } else {
+                        content = { mediaUrl: url, mimeType: mime };
+                    }
+                    mediaUploaded += 1;
+                } catch (e) {
+                    errors.push({ file: innerName, error: e.message });
                     mediaUnavailable += 1;
-                    messageType = "text";
+                    const ext = extOf(innerName);
+                    const mime = mimeForExt(ext);
+                    messageType = messageTypeForFile(innerName);
+                    if (messageType === "document" || messageType === "contacts") {
+                        content = { filename: path.basename(innerName), mimeType: mime };
+                    } else {
+                        content = { mimeType: mime };
+                    }
+                    metaExtra.mediaUnavailable = true;
                 }
             } else {
-                content = { text: body };
+                mediaUnavailable += 1;
+                const ext = extOf(innerName);
+                const mime = mimeForExt(ext);
+                messageType = messageTypeForFile(innerName);
+                if (messageType === "document" || messageType === "contacts") {
+                    content = { filename: path.basename(innerName), mimeType: mime };
+                } else {
+                    content = { mimeType: mime };
+                }
+                metaExtra.mediaUnavailable = true;
             }
+        } else {
+            content = { text: body };
         }
 
         const bKey = Object.prototype.hasOwnProperty.call(breakdown, messageType) ? messageType : "text";
