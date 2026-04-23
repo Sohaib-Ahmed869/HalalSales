@@ -3,7 +3,7 @@
 <html>
   <head>
     <meta charset="UTF-8" />
-    <title>DEVIS {{quotation.DocNum}}</title>
+    <title>PROFORMA - DEVIS {{quotation.DocNum}}</title>
     <style>
       body {
         font-family: Arial, sans-serif;
@@ -25,6 +25,18 @@
         color: white;
         padding: 10px 15px;
         display: inline-block;
+      }
+      .proforma-title {
+        text-align: center;
+        margin: 10px 0 20px 0;
+        font-size: 28px;
+        font-weight: 800;
+        letter-spacing: 6px;
+        color: #1f2937;
+        border-top: 2px solid #1f2937;
+        border-bottom: 2px solid #1f2937;
+        padding: 8px 0;
+        text-transform: uppercase;
       }
       table {
         width: 100%;
@@ -70,8 +82,10 @@
           style="width: 150px; height: auto"
         />
       </div>
-   
+
     </div>
+
+    <div class="proforma-title">PROFORMA</div>
 
     <div
       style="display: flex; justify-content: space-between; margin-bottom: 30px"

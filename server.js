@@ -85,6 +85,8 @@ const whatsappAdminRoutes = require("./routes/whatsappAdmin.routes");
 const whatsappAIAgentRoutes = require("./routes/whatsappAIAgent.routes");
 const agentRoutes = require('./routes/agentRoutes');
 const newSupplierRoutes = require('./routes/newSupplier.routes');
+const ringoverExportRoutes = require('./routes/ringoverExport.routes');
+const { startDailyCron } = require('./services/ringoverDailyExportCron');
 // Initialize express app
 const app = express();
 
@@ -250,6 +252,7 @@ app.use("/api/whatsapp-admin", whatsappAdminRoutes);
 app.use("/api/whatsapp-ai", whatsappAIAgentRoutes);
 app.use("/api/agents", agentRoutes);
 app.use("/api/new-suppliers", newSupplierRoutes);
+app.use("/api/ringover-export", ringoverExportRoutes);
 // Health check route
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });
@@ -271,6 +274,14 @@ httpServer.listen(PORT, () => {
 
   // Start AI Agent Orchestrator (replaces old rfqResponsePoller)
   orchestratorAgent.start();
+
+  // Start Ringover Daily Export Cron
+  try {
+    startDailyCron();
+    console.log("🔄 Ringover daily export cron started");
+  } catch (error) {
+    console.error("❌ Error starting Ringover cron:", error);
+  }
 });
 // Handle unhandled promise rejections
 process.on("unhandledRejection", (err) => {
