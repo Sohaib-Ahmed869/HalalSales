@@ -17,6 +17,8 @@ router.post("/upload", auth, whatsappAgentController.uploadMiddleware, whatsappA
 
 // Imported ZIP media (S3 private under whatsapp-imports/): presigned URL for streaming, or full stream fallback
 router.get("/imported-media/:messageId/signed-url", auth, whatsappAgentController.getImportedMediaSignedUrl);
+// CSV/text preview via API (same origin — avoids S3 CORS blocking browser fetch)
+router.get("/imported-media/:messageId/text-preview", auth, whatsappAgentController.getMessageTextPreview);
 router.get("/imported-media/:messageId", auth, whatsappAgentController.streamImportedMedia);
 
 // Import WhatsApp app export (ZIP + _chat.txt)

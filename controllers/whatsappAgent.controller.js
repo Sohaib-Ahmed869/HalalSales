@@ -121,25 +121,16 @@ function extractS3KeyFromPublicUrl(url) {
 }
 
 /**
- * Same access rules as streamImportedMedia / signed-url: only whatsapp-imports/* for ZIP-import messages.
+ * Agent may read S3 objects under whatsapp-imports/* (ZIP imports) or whatsapp-media/* (uploads / outbound).
  * @returns {{ ok: true, msg, key, bucket }} | {{ ok: false, status: number, error: string }}
  */
-async function assertAgentCanAccessImportedMedia(agentId, messageId) {
+async function assertAgentCanAccessMessageMedia(agentId, messageId) {
     const msg = await WhatsAppMessage.findOne({ messageId }).lean();
     if (!msg) return { ok: false, status: 404, error: "Not found" };
 
     const key =
         msg.metadata?.importMediaS3Key || extractS3KeyFromPublicUrl(msg.content?.mediaUrl);
-    if (!key || !String(key).startsWith("whatsapp-imports/")) {
-        return { ok: false, status: 404, error: "No media key" };
-    }
-
-    const mediaUrl = typeof msg.content?.mediaUrl === "string" ? msg.content.mediaUrl : "";
-    const isZipImportMedia =
-        msg?.metadata?.importedFromWhatsAppExport === true ||
-        (typeof msg.messageId === "string" && msg.messageId.startsWith("wexp_")) ||
-        mediaUrl.includes("/whatsapp-imports/");
-    if (!isZipImportMedia) return { ok: false, status: 404, error: "Not found" };
+    if (!key) return { ok: false, status: 404, error: "No media key" };
 
     const agent = await User.findById(agentId).select("phone").lean();
     const canAccess =
@@ -152,7 +143,30 @@ async function assertAgentCanAccessImportedMedia(agentId, messageId) {
     const bucket = resolveWhatsAppS3Bucket();
     if (!bucket) return { ok: false, status: 500, error: "S3 not configured" };
 
+    if (key.startsWith("whatsapp-imports/")) {
+        const mediaUrl = typeof msg.content?.mediaUrl === "string" ? msg.content.mediaUrl : "";
+        const isZipImportMedia =
+            msg?.metadata?.importedFromWhatsAppExport === true ||
+            (typeof msg.messageId === "string" && msg.messageId.startsWith("wexp_")) ||
+            mediaUrl.includes("/whatsapp-imports/");
+        if (!isZipImportMedia) return { ok: false, status: 404, error: "Not found" };
+    } else if (!key.startsWith("whatsapp-media/")) {
+        return { ok: false, status: 404, error: "Not found" };
+    }
+
     return { ok: true, msg, key, bucket };
+}
+
+/**
+ * Same access rules as streamImportedMedia / signed-url: only whatsapp-imports/* for ZIP-import messages.
+ */
+async function assertAgentCanAccessImportedMedia(agentId, messageId) {
+    const g = await assertAgentCanAccessMessageMedia(agentId, messageId);
+    if (!g.ok) return g;
+    if (!String(g.key).startsWith("whatsapp-imports/")) {
+        return { ok: false, status: 404, error: "Not found" };
+    }
+    return g;
 }
 
 const uploadToS3 = async (file) => {
@@ -691,6 +705,38 @@ const whatsappAgentController = {
         }
     },
 
+    /**
+     * Same-origin CSV/text preview for the web app (avoids S3 CORS blocking fetch() from the browser).
+     */
+    getMessageTextPreview: async (req, res) => {
+        try {
+            const gate = await assertAgentCanAccessMessageMedia(req.user.id, req.params.messageId);
+            if (!gate.ok) return res.status(gate.status).json({ error: gate.error });
+
+            const { msg, key, bucket } = gate;
+            const mime = String(msg.content?.mimeType || "").toLowerCase();
+            const fname = String(msg.content?.filename || "").toLowerCase();
+            const isCsv =
+                mime.includes("csv") || fname.endsWith(".csv") || mime === "text/csv";
+            const isTxt = mime.includes("text/plain") || fname.endsWith(".txt");
+            if (!isCsv && !isTxt) {
+                return res.status(400).json({ error: "Preview only supports CSV and plain text files" });
+            }
+
+            const out = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+            const chunks = [];
+            for await (const chunk of out.Body) chunks.push(chunk);
+            const buf = Buffer.concat(chunks);
+            const maxLen = 85_000;
+            const sliced = buf.slice(0, maxLen);
+            const preview = sliced.toString("utf8");
+            const truncated = buf.length > maxLen;
+            return res.status(200).json({ success: true, preview, truncated });
+        } catch (error) {
+            return res.status(500).json({ error: "Could not read preview", details: error.message || String(error) });
+        }
+    },
+
     // ── Send message ──────────────────────────────────────────────────────────
     sendMessage: async (req, res) => {
         try {
@@ -736,6 +782,28 @@ const whatsappAgentController = {
             const response = await axios.post(`${WHATSAPP_API_URL}/${phoneNumberId}/messages`, payload, {
                 headers: { Authorization: `Bearer ${await getValidToken()}`, "Content-Type": "application/json" },
             });
+            let outboundContent =
+                messageType === "text" ? { text: message } : { mediaUrl, caption: message, filename };
+            if (messageType === "document" && filename) {
+                const ext = path.extname(filename).replace(/^\./, "").toLowerCase();
+                const docMime = {
+                    pdf: "application/pdf",
+                    csv: "text/csv",
+                    doc: "application/msword",
+                    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    xls: "application/vnd.ms-excel",
+                    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    ppt: "application/vnd.ms-powerpoint",
+                    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    txt: "text/plain",
+                    zip: "application/zip",
+                };
+                outboundContent = {
+                    ...outboundContent,
+                    mimeType: docMime[ext] || "application/octet-stream",
+                };
+            }
+
             const newMessage = new WhatsAppMessage({
                 messageId: response.data.messages[0].id,
                 conversationId: to,
@@ -743,7 +811,7 @@ const whatsappAgentController = {
                 to,
                 direction: "outbound",
                 messageType,
-                content: messageType === "text" ? { text: message } : { mediaUrl, caption: message, filename },
+                content: outboundContent,
                 status: "sent",
                 salesAgent: agentId,
                 salesAgentPhone: agent.phone,
