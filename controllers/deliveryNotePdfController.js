@@ -279,75 +279,55 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, customer,
         let yOffset = startY + 30;
         doc.fontSize(9).font("Helvetica").fillColor("#000000");
 
-        // Check if AddressExtension has ShipTo data
-        let hasShipToExtension = false;
-        if (deliveryNote.AddressExtension) {
-            const addrExt = deliveryNote.AddressExtension;
-            hasShipToExtension = !!(
-                addrExt.ShipToStreet ||
-                addrExt.ShipToStreetNo ||
-                addrExt.ShipToCity ||
-                addrExt.ShipToZipCode ||
-                addrExt.ShipToCountry
-            );
-        }
+        if (deliveryNote.Address2) {
+            const addressLines = deliveryNote.Address2
+                .split(/[\r\n]+/)
+                .map(line => sanitizeText(line))
+                .filter(line => line.length > 0);
 
-        if (hasShipToExtension) {
-            // Use AddressExtension from delivery note
-            const addrExt = deliveryNote.AddressExtension;
-
-            // Build street address
-            const streetParts = [
-                addrExt.ShipToStreet,
-                addrExt.ShipToStreetNo,
-                addrExt.ShipToBuilding,
-                addrExt.ShipToBlock
-            ].filter(Boolean);
-
-            if (streetParts.length > 0) {
-                doc.text(sanitizeText(streetParts.join(" ")).substring(0, 50), deliveryX, yOffset, { continued: false });
+            addressLines.slice(0, 4).forEach(line => {
+                doc.text(line.substring(0, 50), deliveryX, yOffset, { continued: false });
                 yOffset += 12;
-            }
-
-            // City line with zip code
-            const cityLine = [addrExt.ShipToZipCode, addrExt.ShipToCity]
-                .filter(Boolean)
-                .join(" ");
-            if (cityLine) {
-                doc.text(sanitizeText(cityLine).substring(0, 50), deliveryX, yOffset, { continued: false });
-                yOffset += 12;
-            }
-
-            // County/State
-            if (addrExt.ShipToCounty || addrExt.ShipToState) {
-                const regionLine = [addrExt.ShipToCounty, addrExt.ShipToState]
-                    .filter(Boolean)
-                    .join(", ");
-                doc.text(sanitizeText(regionLine).substring(0, 50), deliveryX, yOffset, { continued: false });
-                yOffset += 12;
-            }
-
-            // Country
-            if (addrExt.ShipToCountry) {
-                doc.text(sanitizeText(addrExt.ShipToCountry).substring(0, 50), deliveryX, yOffset, { continued: false });
-                yOffset += 12;
-            }
+            });
         } else {
-            // Fallback to customer address
-            let shipToAddress = null;
-            if (customer && customer.addresses && customer.addresses.length > 0) {
-                shipToAddress = customer.addresses.find(addr =>
-                    addr.addressType === "bo_ShipTo" && addr.isDefault
-                ) || customer.addresses.find(addr => addr.addressType === "bo_ShipTo");
+            // Check if AddressExtension has ShipTo data
+            let hasShipToExtension = false;
+            if (deliveryNote.AddressExtension) {
+                const addrExt = deliveryNote.AddressExtension;
+                hasShipToExtension = !!(
+                    addrExt.ShipToAddress2 ||
+                    addrExt.ShipToStreet ||
+                    addrExt.ShipToStreetNo ||
+                    addrExt.ShipToBuilding ||
+                    addrExt.ShipToBlock ||
+                    addrExt.ShipToCity ||
+                    addrExt.ShipToZipCode ||
+                    addrExt.ShipToCountry
+                );
             }
 
-            if (shipToAddress) {
-                if (shipToAddress.street) {
-                    doc.text(sanitizeText(shipToAddress.street).substring(0, 50), deliveryX, yOffset, { continued: false });
-                    yOffset += 12;
-                }
+            if (hasShipToExtension) {
+                const addrExt = deliveryNote.AddressExtension;
 
-                const cityLine = [shipToAddress.zipCode, shipToAddress.city]
+                const shipToLines = [
+                    addrExt.ShipToAddress2,
+                    [
+                        addrExt.ShipToStreet,
+                        addrExt.ShipToStreetNo,
+                        addrExt.ShipToBuilding,
+                        addrExt.ShipToBlock
+                    ].filter(Boolean).join(" "),
+                    addrExt.ShipToAddress3
+                ]
+                    .map(line => sanitizeText(line))
+                    .filter(line => line.length > 0);
+
+                shipToLines.forEach(line => {
+                    doc.text(line.substring(0, 50), deliveryX, yOffset, { continued: false });
+                    yOffset += 12;
+                });
+
+                const cityLine = [addrExt.ShipToZipCode, addrExt.ShipToCity]
                     .filter(Boolean)
                     .join(" ");
                 if (cityLine) {
@@ -355,12 +335,62 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, customer,
                     yOffset += 12;
                 }
 
-                if (shipToAddress.country) {
-                    doc.text(sanitizeText(shipToAddress.country).substring(0, 50), deliveryX, yOffset, { continued: false });
+                if (addrExt.ShipToCounty || addrExt.ShipToState) {
+                    const regionLine = [addrExt.ShipToCounty, addrExt.ShipToState]
+                        .filter(Boolean)
+                        .join(", ");
+                    doc.text(sanitizeText(regionLine).substring(0, 50), deliveryX, yOffset, { continued: false });
+                    yOffset += 12;
+                }
+
+                if (addrExt.ShipToCountry) {
+                    doc.text(sanitizeText(addrExt.ShipToCountry).substring(0, 50), deliveryX, yOffset, { continued: false });
+                    yOffset += 12;
+                }
+            } else if (customer && customer.addresses && customer.addresses.length > 0) {
+                let shipToAddress = customer.addresses.find(addr =>
+                    addr.addressType === "bo_ShipTo" && addr.isDefault
+                ) || customer.addresses.find(addr => addr.addressType === "bo_ShipTo");
+
+                if (shipToAddress) {
+                    if (shipToAddress.street) {
+                        doc.text(sanitizeText(shipToAddress.street).substring(0, 50), deliveryX, yOffset, { continued: false });
+                        yOffset += 12;
+                    }
+
+                    const cityLine = [shipToAddress.zipCode, shipToAddress.city]
+                        .filter(Boolean)
+                        .join(" ");
+                    if (cityLine) {
+                        doc.text(sanitizeText(cityLine).substring(0, 50), deliveryX, yOffset, { continued: false });
+                        yOffset += 12;
+                    }
+
+                    if (shipToAddress.country) {
+                        doc.text(sanitizeText(shipToAddress.country).substring(0, 50), deliveryX, yOffset, { continued: false });
+                        yOffset += 12;
+                    }
+                } else if (deliveryNote.Address) {
+                    const cleanAddress = sanitizeText(deliveryNote.Address);
+                    const addressLines = cleanAddress
+                        .split('\n')
+                        .map(line => line.trim())
+                        .filter(line => line.length > 0)
+                        .slice(0, 3);
+
+                    addressLines.forEach(line => {
+                        doc.text(line.substring(0, 50), deliveryX, yOffset, { continued: false });
+                        yOffset += 12;
+                    });
+                } else {
+                    doc.text("2 avenue emilie zola", deliveryX, yOffset, { continued: false });
+                    yOffset += 12;
+                    doc.text("75015 PARIS", deliveryX, yOffset, { continued: false });
+                    yOffset += 12;
+                    doc.text("FRANCE", deliveryX, yOffset, { continued: false });
                     yOffset += 12;
                 }
             } else if (deliveryNote.Address) {
-                // Fallback to delivery note address
                 const cleanAddress = sanitizeText(deliveryNote.Address);
                 const addressLines = cleanAddress
                     .split('\n')
@@ -373,7 +403,6 @@ const generateDeliveryNotePage = async (doc, deliveryNote, logoBuffer, customer,
                     yOffset += 12;
                 });
             } else {
-                // Default fallback
                 doc.text("2 avenue emilie zola", deliveryX, yOffset, { continued: false });
                 yOffset += 12;
                 doc.text("75015 PARIS", deliveryX, yOffset, { continued: false });
