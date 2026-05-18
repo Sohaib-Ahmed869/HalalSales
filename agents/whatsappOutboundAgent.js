@@ -26,6 +26,19 @@ class WhatsappOutboundAgent extends BaseAgent {
 
         const results = [];
 
+        // WhatsApp Business policy: an outbound business-initiated message can
+        // only be a pre-approved TEMPLATE. Free-form text is rejected by Meta
+        // until the user replies, opening a 24-hour service window.
+        //
+        // Flow (two-phase):
+        //   1. Send the approved template ONLY.
+        //   2. Queue the AI-composed conversation on `vendor.pendingOutboundMessages`.
+        //   3. whatsappInboundAgent flushes the queue on the vendor's first reply.
+        const templateName = process.env.WHATSAPP_RFQ_TEMPLATE
+            || process.env.WHATSAPP_CALL_PERMISSION_TEMPLATE
+            || 'hello_world';
+        const templateLang = process.env.WHATSAPP_RFQ_TEMPLATE_LANG || 'en_US';
+
         for (const vendor of vendors) {
             if (!vendor.phone) {
                 results.push({
@@ -40,36 +53,50 @@ class WhatsappOutboundAgent extends BaseAgent {
             }
 
             try {
+                // Compose the conversation now, but don't send it. We queue it
+                // and only send after the vendor replies to the template.
                 const conversation = await this._composeOpeningConversation(rfq, vendor, customMessage);
-                const sendResults = await whatsappBusinessApi.sendSequence({
+
+                const templateRes = await whatsappBusinessApi.sendTemplate({
                     to: vendor.phone,
-                    messages: conversation,
-                    delayMs: 800,
+                    templateName,
+                    languageCode: templateLang,
                     aiAgentContext: {
                         rfqId: rfq._id.toString(),
                         rfqNumber: rfq.rfqNumber,
                         vendorCode: vendor.CardCode,
-                        stage: 'rfq_opening',
+                        stage: 'rfq_template_opener',
                     },
                 });
 
-                const firstSuccess = sendResults.find(r => r.success);
-                if (!firstSuccess) {
-                    const firstError = sendResults.find(r => !r.success);
-                    throw new Error(firstError?.error || 'All message sends failed');
+                if (!templateRes?.success) {
+                    throw new Error('Template send did not return success');
                 }
 
-                await this._updateVendorStatus(rfq, vendor, 'sent', firstSuccess.messageId, null, conversation);
+                await this._updateVendorStatus(
+                    rfq,
+                    vendor,
+                    'sent',
+                    templateRes.messageId,
+                    `Template "${templateName}" sent; ${conversation.length} follow-ups queued`,
+                    [`[template:${templateName}] (awaiting reply to open 24h window)`],
+                    {
+                        queueMessages: conversation,
+                        templateName,
+                    }
+                );
 
                 results.push({
                     vendorCode: vendor.CardCode,
                     vendorName: vendor.CardName,
                     success: true,
-                    messageId: firstSuccess.messageId,
-                    messagesSent: sendResults.filter(r => r.success).length,
+                    messageId: templateRes.messageId,
+                    messagesSent: 1,
+                    queuedMessages: conversation.length,
                     method: 'whatsapp',
+                    phase: 'template_only',
                 });
-                this.log(`Sent opening conversation (${sendResults.length} msgs) to ${vendor.CardName}`);
+                this.log(`Sent template "${templateName}" + queued ${conversation.length} follow-ups for ${vendor.CardName}`);
             } catch (err) {
                 this.logError(`WhatsApp send failed for ${vendor.CardName}:`, err);
                 results.push({
@@ -244,6 +271,93 @@ Generate the opening WhatsApp conversation as a JSON array.`;
         return msgs;
     }
 
+    /**
+     * Flush a vendor's queued opening conversation now that they've replied to
+     * the WhatsApp template (the 24-hour service window is open).
+     *
+     * Called from whatsappInboundAgent on the FIRST inbound from a vendor that
+     * still has pending messages parked on it. Idempotent — clears the queue
+     * after sending so a duplicate inbound won't double-fire it.
+     */
+    async flushPendingForVendor({ rfq, vendor }) {
+        const queued = (vendor.pendingOutboundMessages || [])
+            .map(m => m?.text)
+            .filter(Boolean);
+
+        if (queued.length === 0) {
+            return { flushed: false, reason: 'no_pending_messages' };
+        }
+
+        this.log(`Flushing ${queued.length} queued messages to ${vendor.vendorName} (${vendor.phone})`);
+        this.addToActionLog('wa_flush_pending_started', {
+            rfqId: rfq._id.toString(),
+            rfqNumber: rfq.rfqNumber,
+            vendorCode: vendor.vendorCode,
+            queuedCount: queued.length,
+        });
+
+        // Clear the queue BEFORE sending so a concurrent inbound (or retry)
+        // cannot double-dispatch. We re-queue on a hard failure below.
+        const original = vendor.pendingOutboundMessages.slice();
+        vendor.pendingOutboundMessages = [];
+        rfq.markModified('vendorsContacted');
+        await rfq.save();
+
+        try {
+            const sendResults = await whatsappBusinessApi.sendSequence({
+                to: vendor.phone,
+                messages: queued,
+                delayMs: 800,
+                aiAgentContext: {
+                    rfqId: rfq._id.toString(),
+                    rfqNumber: rfq.rfqNumber,
+                    vendorCode: vendor.vendorCode,
+                    stage: 'rfq_opening_flushed',
+                },
+            });
+
+            const successful = sendResults.filter(r => r.success);
+
+            // Mirror sent messages into the vendor's whatsappHistory so they
+            // show up in the UI alongside the rest of the conversation.
+            if (!vendor.whatsappHistory) vendor.whatsappHistory = [];
+            const ts = new Date();
+            for (const r of successful) {
+                vendor.whatsappHistory.push({
+                    direction: 'outgoing',
+                    message: r.text,
+                    timestamp: ts,
+                    messageSid: r.messageId,
+                });
+            }
+
+            // Move forward: now we wait for the actual quotation.
+            vendor.negotiationStatus = 'awaiting_initial_quote';
+            rfq.markModified('vendorsContacted');
+            await rfq.save();
+
+            this.addToActionLog('wa_flush_pending_completed', {
+                rfqId: rfq._id.toString(),
+                vendorCode: vendor.vendorCode,
+                sent: successful.length,
+                failed: sendResults.length - successful.length,
+            });
+
+            return {
+                flushed: true,
+                sent: successful.length,
+                failed: sendResults.length - successful.length,
+            };
+        } catch (err) {
+            this.logError(`flushPendingForVendor failed for ${vendor.vendorName}:`, err);
+            // Re-queue on hard failure so the operator can retry.
+            vendor.pendingOutboundMessages = original;
+            rfq.markModified('vendorsContacted');
+            await rfq.save();
+            throw err;
+        }
+    }
+
     _tryParseArray(text) {
         if (!text) return null;
         try {
@@ -257,7 +371,7 @@ Generate the opening WhatsApp conversation as a JSON array.`;
         }
     }
 
-    async _updateVendorStatus(rfq, vendor, status, messageId, notes, openingMessages) {
+    async _updateVendorStatus(rfq, vendor, status, messageId, notes, openingMessages, options = {}) {
         const vendorCode = vendor.CardCode;
         let vendorContact = rfq.vendorsContacted.find(v => v.vendorCode === vendorCode);
 
@@ -301,6 +415,18 @@ Generate the opening WhatsApp conversation as a JSON array.`;
                     messageSid: messageId,
                 });
             }
+        }
+
+        // Two-phase send: park the AI-composed conversation here. The inbound
+        // agent will flush it as soon as the vendor replies to the template.
+        if (Array.isArray(options.queueMessages) && options.queueMessages.length > 0) {
+            vendorContact.pendingOutboundMessages = options.queueMessages.map((text) => ({
+                text: String(text),
+                queuedAt: new Date(),
+            }));
+            vendorContact.negotiationStatus = 'awaiting_template_reply';
+            vendorContact.templateSentAt = new Date();
+            vendorContact.templateName = options.templateName || vendorContact.templateName;
         }
 
         rfq.markModified('vendorsContacted');

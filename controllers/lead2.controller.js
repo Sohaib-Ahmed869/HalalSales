@@ -200,13 +200,52 @@ exports.getLeadsPaginated = async (req, res) => {
 };
 
 // Get lead statistics
+// Accepts the same filters as the list endpoint (status, assignedTo, search,
+// followUpStartDate, followUpEndDate, tag, sourceType) so the KPI cards at
+// the top of the leads dashboard update with the filters below.
 exports.getLeadStats = async (req, res) => {
   try {
+    const mongoose = require("mongoose");
     const query = {};
 
     // Role-based filtering
     if (req.user.role === "sales_agent") {
       query.assignedTo = req.user._id;
+    }
+
+    // Optional filters from the UI
+    if (req.query.status) query.status = req.query.status;
+    if (req.query.assignedTo) {
+      if (req.query.assignedTo === "unassigned") {
+        query.assignedTo = { $exists: false };
+      } else if (mongoose.Types.ObjectId.isValid(req.query.assignedTo)) {
+        query.assignedTo = new mongoose.Types.ObjectId(req.query.assignedTo);
+      }
+    }
+    if (req.query.tag) query.tags = req.query.tag;
+    if (req.query.sourceType) query.sourceType = req.query.sourceType;
+    if (req.query.followUpStartDate || req.query.followUpEndDate) {
+      query.nextFollowUp = {};
+      if (req.query.followUpStartDate)
+        query.nextFollowUp.$gte = new Date(req.query.followUpStartDate);
+      if (req.query.followUpEndDate)
+        query.nextFollowUp.$lte = new Date(req.query.followUpEndDate);
+    }
+    if (req.query.fromDate || req.query.toDate) {
+      query.createdAt = {};
+      if (req.query.fromDate)
+        query.createdAt.$gte = new Date(req.query.fromDate + "T00:00:00.000Z");
+      if (req.query.toDate)
+        query.createdAt.$lte = new Date(req.query.toDate + "T23:59:59.999Z");
+    }
+    if (req.query.search) {
+      const s = { $regex: req.query.search, $options: "i" };
+      query.$or = [
+        { fullName: s },
+        { email: s },
+        { phoneNumber: s },
+        { company: s },
+      ];
     }
 
     const stats = await Lead.aggregate([
@@ -227,8 +266,40 @@ exports.getLeadStats = async (req, res) => {
           unassignedLeads: {
             $sum: { $cond: [{ $not: ["$assignedTo"] }, 1, 0] },
           },
-          restaurantLeads: { // NEW
+          restaurantLeads: {
             $sum: { $cond: [{ $eq: ["$sourceType", "restaurant_scraping"] }, 1, 0] },
+          },
+          // Time-to-first-contact proxy: time between createdAt and updatedAt
+          // (Lead docs are updated when an agent touches them — status change,
+          // notes, etc., so this approximates time to first contact.)
+          avgUpdateLagDays: {
+            $avg: {
+              $divide: [
+                { $subtract: ["$updatedAt", "$createdAt"] },
+                1000 * 60 * 60 * 24,
+              ],
+            },
+          },
+        },
+      },
+      {
+        $project: {
+          _id: 0,
+          totalLeads: 1,
+          newLeads: 1,
+          qualifiedLeads: 1,
+          convertedLeads: 1,
+          deadLeads: 1,
+          lostLeads: 1,
+          unassignedLeads: 1,
+          restaurantLeads: 1,
+          avgUpdateLagDays: { $round: ["$avgUpdateLagDays", 1] },
+          conversionRate: {
+            $cond: [
+              { $gt: ["$totalLeads", 0] },
+              { $round: [{ $multiply: [{ $divide: ["$convertedLeads", "$totalLeads"] }, 100] }, 1] },
+              0,
+            ],
           },
         },
       },
@@ -257,6 +328,8 @@ exports.getLeadStats = async (req, res) => {
           convertedLeads: 0,
           deadLeads: 0,
           unassignedLeads: 0,
+          avgUpdateLagDays: 0,
+          conversionRate: 0,
         },
         tagBreakdown: tagStats,
         statusBreakdown: statusStats,

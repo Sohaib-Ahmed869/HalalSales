@@ -66,4 +66,21 @@ router.get("/orders", dashboardController.getOrders);
 // GET /api/dashboard/quotations?page=1&limit=20&fromDate=...&toDate=...&approvalStatus=...&salesAgent=...&search=...
 router.get("/quotations", dashboardController.getQuotations);
 
+// ─── Customer + Leads + Activity Analytics ─────────────────
+// GET /api/main-admin-dashboard/customer-analytics?fromDate=...&toDate=...
+// Total clients, new accounts opened, how many of those ordered, contacted vs not.
+router.get("/customer-analytics", dashboardController.getCustomerAnalytics);
+
+// GET /api/main-admin-dashboard/leads-analytics?fromDate=...&toDate=...&assignedTo=...&status=...
+// Leads funnel: received, status breakdown, per-agent conversion, sample list.
+router.get("/leads-analytics", dashboardController.getLeadsAnalytics);
+
+// GET /api/main-admin-dashboard/recent-activity?fromDate=...&toDate=...&salesAgent=...
+// Recent orders/quotations/invoices for the dashboard activity feeds.
+router.get("/recent-activity", dashboardController.getRecentActivity);
+
+// GET /api/main-admin-dashboard/active-agents
+// Active sales agents (for the dashboard's agent filter dropdown).
+router.get("/active-agents", dashboardController.getActiveAgents);
+
 module.exports = router;

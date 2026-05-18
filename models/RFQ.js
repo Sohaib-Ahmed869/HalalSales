@@ -176,9 +176,29 @@ const RFQSchema = new Schema({
             },
             negotiationStatus: {
                 type: String,
-                enum: ['awaiting_initial_quote', 'negotiating', 'awaiting_admin_approval', 'accepted', 'rejected', 'stalled'],
+                enum: [
+                    // WhatsApp two-phase: template fired, queue of follow-ups
+                    // is parked on `pendingOutboundMessages` until vendor replies.
+                    'awaiting_template_reply',
+                    'awaiting_initial_quote',
+                    'negotiating',
+                    'awaiting_admin_approval',
+                    'accepted',
+                    'rejected',
+                    'stalled',
+                ],
                 default: 'awaiting_initial_quote',
             },
+
+            // Outbound messages queued while we wait for the vendor's first
+            // reply to the WhatsApp template (24-hour conversation window opener).
+            // Flushed by whatsappInboundAgent on first inbound, then cleared.
+            pendingOutboundMessages: [{
+                text: String,
+                queuedAt: { type: Date, default: Date.now },
+            }],
+            templateSentAt: Date,
+            templateName: String,
             negotiationHistory: [{
                 round: Number,
                 offeredPrice: Number,

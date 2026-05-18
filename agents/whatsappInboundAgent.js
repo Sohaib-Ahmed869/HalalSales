@@ -6,6 +6,7 @@ const { BaseAgent } = require('./baseAgent');
 const RFQ = require('../models/RFQ');
 const WhatsAppMessage = require('../models/WhatsAppMessage');
 const whatsappBusinessApi = require('../services/whatsappBusinessApi');
+const whatsappOutboundAgent = require('./whatsappOutboundAgent');
 const {
     getCompanyContext,
     getProductContext,
@@ -228,6 +229,41 @@ class WhatsappInboundAgent extends BaseAgent {
         };
         rfq.markModified('vendorsContacted');
         await rfq.save();
+
+        // Two-phase send: if the vendor has queued opening messages parked on
+        // them, the 24-hour customer-service window has just been opened by
+        // this very inbound. Dispatch the queued conversation now, mark them
+        // as awaiting the initial quote, and DO NOT run the AI tool loop on
+        // this first reply (it's usually a generic "ok" / button tap from the
+        // template — no useful negotiation signal yet).
+        if (
+            vendor.negotiationStatus === 'awaiting_template_reply' &&
+            Array.isArray(vendor.pendingOutboundMessages) &&
+            vendor.pendingOutboundMessages.length > 0
+        ) {
+            try {
+                const flushResult = await whatsappOutboundAgent.flushPendingForVendor({
+                    rfq,
+                    vendor,
+                });
+                this.addToActionLog('wa_inbound_flushed_queue', {
+                    rfqNumber: rfq.rfqNumber,
+                    vendorName: vendor.vendorName,
+                    messageId: incomingMessage.messageId,
+                    ...flushResult,
+                });
+                return { handled: true, flushedPending: true, ...flushResult };
+            } catch (err) {
+                this.logError('Failed to flush queued opening messages:', err);
+                this.addToActionLog('wa_inbound_flush_error', {
+                    rfqNumber: rfq.rfqNumber,
+                    vendorName: vendor.vendorName,
+                    error: err.message,
+                });
+                // Fall through to the AI loop as a best-effort fallback so we
+                // don't ghost the vendor entirely.
+            }
+        }
 
         // Run the conversational tool loop
         try {

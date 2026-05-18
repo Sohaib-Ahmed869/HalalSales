@@ -181,11 +181,23 @@ const salesManagerDashboardController = {
       const managerId = req.user._id;
       const { startDate, endDate } = req.query;
 
-      // Set default date range (last 30 days if not provided)
-      const end = endDate ? new Date(endDate) : new Date();
-      const start = startDate
-        ? new Date(startDate)
-        : new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
+      // Set default date range (last 30 days if not provided).
+      // Parse YYYY-MM-DD strings explicitly as UTC days so date-only inputs
+      // don't drift across timezones (April 1 ≠ March 31).
+      const parseRange = (s, endOfDay = false) => {
+        if (!s) return null;
+        const str = String(s).slice(0, 10);
+        if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+          return new Date(
+            str + (endOfDay ? "T23:59:59.999Z" : "T00:00:00.000Z")
+          );
+        }
+        return new Date(s);
+      };
+      const end = parseRange(endDate, true) || new Date();
+      const start =
+        parseRange(startDate, false) ||
+        new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
 
       // Get team members (sales agents under this manager)
       const teamMembers = await User.find({

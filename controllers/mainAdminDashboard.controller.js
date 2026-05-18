@@ -4,17 +4,24 @@ const Quotation = require("../models/Quotation");
 const Invoice = require("../models/Invoice");
 const Item = require("../models/item");
 const User = require("../models/User");
+const Customer = require("../models/Customer");
+const Lead = require("../models/Lead");
 const mongoose = require("mongoose");
 
 // Helper: Get date range from query params (defaults to this week)
+// IMPORTANT: parses YYYY-MM-DD strings explicitly as UTC to avoid timezone
+// drift that causes "April 1" to include March 31 records.
 function getDateRange(query) {
     const now = new Date();
     let fromDate, toDate;
 
     if (query.fromDate && query.toDate) {
-        fromDate = new Date(query.fromDate);
-        toDate = new Date(query.toDate);
-        toDate.setHours(23, 59, 59, 999);
+        // If frontend sends YYYY-MM-DD, anchor it to UTC midnight so the
+        // backend's day boundaries match what the user picked locally.
+        const fromStr = String(query.fromDate).slice(0, 10);
+        const toStr = String(query.toDate).slice(0, 10);
+        fromDate = new Date(fromStr + "T00:00:00.000Z");
+        toDate = new Date(toStr + "T23:59:59.999Z");
     } else {
         // Default: this week (Monday to now)
         const dayOfWeek = now.getDay();
@@ -43,6 +50,16 @@ function pctChange(current, previous) {
     return parseFloat((((current - previous) / previous) * 100).toFixed(1));
 }
 
+// Helper: optional sales-agent filter from query string.
+// Returns an object you can spread into a Mongo match, e.g. { salesAgent: ObjectId(...) },
+// or {} if no agent / invalid id was supplied.
+function getAgentFilter(query) {
+    const id = query?.salesAgent;
+    if (!id) return {};
+    if (!mongoose.Types.ObjectId.isValid(id)) return {};
+    return { salesAgent: new mongoose.Types.ObjectId(id) };
+}
+
 /**
  * GET /api/dashboard/summary
  * Top-level KPI cards with period comparison
@@ -51,11 +68,15 @@ exports.getSummary = async (req, res) => {
     try {
         const { fromDate, toDate } = getDateRange(req.query);
         const { prevFrom, prevTo } = getPreviousPeriod(fromDate, toDate);
+        const agentFilter = getAgentFilter(req.query);
 
         const dateFilter = { $gte: fromDate, $lte: toDate };
         const prevDateFilter = { $gte: prevFrom, $lte: prevTo };
+        const baseMatch = { DocDate: dateFilter, ...agentFilter };
+        const basePrevMatch = { DocDate: prevDateFilter, ...agentFilter };
 
         // Current period aggregations (run in parallel)
+        // NET = DocTotal - VatSum (turnover without VAT).
         const [
             orderStats,
             prevOrderStats,
@@ -66,16 +87,21 @@ exports.getSummary = async (req, res) => {
             activeCustomersCount,
             prevActiveCustomersCount,
         ] = await Promise.all([
-            // Orders - current
+            // Orders - current (net values)
             SalesOrder.aggregate([
-                { $match: { DocDate: dateFilter } },
+                { $match: baseMatch },
+                {
+                    $addFields: {
+                        netTotal: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] },
+                    },
+                },
                 {
                     $group: {
                         _id: null,
                         count: { $sum: 1 },
-                        totalValue: { $sum: "$DocTotal" },
-                        avgOrderValue: { $avg: "$DocTotal" },
-                        totalVat: { $sum: "$VatSum" },
+                        totalValue: { $sum: "$netTotal" },
+                        avgOrderValue: { $avg: "$netTotal" },
+                        totalVat: { $sum: { $ifNull: ["$VatSum", 0] } },
                         openOrders: {
                             $sum: {
                                 $cond: [
@@ -103,28 +129,33 @@ exports.getSummary = async (req, res) => {
                     },
                 },
             ]),
-            // Orders - previous
+            // Orders - previous (net values)
             SalesOrder.aggregate([
-                { $match: { DocDate: prevDateFilter } },
+                { $match: basePrevMatch },
                 {
                     $group: {
                         _id: null,
                         count: { $sum: 1 },
-                        totalValue: { $sum: "$DocTotal" },
+                        totalValue: { $sum: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] } },
                     },
                 },
             ]),
-            // Invoices - current
+            // Invoices - current (net values)
             Invoice.aggregate([
-                { $match: { DocDate: dateFilter } },
+                { $match: baseMatch },
+                {
+                    $addFields: {
+                        netTotal: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] },
+                    },
+                },
                 {
                     $group: {
                         _id: null,
                         count: { $sum: 1 },
-                        totalValue: { $sum: "$DocTotal" },
-                        avgInvoiceValue: { $avg: "$DocTotal" },
-                        totalVat: { $sum: "$VatSum" },
-                        totalPaid: { $sum: "$PaidToDate" },
+                        totalValue: { $sum: "$netTotal" },
+                        avgInvoiceValue: { $avg: "$netTotal" },
+                        totalVat: { $sum: { $ifNull: ["$VatSum", 0] } },
+                        totalPaid: { $sum: { $ifNull: ["$PaidToDate", 0] } },
                         posCount: {
                             $sum: { $cond: [{ $eq: ["$isPOS", true] }, 1, 0] },
                         },
@@ -134,25 +165,30 @@ exports.getSummary = async (req, res) => {
                     },
                 },
             ]),
-            // Invoices - previous
+            // Invoices - previous (net values)
             Invoice.aggregate([
-                { $match: { DocDate: prevDateFilter } },
+                { $match: basePrevMatch },
                 {
                     $group: {
                         _id: null,
                         count: { $sum: 1 },
-                        totalValue: { $sum: "$DocTotal" },
+                        totalValue: { $sum: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] } },
                     },
                 },
             ]),
-            // Quotations - current
+            // Quotations - current (net values)
             Quotation.aggregate([
-                { $match: { DocDate: dateFilter } },
+                { $match: baseMatch },
+                {
+                    $addFields: {
+                        netTotal: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] },
+                    },
+                },
                 {
                     $group: {
                         _id: null,
                         count: { $sum: 1 },
-                        totalValue: { $sum: "$DocTotal" },
+                        totalValue: { $sum: "$netTotal" },
                         approvedCount: {
                             $sum: {
                                 $cond: [{ $eq: ["$approvalStatus", "approved"] }, 1, 0],
@@ -180,20 +216,21 @@ exports.getSummary = async (req, res) => {
                     },
                 },
             ]),
-            // Quotations - previous
+            // Quotations - previous (net values)
             Quotation.aggregate([
-                { $match: { DocDate: prevDateFilter } },
+                { $match: basePrevMatch },
                 {
                     $group: {
                         _id: null,
                         count: { $sum: 1 },
-                        totalValue: { $sum: "$DocTotal" },
+                        totalValue: { $sum: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] } },
                     },
                 },
             ]),
-            // Active customers (unique CardCodes in orders this period)
-            SalesOrder.distinct("CardCode", { DocDate: dateFilter }),
-            SalesOrder.distinct("CardCode", { DocDate: prevDateFilter }),
+            // Active customers = unique CardCodes that were *invoiced* this period
+            // (per business: invoice-based, not order-based). Honors agent filter.
+            Invoice.distinct("CardCode", baseMatch),
+            Invoice.distinct("CardCode", basePrevMatch),
         ]);
 
         const cur = {
@@ -258,25 +295,28 @@ exports.getSalesChart = async (req, res) => {
     try {
         const { fromDate, toDate } = getDateRange(req.query);
 
+        const agentFilter = getAgentFilter(req.query);
+        const match = { DocDate: { $gte: fromDate, $lte: toDate }, ...agentFilter };
+
         const [ordersByDay, invoicesByDay] = await Promise.all([
             SalesOrder.aggregate([
-                { $match: { DocDate: { $gte: fromDate, $lte: toDate } } },
+                { $match: match },
                 {
                     $group: {
-                        _id: { $dateToString: { format: "%Y-%m-%d", date: "$DocDate" } },
+                        _id: { $dateToString: { format: "%Y-%m-%d", date: "$DocDate", timezone: "UTC" } },
                         orderCount: { $sum: 1 },
-                        orderValue: { $sum: "$DocTotal" },
+                        orderValue: { $sum: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] } },
                     },
                 },
                 { $sort: { _id: 1 } },
             ]),
             Invoice.aggregate([
-                { $match: { DocDate: { $gte: fromDate, $lte: toDate } } },
+                { $match: match },
                 {
                     $group: {
-                        _id: { $dateToString: { format: "%Y-%m-%d", date: "$DocDate" } },
+                        _id: { $dateToString: { format: "%Y-%m-%d", date: "$DocDate", timezone: "UTC" } },
                         invoiceCount: { $sum: 1 },
-                        invoiceValue: { $sum: "$DocTotal" },
+                        invoiceValue: { $sum: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] } },
                     },
                 },
                 { $sort: { _id: 1 } },
@@ -316,23 +356,30 @@ exports.getSalesChart = async (req, res) => {
 
 /**
  * GET /api/dashboard/top-customers
- * Top customers by revenue in the period
+ * Top customers by NET invoice revenue (without VAT) in the period.
+ * Source: finalised invoices, NOT orders (per business rule).
  */
 exports.getTopCustomers = async (req, res) => {
     try {
         const { fromDate, toDate } = getDateRange(req.query);
         const limit = parseInt(req.query.limit) || 10;
+        const agentFilter = getAgentFilter(req.query);
 
-        const topCustomers = await SalesOrder.aggregate([
-            { $match: { DocDate: { $gte: fromDate, $lte: toDate } } },
+        const topCustomers = await Invoice.aggregate([
+            { $match: { DocDate: { $gte: fromDate, $lte: toDate }, ...agentFilter } },
+            {
+                $addFields: {
+                    netTotal: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] },
+                },
+            },
             {
                 $group: {
                     _id: "$CardCode",
                     cardName: { $first: "$CardName" },
-                    orderCount: { $sum: 1 },
-                    totalRevenue: { $sum: "$DocTotal" },
-                    avgOrderValue: { $avg: "$DocTotal" },
-                    lastOrderDate: { $max: "$DocDate" },
+                    invoiceCount: { $sum: 1 },
+                    totalRevenue: { $sum: "$netTotal" },
+                    avgOrderValue: { $avg: "$netTotal" },
+                    lastInvoiceDate: { $max: "$DocDate" },
                 },
             },
             { $sort: { totalRevenue: -1 } },
@@ -342,10 +389,13 @@ exports.getTopCustomers = async (req, res) => {
                     _id: 0,
                     cardCode: "$_id",
                     cardName: 1,
-                    orderCount: 1,
+                    // Keep `orderCount` alias for frontend backwards-compat — it now
+                    // represents invoice count (per business rule)
+                    orderCount: "$invoiceCount",
+                    invoiceCount: 1,
                     totalRevenue: { $round: ["$totalRevenue", 2] },
                     avgOrderValue: { $round: ["$avgOrderValue", 2] },
-                    lastOrderDate: 1,
+                    lastOrderDate: "$lastInvoiceDate",
                 },
             },
         ]);
@@ -359,25 +409,40 @@ exports.getTopCustomers = async (req, res) => {
 
 /**
  * GET /api/dashboard/top-items
- * Top selling items by quantity and revenue
+ * Top selling items by quantity and NET revenue (without VAT).
+ * Defaults to invoices (finalised) per business rule.
+ * `?source=orders` still supported for backwards compatibility.
  */
 exports.getTopItems = async (req, res) => {
     try {
         const { fromDate, toDate } = getDateRange(req.query);
         const limit = parseInt(req.query.limit) || 15;
-        const source = req.query.source || "orders"; // "orders" or "invoices"
+        const source = req.query.source || "invoices"; // default to finalised invoices
+        const agentFilter = getAgentFilter(req.query);
 
-        const Model = source === "invoices" ? Invoice : SalesOrder;
+        const Model = source === "orders" ? SalesOrder : Invoice;
 
+        // LineTotal in SAP B1 is already NET (before tax) for a row, so we use it directly.
+        // For safety against schemas that lack LineTotal, fall back to Quantity*Price.
         const topItems = await Model.aggregate([
-            { $match: { DocDate: { $gte: fromDate, $lte: toDate } } },
+            { $match: { DocDate: { $gte: fromDate, $lte: toDate }, ...agentFilter } },
             { $unwind: "$DocumentLines" },
+            {
+                $addFields: {
+                    "DocumentLines.netLineTotal": {
+                        $ifNull: [
+                            "$DocumentLines.LineTotal",
+                            { $multiply: [{ $ifNull: ["$DocumentLines.Quantity", 0] }, { $ifNull: ["$DocumentLines.Price", 0] }] },
+                        ],
+                    },
+                },
+            },
             {
                 $group: {
                     _id: "$DocumentLines.ItemCode",
                     itemDescription: { $first: "$DocumentLines.ItemDescription" },
                     totalQuantity: { $sum: "$DocumentLines.Quantity" },
-                    totalRevenue: { $sum: "$DocumentLines.LineTotal" },
+                    totalRevenue: { $sum: "$DocumentLines.netLineTotal" },
                     avgPrice: { $avg: "$DocumentLines.Price" },
                     orderCount: { $addToSet: "$DocNum" },
                 },
@@ -406,22 +471,29 @@ exports.getTopItems = async (req, res) => {
 
 /**
  * GET /api/dashboard/team-performance
- * Sales agent performance: orders, revenue, login activity
+ * Per-agent performance based on finalised invoices (not orders), without VAT.
+ * Includes: revenue, # invoices finalised, # open unconverted quotations,
+ * # customers from invoices, avg order value, total quotations, conversion rate,
+ * and target achievement for the chosen period.
+ *
+ * Only active agents (deactivated: false) and only role: sales_agent — sales
+ * managers are intentionally excluded from the agent performance grid.
  */
 exports.getTeamPerformance = async (req, res) => {
     try {
         const { fromDate, toDate } = getDateRange(req.query);
 
-        // Get all active sales agents and managers
         const agents = await User.find({
-            role: { $in: ["sales_agent", "sales_manager"] },
+            role: "sales_agent",
             deactivated: false,
-        }).select("firstName lastName email role target lastLogin manager").lean();
+        })
+            .select("firstName lastName email role target targetHistory lastLogin manager")
+            .lean();
 
         const agentIds = agents.map((a) => a._id);
 
-        // Orders per agent in period
-        const agentOrders = await SalesOrder.aggregate([
+        // Invoice-based revenue per agent (NET = DocTotal - VatSum)
+        const agentInvoices = await Invoice.aggregate([
             {
                 $match: {
                     DocDate: { $gte: fromDate, $lte: toDate },
@@ -429,17 +501,22 @@ exports.getTeamPerformance = async (req, res) => {
                 },
             },
             {
+                $addFields: {
+                    netTotal: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] },
+                },
+            },
+            {
                 $group: {
                     _id: "$salesAgent",
-                    orderCount: { $sum: 1 },
-                    totalRevenue: { $sum: "$DocTotal" },
-                    avgOrderValue: { $avg: "$DocTotal" },
+                    invoiceCount: { $sum: 1 },
+                    totalRevenue: { $sum: "$netTotal" },
+                    avgOrderValue: { $avg: "$netTotal" },
                     uniqueCustomers: { $addToSet: "$CardCode" },
                 },
             },
         ]);
 
-        // Quotations per agent
+        // Quotations per agent — count total, converted, and open (not converted yet)
         const agentQuotations = await Quotation.aggregate([
             {
                 $match: {
@@ -451,10 +528,24 @@ exports.getTeamPerformance = async (req, res) => {
                 $group: {
                     _id: "$salesAgent",
                     quotationCount: { $sum: 1 },
-                    quotationValue: { $sum: "$DocTotal" },
+                    quotationValue: { $sum: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] } },
                     convertedCount: {
                         $sum: {
                             $cond: [{ $ne: ["$ConvertedToOrderDocEntry", null] }, 1, 0],
+                        },
+                    },
+                    openUnconvertedCount: {
+                        $sum: {
+                            $cond: [
+                                {
+                                    $and: [
+                                        { $eq: ["$ConvertedToOrderDocEntry", null] },
+                                        { $not: { $in: ["$approvalStatus", ["rejected"]] } },
+                                    ],
+                                },
+                                1,
+                                0,
+                            ],
                         },
                     },
                 },
@@ -462,15 +553,36 @@ exports.getTeamPerformance = async (req, res) => {
         ]);
 
         // Build lookup maps
-        const orderMap = {};
-        agentOrders.forEach((a) => { orderMap[a._id.toString()] = a; });
+        const invoiceMap = {};
+        agentInvoices.forEach((a) => { invoiceMap[a._id.toString()] = a; });
         const quotationMap = {};
         agentQuotations.forEach((a) => { quotationMap[a._id.toString()] = a; });
 
+        // Get current month/year target from targetHistory if available
+        const periodMonth = String(fromDate.getUTCMonth() + 1).padStart(2, "0");
+        const periodYear = fromDate.getUTCFullYear();
+
         const teamData = agents.map((agent) => {
             const id = agent._id.toString();
-            const orders = orderMap[id] || { orderCount: 0, totalRevenue: 0, avgOrderValue: 0, uniqueCustomers: [] };
-            const quotes = quotationMap[id] || { quotationCount: 0, quotationValue: 0, convertedCount: 0 };
+            const inv = invoiceMap[id] || { invoiceCount: 0, totalRevenue: 0, avgOrderValue: 0, uniqueCustomers: [] };
+            const quotes = quotationMap[id] || { quotationCount: 0, quotationValue: 0, convertedCount: 0, openUnconvertedCount: 0 };
+
+            // Resolve a period-aware target: prefer targetHistory entry for
+            // (year, month) of the range, else fall back to user.target.
+            let periodTarget = 0;
+            if (Array.isArray(agent.targetHistory) && agent.targetHistory.length > 0) {
+                const match = agent.targetHistory.find(
+                    (t) => String(t.month) === periodMonth && Number(t.year) === periodYear
+                );
+                if (match) periodTarget = Number(match.target) || 0;
+            }
+            if (!periodTarget) periodTarget = Number(agent.target) || 0;
+
+            // FIX: conversion rate must be 0 when there are no quotations (was
+            // showing 100% incorrectly due to falsy guards elsewhere).
+            const conversionRate = quotes.quotationCount > 0
+                ? parseFloat(((quotes.convertedCount / quotes.quotationCount) * 100).toFixed(1))
+                : 0;
 
             return {
                 agentId: agent._id,
@@ -478,29 +590,36 @@ exports.getTeamPerformance = async (req, res) => {
                 email: agent.email,
                 role: agent.role,
                 lastLogin: agent.lastLogin,
-                target: agent.target || 0,
+                target: periodTarget,
+                // keep `orders` key for frontend backwards-compat — values are now
+                // invoice-based per business rule
                 orders: {
-                    count: orders.orderCount,
-                    totalRevenue: parseFloat((orders.totalRevenue || 0).toFixed(2)),
-                    avgOrderValue: parseFloat((orders.avgOrderValue || 0).toFixed(2)),
-                    uniqueCustomers: (orders.uniqueCustomers || []).length,
+                    count: inv.invoiceCount,
+                    totalRevenue: parseFloat((inv.totalRevenue || 0).toFixed(2)),
+                    avgOrderValue: parseFloat((inv.avgOrderValue || 0).toFixed(2)),
+                    uniqueCustomers: (inv.uniqueCustomers || []).length,
+                },
+                invoices: {
+                    count: inv.invoiceCount,
+                    totalRevenue: parseFloat((inv.totalRevenue || 0).toFixed(2)),
+                    avgInvoiceValue: parseFloat((inv.avgOrderValue || 0).toFixed(2)),
+                    uniqueCustomers: (inv.uniqueCustomers || []).length,
                 },
                 quotations: {
                     count: quotes.quotationCount,
                     totalValue: parseFloat((quotes.quotationValue || 0).toFixed(2)),
                     converted: quotes.convertedCount,
-                    conversionRate: quotes.quotationCount > 0
-                        ? parseFloat(((quotes.convertedCount / quotes.quotationCount) * 100).toFixed(1))
-                        : 0,
+                    openUnconverted: quotes.openUnconvertedCount,
+                    conversionRate,
                 },
-                targetAchievement: agent.target > 0
-                    ? parseFloat((((orders.totalRevenue || 0) / agent.target) * 100).toFixed(1))
+                targetAchievement: periodTarget > 0
+                    ? parseFloat((((inv.totalRevenue || 0) / periodTarget) * 100).toFixed(1))
                     : null,
             };
         });
 
         // Sort by revenue descending
-        teamData.sort((a, b) => b.orders.totalRevenue - a.orders.totalRevenue);
+        teamData.sort((a, b) => b.invoices.totalRevenue - a.invoices.totalRevenue);
 
         res.status(200).json({ success: true, data: teamData });
     } catch (error) {
@@ -515,7 +634,13 @@ exports.getTeamPerformance = async (req, res) => {
  */
 exports.getInvoices = async (req, res) => {
     try {
-        const { fromDate, toDate } = getDateRange(req.query);
+        let { fromDate, toDate } = getDateRange(req.query);
+        // Optional: drill-down to a single day inside the period
+        if (req.query.date) {
+            const d = String(req.query.date).slice(0, 10);
+            fromDate = new Date(d + "T00:00:00.000Z");
+            toDate = new Date(d + "T23:59:59.999Z");
+        }
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 20;
         const skip = (page - 1) * limit;
@@ -583,7 +708,12 @@ exports.getInvoiceDetail = async (req, res) => {
  */
 exports.getOrders = async (req, res) => {
     try {
-        const { fromDate, toDate } = getDateRange(req.query);
+        let { fromDate, toDate } = getDateRange(req.query);
+        if (req.query.date) {
+            const d = String(req.query.date).slice(0, 10);
+            fromDate = new Date(d + "T00:00:00.000Z");
+            toDate = new Date(d + "T23:59:59.999Z");
+        }
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 20;
         const skip = (page - 1) * limit;
@@ -606,7 +736,7 @@ exports.getOrders = async (req, res) => {
         const [orders, total] = await Promise.all([
             SalesOrder.find(query)
                 .populate("salesAgent", "firstName lastName")
-                .select("DocNum DocDate CardCode CardName DocTotal DocCurrency DocumentStatus SyncedWithSAP LocalStatus StartDeliveryDate salesAgent")
+                .select("DocNum DocDate CardCode CardName DocTotal VatSum DocCurrency DocumentStatus SyncedWithSAP LocalStatus StartDeliveryDate salesAgent")
                 .sort({ DocDate: -1 })
                 .skip(skip)
                 .limit(limit)
@@ -634,7 +764,12 @@ exports.getOrders = async (req, res) => {
  */
 exports.getQuotations = async (req, res) => {
     try {
-        const { fromDate, toDate } = getDateRange(req.query);
+        let { fromDate, toDate } = getDateRange(req.query);
+        if (req.query.date) {
+            const d = String(req.query.date).slice(0, 10);
+            fromDate = new Date(d + "T00:00:00.000Z");
+            toDate = new Date(d + "T23:59:59.999Z");
+        }
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 20;
         const skip = (page - 1) * limit;
@@ -652,7 +787,7 @@ exports.getQuotations = async (req, res) => {
         const [quotations, total] = await Promise.all([
             Quotation.find(query)
                 .populate("salesAgent", "firstName lastName")
-                .select("DocNum DocDate CardCode CardName DocTotal DocCurrency approvalStatus DocumentStatus ConvertedToOrderDocEntry salesAgent")
+                .select("DocNum DocDate CardCode CardName DocTotal VatSum DocCurrency approvalStatus DocumentStatus ConvertedToOrderDocEntry salesAgent")
                 .sort({ DocDate: -1 })
                 .skip(skip)
                 .limit(limit)
@@ -854,12 +989,44 @@ exports.getRevenueBreakdown = async (req, res) => {
 };
 
 /**
+ * GET /api/main-admin-dashboard/active-agents
+ * Active sales agents only — used by the dashboard's agent filter dropdown.
+ */
+exports.getActiveAgents = async (req, res) => {
+    try {
+        const agents = await User.find({
+            role: "sales_agent",
+            deactivated: false,
+        })
+            .select("firstName lastName email")
+            .sort({ firstName: 1, lastName: 1 })
+            .lean();
+
+        res.status(200).json({
+            success: true,
+            data: agents.map((a) => ({
+                _id: a._id,
+                name: `${a.firstName || ""} ${a.lastName || ""}`.trim() || a.email,
+                email: a.email,
+            })),
+        });
+    } catch (error) {
+        console.error("Error in getActiveAgents:", error);
+        res.status(500).json({ success: false, message: "Error fetching active agents", error: error.message });
+    }
+};
+
+/**
  * GET /api/dashboard/team-logins
  * Recent login activity for all team members
  */
 exports.getTeamLogins = async (req, res) => {
     try {
-        const users = await User.find({ deactivated: false })
+        // Active sales agents only (and managers) — admin/logistics excluded
+        const users = await User.find({
+            deactivated: false,
+            role: { $in: ["sales_agent", "sales_manager"] },
+        })
             .select("firstName lastName email role lastLogin createdAt")
             .sort({ lastLogin: -1 })
             .lean();
@@ -993,5 +1160,342 @@ exports.getHourlyDistribution = async (req, res) => {
     } catch (error) {
         console.error("Error in getHourlyDistribution:", error);
         res.status(500).json({ success: false, message: "Error fetching hourly distribution", error: error.message });
+    }
+};
+
+/**
+ * GET /api/main-admin-dashboard/customer-analytics
+ * Customer + new-account analytics for sales manager / admin dashboard.
+ * Returns:
+ *   - totalCustomers         — entire customer base in the system
+ *   - newAccountsInPeriod    — accounts created within [fromDate, toDate]
+ *   - newAccountsOrdered     — of those new accounts, how many have an invoice
+ *                              in the period (i.e. they actually placed an order)
+ *   - invoicedCustomers      — distinct customers invoiced in the period
+ *   - quotedCustomers        — distinct customers that received a quotation
+ *   - contactedCustomers     — distinct customers with any quotation OR invoice
+ *                              OR order (treated as "contacted" via business activity)
+ *   - notContactedCount      — total - contactedCustomers (customers with no
+ *                              business activity in the period)
+ *   - notContactedCustomers  — sample list (max 50) for drill-down
+ */
+exports.getCustomerAnalytics = async (req, res) => {
+    try {
+        const { fromDate, toDate } = getDateRange(req.query);
+        const dateFilter = { $gte: fromDate, $lte: toDate };
+        const agentFilter = getAgentFilter(req.query);
+        // When filtering to a single agent:
+        //   - totalCustomers becomes "customers in this agent's portfolio"
+        //     (Customer.assignedTo = agent)
+        //   - newAccounts is scoped to customers assigned to that agent
+        //   - invoiced/quoted/ordered card codes are scoped to that agent's docs
+        //   - notContacted is the agent's portfolio minus their contacted set
+        const customerScopedFilter = agentFilter.salesAgent
+            ? { assignedTo: agentFilter.salesAgent }
+            : {};
+
+        const [
+            totalCustomers,
+            newAccountsList,
+            invoicedCardCodes,
+            quotedCardCodes,
+            orderedCardCodes,
+        ] = await Promise.all([
+            Customer.countDocuments(customerScopedFilter),
+            Customer.find({ createdAt: dateFilter, ...customerScopedFilter })
+                .select("CardCode CardName createdAt assignedTo phoneNumber Email customerType status")
+                .populate("assignedTo", "firstName lastName")
+                .lean(),
+            Invoice.distinct("CardCode", { DocDate: dateFilter, ...agentFilter }),
+            Quotation.distinct("CardCode", { DocDate: dateFilter, ...agentFilter }),
+            SalesOrder.distinct("CardCode", { DocDate: dateFilter, ...agentFilter }),
+        ]);
+
+        const invoicedSet = new Set(invoicedCardCodes.filter(Boolean));
+        const quotedSet = new Set(quotedCardCodes.filter(Boolean));
+        const orderedSet = new Set(orderedCardCodes.filter(Boolean));
+        // Contacted = any business activity (invoice / quotation / order) in the period
+        const contactedSet = new Set([...invoicedSet, ...quotedSet, ...orderedSet]);
+
+        const newAccounts = newAccountsList.map((c) => ({
+            CardCode: c.CardCode,
+            CardName: c.CardName,
+            createdAt: c.createdAt,
+            assignedAgent: c.assignedTo
+                ? `${c.assignedTo.firstName || ""} ${c.assignedTo.lastName || ""}`.trim()
+                : null,
+            phoneNumber: c.phoneNumber,
+            Email: c.Email,
+            customerType: c.customerType,
+            status: c.status,
+            hasOrdered: invoicedSet.has(c.CardCode),
+        }));
+
+        const newAccountsOrdered = newAccounts.filter((c) => c.hasOrdered).length;
+
+        // Sample of customers with no activity in the period (limited to 50).
+        // When an agent is selected, scope to their portfolio.
+        const notContactedSample = await Customer.find({
+            CardCode: { $exists: true, $ne: null, $nin: [...contactedSet] },
+            ...customerScopedFilter,
+        })
+            .select("CardCode CardName lastActivityDate assignedTo")
+            .populate("assignedTo", "firstName lastName")
+            .limit(50)
+            .lean();
+
+        res.status(200).json({
+            success: true,
+            data: {
+                period: { fromDate, toDate },
+                totalCustomers,
+                newAccountsInPeriod: newAccounts.length,
+                newAccountsOrdered,
+                newAccountsConversionRate: newAccounts.length > 0
+                    ? parseFloat(((newAccountsOrdered / newAccounts.length) * 100).toFixed(1))
+                    : 0,
+                invoicedCustomers: invoicedSet.size,
+                quotedCustomers: quotedSet.size,
+                orderedCustomers: orderedSet.size,
+                contactedCustomers: contactedSet.size,
+                notContactedCount: Math.max(0, totalCustomers - contactedSet.size),
+                newAccounts,
+                notContactedSample: notContactedSample.map((c) => ({
+                    CardCode: c.CardCode,
+                    CardName: c.CardName,
+                    lastActivityDate: c.lastActivityDate,
+                    assignedAgent: c.assignedTo
+                        ? `${c.assignedTo.firstName || ""} ${c.assignedTo.lastName || ""}`.trim()
+                        : null,
+                })),
+            },
+        });
+    } catch (error) {
+        console.error("Error in getCustomerAnalytics:", error);
+        res.status(500).json({ success: false, message: "Error fetching customer analytics", error: error.message });
+    }
+};
+
+/**
+ * GET /api/main-admin-dashboard/leads-analytics
+ * Leads funnel for the dashboard: received, by status, conversion, time-to-contact.
+ * Used by both the admin dashboard and the leads-screen header.
+ */
+exports.getLeadsAnalytics = async (req, res) => {
+    try {
+        const { fromDate, toDate } = getDateRange(req.query);
+        const dateFilter = { $gte: fromDate, $lte: toDate };
+
+        const filter = { createdAt: dateFilter };
+        // Accept both `assignedTo` (the underlying Lead field) and `salesAgent`
+        // (the dashboard's global filter key) — they mean the same person here.
+        const agentRaw = req.query.assignedTo || req.query.salesAgent;
+        if (agentRaw && mongoose.Types.ObjectId.isValid(agentRaw)) {
+            filter.assignedTo = new mongoose.Types.ObjectId(agentRaw);
+        }
+        if (req.query.status) {
+            filter.status = req.query.status;
+        }
+
+        const [
+            statusBreakdown,
+            byAgent,
+            recentLeads,
+        ] = await Promise.all([
+            Lead.aggregate([
+                { $match: filter },
+                {
+                    $group: {
+                        _id: "$status",
+                        count: { $sum: 1 },
+                    },
+                },
+            ]),
+            Lead.aggregate([
+                { $match: filter },
+                {
+                    $group: {
+                        _id: "$assignedTo",
+                        total: { $sum: 1 },
+                        converted: {
+                            $sum: { $cond: [{ $eq: ["$status", "converted"] }, 1, 0] },
+                        },
+                        new: {
+                            $sum: { $cond: [{ $eq: ["$status", "new"] }, 1, 0] },
+                        },
+                        qualified: {
+                            $sum: { $cond: [{ $eq: ["$status", "qualified"] }, 1, 0] },
+                        },
+                        dead: {
+                            $sum: { $cond: [{ $eq: ["$status", "dead"] }, 1, 0] },
+                        },
+                        avgAgeDays: {
+                            $avg: {
+                                $divide: [
+                                    { $subtract: ["$updatedAt", "$createdAt"] },
+                                    1000 * 60 * 60 * 24,
+                                ],
+                            },
+                        },
+                    },
+                },
+                {
+                    $lookup: {
+                        from: "users",
+                        localField: "_id",
+                        foreignField: "_id",
+                        as: "agent",
+                    },
+                },
+                { $unwind: { path: "$agent", preserveNullAndEmptyArrays: true } },
+                {
+                    $project: {
+                        agentId: "$_id",
+                        agentName: {
+                            $cond: [
+                                { $ifNull: ["$agent", false] },
+                                { $concat: [{ $ifNull: ["$agent.firstName", ""] }, " ", { $ifNull: ["$agent.lastName", ""] }] },
+                                "Unassigned",
+                            ],
+                        },
+                        total: 1,
+                        converted: 1,
+                        new: 1,
+                        qualified: 1,
+                        dead: 1,
+                        avgAgeDays: { $round: ["$avgAgeDays", 1] },
+                        conversionRate: {
+                            $cond: [
+                                { $gt: ["$total", 0] },
+                                { $round: [{ $multiply: [{ $divide: ["$converted", "$total"] }, 100] }, 1] },
+                                0,
+                            ],
+                        },
+                    },
+                },
+                { $sort: { total: -1 } },
+            ]),
+            Lead.find(filter)
+                .populate("assignedTo", "firstName lastName")
+                .sort({ createdAt: -1 })
+                .limit(50)
+                .lean(),
+        ]);
+
+        const byStatus = { new: 0, qualified: 0, converted: 0, dead: 0 };
+        statusBreakdown.forEach((s) => {
+            if (s._id && byStatus[s._id] !== undefined) byStatus[s._id] = s.count;
+        });
+
+        const total = Object.values(byStatus).reduce((a, b) => a + b, 0);
+
+        res.status(200).json({
+            success: true,
+            data: {
+                period: { fromDate, toDate },
+                total,
+                byStatus,
+                conversionRate: total > 0
+                    ? parseFloat(((byStatus.converted / total) * 100).toFixed(1))
+                    : 0,
+                byAgent,
+                recentLeads: recentLeads.map((l) => ({
+                    id: l._id,
+                    fullName: l.fullName,
+                    company: l.company,
+                    status: l.status,
+                    createdAt: l.createdAt,
+                    updatedAt: l.updatedAt,
+                    assignedAgent: l.assignedTo
+                        ? `${l.assignedTo.firstName || ""} ${l.assignedTo.lastName || ""}`.trim()
+                        : "Unassigned",
+                    daysSinceCreation: Math.floor(
+                        (Date.now() - new Date(l.createdAt).getTime()) /
+                            (1000 * 60 * 60 * 24)
+                    ),
+                })),
+            },
+        });
+    } catch (error) {
+        console.error("Error in getLeadsAnalytics:", error);
+        res.status(500).json({ success: false, message: "Error fetching leads analytics", error: error.message });
+    }
+};
+
+/**
+ * GET /api/main-admin-dashboard/recent-activity
+ * Recent orders + recent quotations across the team for the dashboard.
+ * Optionally scoped to a salesAgent.
+ */
+exports.getRecentActivity = async (req, res) => {
+    try {
+        const { fromDate, toDate } = getDateRange(req.query);
+        const dateFilter = { DocDate: { $gte: fromDate, $lte: toDate } };
+        if (req.query.salesAgent && mongoose.Types.ObjectId.isValid(req.query.salesAgent)) {
+            dateFilter.salesAgent = new mongoose.Types.ObjectId(req.query.salesAgent);
+        }
+
+        const [recentOrders, recentQuotations, recentInvoices] = await Promise.all([
+            SalesOrder.find(dateFilter)
+                .populate("salesAgent", "firstName lastName")
+                .select("DocNum DocDate CardCode CardName DocTotal VatSum DocumentStatus salesAgent")
+                .sort({ DocDate: -1 })
+                .limit(10)
+                .lean(),
+            Quotation.find(dateFilter)
+                .populate("salesAgent", "firstName lastName")
+                .select("DocNum DocDate CardCode CardName DocTotal VatSum approvalStatus ConvertedToOrderDocEntry salesAgent")
+                .sort({ DocDate: -1 })
+                .limit(10)
+                .lean(),
+            Invoice.find(dateFilter)
+                .populate("salesAgent", "firstName lastName")
+                .select("DocNum DocDate CardCode CardName DocTotal VatSum paymentStatus salesAgent")
+                .sort({ DocDate: -1 })
+                .limit(10)
+                .lean(),
+        ]);
+
+        const normalizeAgent = (a) =>
+            a ? `${a.firstName || ""} ${a.lastName || ""}`.trim() : "—";
+        const netOf = (d) => (Number(d.DocTotal || 0) - Number(d.VatSum || 0));
+
+        res.status(200).json({
+            success: true,
+            data: {
+                recentOrders: recentOrders.map((o) => ({
+                    docNum: o.DocNum,
+                    docDate: o.DocDate,
+                    cardCode: o.CardCode,
+                    cardName: o.CardName,
+                    netTotal: netOf(o),
+                    status: o.DocumentStatus,
+                    agent: normalizeAgent(o.salesAgent),
+                })),
+                recentQuotations: recentQuotations.map((q) => ({
+                    docNum: q.DocNum,
+                    docDate: q.DocDate,
+                    cardCode: q.CardCode,
+                    cardName: q.CardName,
+                    netTotal: netOf(q),
+                    approvalStatus: q.approvalStatus,
+                    converted: !!q.ConvertedToOrderDocEntry,
+                    convertedToOrderDocEntry: q.ConvertedToOrderDocEntry || null,
+                    agent: normalizeAgent(q.salesAgent),
+                })),
+                recentInvoices: recentInvoices.map((i) => ({
+                    docNum: i.DocNum,
+                    docDate: i.DocDate,
+                    cardCode: i.CardCode,
+                    cardName: i.CardName,
+                    netTotal: netOf(i),
+                    paymentStatus: i.paymentStatus,
+                    agent: normalizeAgent(i.salesAgent),
+                })),
+            },
+        });
+    } catch (error) {
+        console.error("Error in getRecentActivity:", error);
+        res.status(500).json({ success: false, message: "Error fetching recent activity", error: error.message });
     }
 };
