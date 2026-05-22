@@ -60,6 +60,76 @@ function getAgentFilter(query) {
     return { salesAgent: new mongoose.Types.ObjectId(id) };
 }
 
+// A quotation counts as "converted" only when it carries a real linked sales
+// order DocEntry (> 0). The field is a plain Number with no default, so
+// unconverted quotations may hold 0 / null — those must NOT be counted.
+// (Previously `$ne null` alone wrongly counted quotations with a 0 value.)
+const CONVERTED_QUOTATION_EXPR = { $gt: [{ $ifNull: ["$ConvertedToOrderDocEntry", 0] }, 0] };
+
+/**
+ * Resolve the agent-visibility scope for the caller.
+ *
+ *  - admin          -> sees everything (no restriction)
+ *  - sales_manager  -> sees only the agents they manage (User.manager)
+ *
+ * Combined with the optional `?salesAgent=` query param (the dashboard's
+ * per-agent filter). Returns:
+ *   {
+ *     agentIds:  [ObjectId] | null   // null = unrestricted (admin, all agents)
+ *     cardCodes: [String]   | null   // customers' CardCodes for invoice scoping
+ *     forbidden: true                // manager tried to view a non-team agent
+ *   }
+ *
+ * Orders & Quotations carry a `salesAgent` field, so they filter by `agentIds`.
+ * Invoices synced from SAP have NO `salesAgent`, so they are scoped through the
+ * customer instead: invoices whose CardCode belongs to a customer assigned to
+ * one of the in-scope agents (`cardCodes`).
+ */
+async function resolveScope(req) {
+    let teamAgentIds = null; // null = no team restriction (admin)
+    if (req.user && req.user.role === "sales_manager") {
+        teamAgentIds = await User.find({
+            role: "sales_agent",
+            manager: req.user._id,
+        }).distinct("_id");
+    }
+
+    const picked = req.query?.salesAgent;
+    let pickedId = null;
+    if (picked && mongoose.Types.ObjectId.isValid(picked)) {
+        pickedId = new mongoose.Types.ObjectId(picked);
+    }
+
+    let agentIds;
+    if (pickedId) {
+        if (teamAgentIds && !teamAgentIds.some((id) => id.equals(pickedId))) {
+            return { agentIds: [], cardCodes: [], forbidden: true };
+        }
+        agentIds = [pickedId];
+    } else {
+        agentIds = teamAgentIds; // null for admin, team list for manager
+    }
+
+    let cardCodes = null;
+    if (agentIds) {
+        cardCodes = (
+            await Customer.find({ assignedTo: { $in: agentIds } }).distinct("CardCode")
+        ).filter(Boolean);
+    }
+
+    return { agentIds, cardCodes, forbidden: false };
+}
+
+// Match fragment for collections that have a `salesAgent` field (orders, quotations).
+function agentMatch(scope) {
+    return scope.agentIds ? { salesAgent: { $in: scope.agentIds } } : {};
+}
+
+// Match fragment for invoices (no salesAgent) — scoped via customer CardCode.
+function invoiceAgentMatch(scope) {
+    return scope.cardCodes ? { CardCode: { $in: scope.cardCodes } } : {};
+}
+
 /**
  * GET /api/dashboard/summary
  * Top-level KPI cards with period comparison
@@ -68,12 +138,18 @@ exports.getSummary = async (req, res) => {
     try {
         const { fromDate, toDate } = getDateRange(req.query);
         const { prevFrom, prevTo } = getPreviousPeriod(fromDate, toDate);
-        const agentFilter = getAgentFilter(req.query);
+        const scope = await resolveScope(req);
+        if (scope.forbidden) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
 
         const dateFilter = { $gte: fromDate, $lte: toDate };
         const prevDateFilter = { $gte: prevFrom, $lte: prevTo };
-        const baseMatch = { DocDate: dateFilter, ...agentFilter };
-        const basePrevMatch = { DocDate: prevDateFilter, ...agentFilter };
+        // Orders & quotations filter on salesAgent; invoices on customer CardCode.
+        const baseMatch = { DocDate: dateFilter, ...agentMatch(scope) };
+        const basePrevMatch = { DocDate: prevDateFilter, ...agentMatch(scope) };
+        const invMatch = { DocDate: dateFilter, ...invoiceAgentMatch(scope) };
+        const invPrevMatch = { DocDate: prevDateFilter, ...invoiceAgentMatch(scope) };
 
         // Current period aggregations (run in parallel)
         // NET = DocTotal - VatSum (turnover without VAT).
@@ -142,7 +218,7 @@ exports.getSummary = async (req, res) => {
             ]),
             // Invoices - current (net values)
             Invoice.aggregate([
-                { $match: baseMatch },
+                { $match: invMatch },
                 {
                     $addFields: {
                         netTotal: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] },
@@ -167,7 +243,7 @@ exports.getSummary = async (req, res) => {
             ]),
             // Invoices - previous (net values)
             Invoice.aggregate([
-                { $match: basePrevMatch },
+                { $match: invPrevMatch },
                 {
                     $group: {
                         _id: null,
@@ -205,13 +281,7 @@ exports.getSummary = async (req, res) => {
                             },
                         },
                         convertedCount: {
-                            $sum: {
-                                $cond: [
-                                    { $ne: ["$ConvertedToOrderDocEntry", null] },
-                                    1,
-                                    0,
-                                ],
-                            },
+                            $sum: { $cond: [CONVERTED_QUOTATION_EXPR, 1, 0] },
                         },
                     },
                 },
@@ -229,8 +299,8 @@ exports.getSummary = async (req, res) => {
             ]),
             // Active customers = unique CardCodes that were *invoiced* this period
             // (per business: invoice-based, not order-based). Honors agent filter.
-            Invoice.distinct("CardCode", baseMatch),
-            Invoice.distinct("CardCode", basePrevMatch),
+            Invoice.distinct("CardCode", invMatch),
+            Invoice.distinct("CardCode", invPrevMatch),
         ]);
 
         const cur = {
@@ -295,12 +365,17 @@ exports.getSalesChart = async (req, res) => {
     try {
         const { fromDate, toDate } = getDateRange(req.query);
 
-        const agentFilter = getAgentFilter(req.query);
-        const match = { DocDate: { $gte: fromDate, $lte: toDate }, ...agentFilter };
+        const scope = await resolveScope(req);
+        if (scope.forbidden) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+        const dateMatch = { DocDate: { $gte: fromDate, $lte: toDate } };
+        const orderMatch = { ...dateMatch, ...agentMatch(scope) };
+        const invMatch = { ...dateMatch, ...invoiceAgentMatch(scope) };
 
         const [ordersByDay, invoicesByDay] = await Promise.all([
             SalesOrder.aggregate([
-                { $match: match },
+                { $match: orderMatch },
                 {
                     $group: {
                         _id: { $dateToString: { format: "%Y-%m-%d", date: "$DocDate", timezone: "UTC" } },
@@ -311,7 +386,7 @@ exports.getSalesChart = async (req, res) => {
                 { $sort: { _id: 1 } },
             ]),
             Invoice.aggregate([
-                { $match: match },
+                { $match: invMatch },
                 {
                     $group: {
                         _id: { $dateToString: { format: "%Y-%m-%d", date: "$DocDate", timezone: "UTC" } },
@@ -363,10 +438,13 @@ exports.getTopCustomers = async (req, res) => {
     try {
         const { fromDate, toDate } = getDateRange(req.query);
         const limit = parseInt(req.query.limit) || 10;
-        const agentFilter = getAgentFilter(req.query);
+        const scope = await resolveScope(req);
+        if (scope.forbidden) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
 
         const topCustomers = await Invoice.aggregate([
-            { $match: { DocDate: { $gte: fromDate, $lte: toDate }, ...agentFilter } },
+            { $match: { DocDate: { $gte: fromDate, $lte: toDate }, ...invoiceAgentMatch(scope) } },
             {
                 $addFields: {
                     netTotal: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] },
@@ -418,14 +496,19 @@ exports.getTopItems = async (req, res) => {
         const { fromDate, toDate } = getDateRange(req.query);
         const limit = parseInt(req.query.limit) || 15;
         const source = req.query.source || "invoices"; // default to finalised invoices
-        const agentFilter = getAgentFilter(req.query);
+        const scope = await resolveScope(req);
+        if (scope.forbidden) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
 
         const Model = source === "orders" ? SalesOrder : Invoice;
+        // Orders carry salesAgent; invoices are scoped via customer CardCode.
+        const scopedMatch = source === "orders" ? agentMatch(scope) : invoiceAgentMatch(scope);
 
         // LineTotal in SAP B1 is already NET (before tax) for a row, so we use it directly.
         // For safety against schemas that lack LineTotal, fall back to Quantity*Price.
         const topItems = await Model.aggregate([
-            { $match: { DocDate: { $gte: fromDate, $lte: toDate }, ...agentFilter } },
+            { $match: { DocDate: { $gte: fromDate, $lte: toDate }, ...scopedMatch } },
             { $unwind: "$DocumentLines" },
             {
                 $addFields: {
@@ -483,21 +566,41 @@ exports.getTeamPerformance = async (req, res) => {
     try {
         const { fromDate, toDate } = getDateRange(req.query);
 
-        const agents = await User.find({
-            role: "sales_agent",
-            deactivated: false,
-        })
+        const scope = await resolveScope(req);
+        if (scope.forbidden) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+
+        // For a sales manager, restrict the agent grid to their own team.
+        const agentQuery = { role: "sales_agent", deactivated: false };
+        if (scope.agentIds) agentQuery._id = { $in: scope.agentIds };
+        const agents = await User.find(agentQuery)
             .select("firstName lastName email role target targetHistory lastLogin manager")
             .lean();
 
         const agentIds = agents.map((a) => a._id);
 
-        // Invoice-based revenue per agent (NET = DocTotal - VatSum)
-        const agentInvoices = await Invoice.aggregate([
+        // SAP invoices have no salesAgent — attribute invoice revenue to the
+        // agent the customer is assigned to (Customer.assignedTo).
+        const customers = await Customer.find({ assignedTo: { $in: agentIds } })
+            .select("CardCode assignedTo")
+            .lean();
+        const cardCodeToAgent = {};
+        const scopedCardCodes = [];
+        customers.forEach((c) => {
+            if (c.CardCode && c.assignedTo) {
+                cardCodeToAgent[c.CardCode] = c.assignedTo.toString();
+                scopedCardCodes.push(c.CardCode);
+            }
+        });
+
+        // Invoice revenue grouped by customer (NET = DocTotal - VatSum), then
+        // rolled up per agent via the CardCode -> agent map above.
+        const invoicesByCard = await Invoice.aggregate([
             {
                 $match: {
                     DocDate: { $gte: fromDate, $lte: toDate },
-                    salesAgent: { $in: agentIds },
+                    CardCode: { $in: scopedCardCodes },
                 },
             },
             {
@@ -507,14 +610,28 @@ exports.getTeamPerformance = async (req, res) => {
             },
             {
                 $group: {
-                    _id: "$salesAgent",
+                    _id: "$CardCode",
                     invoiceCount: { $sum: 1 },
                     totalRevenue: { $sum: "$netTotal" },
-                    avgOrderValue: { $avg: "$netTotal" },
-                    uniqueCustomers: { $addToSet: "$CardCode" },
                 },
             },
         ]);
+
+        const invoiceMap = {};
+        invoicesByCard.forEach((row) => {
+            const agentId = cardCodeToAgent[row._id];
+            if (!agentId) return;
+            if (!invoiceMap[agentId]) {
+                invoiceMap[agentId] = { invoiceCount: 0, totalRevenue: 0, uniqueCustomers: new Set() };
+            }
+            invoiceMap[agentId].invoiceCount += row.invoiceCount;
+            invoiceMap[agentId].totalRevenue += row.totalRevenue;
+            invoiceMap[agentId].uniqueCustomers.add(row._id);
+        });
+        Object.values(invoiceMap).forEach((m) => {
+            m.avgOrderValue = m.invoiceCount > 0 ? m.totalRevenue / m.invoiceCount : 0;
+            m.uniqueCustomers = [...m.uniqueCustomers];
+        });
 
         // Quotations per agent — count total, converted, and open (not converted yet)
         const agentQuotations = await Quotation.aggregate([
@@ -530,16 +647,14 @@ exports.getTeamPerformance = async (req, res) => {
                     quotationCount: { $sum: 1 },
                     quotationValue: { $sum: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] } },
                     convertedCount: {
-                        $sum: {
-                            $cond: [{ $ne: ["$ConvertedToOrderDocEntry", null] }, 1, 0],
-                        },
+                        $sum: { $cond: [CONVERTED_QUOTATION_EXPR, 1, 0] },
                     },
                     openUnconvertedCount: {
                         $sum: {
                             $cond: [
                                 {
                                     $and: [
-                                        { $eq: ["$ConvertedToOrderDocEntry", null] },
+                                        { $not: CONVERTED_QUOTATION_EXPR },
                                         { $not: { $in: ["$approvalStatus", ["rejected"]] } },
                                     ],
                                 },
@@ -553,8 +668,6 @@ exports.getTeamPerformance = async (req, res) => {
         ]);
 
         // Build lookup maps
-        const invoiceMap = {};
-        agentInvoices.forEach((a) => { invoiceMap[a._id.toString()] = a; });
         const quotationMap = {};
         agentQuotations.forEach((a) => { quotationMap[a._id.toString()] = a; });
 
@@ -645,6 +758,11 @@ exports.getInvoices = async (req, res) => {
         const limit = parseInt(req.query.limit) || 20;
         const skip = (page - 1) * limit;
 
+        const scope = await resolveScope(req);
+        if (scope.forbidden) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+
         let query = { DocDate: { $gte: fromDate, $lte: toDate } };
 
         if (req.query.cardCode) {
@@ -660,6 +778,10 @@ exports.getInvoices = async (req, res) => {
             const s = { $regex: req.query.search, $options: "i" };
             query.$or = [{ CardCode: s }, { CardName: s }, { DocNum: !isNaN(req.query.search) ? parseInt(req.query.search) : -1 }];
         }
+
+        // Restrict to in-scope customers (selected agent / manager's team).
+        const scopeMatch = invoiceAgentMatch(scope);
+        if (Object.keys(scopeMatch).length) query = { $and: [query, scopeMatch] };
 
         const [invoices, total] = await Promise.all([
             Invoice.find(query)
@@ -718,11 +840,15 @@ exports.getOrders = async (req, res) => {
         const limit = parseInt(req.query.limit) || 20;
         const skip = (page - 1) * limit;
 
+        const scope = await resolveScope(req);
+        if (scope.forbidden) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+
         let query = { DocDate: { $gte: fromDate, $lte: toDate } };
 
         if (req.query.status) query.DocumentStatus = req.query.status;
         if (req.query.cardCode) query.CardCode = { $regex: req.query.cardCode, $options: "i" };
-        if (req.query.salesAgent) query.salesAgent = req.query.salesAgent;
         if (req.query.syncStatus === "synced") query.SyncedWithSAP = true;
         if (req.query.syncStatus === "unsynced") query.SyncedWithSAP = false;
         if (req.query.search) {
@@ -732,6 +858,10 @@ exports.getOrders = async (req, res) => {
                 query.$or.push({ DocNum: parseInt(req.query.search) });
             }
         }
+
+        // Restrict to the selected agent / manager's team (orders carry salesAgent).
+        const scopeMatch = agentMatch(scope);
+        if (Object.keys(scopeMatch).length) query = { $and: [query, scopeMatch] };
 
         const [orders, total] = await Promise.all([
             SalesOrder.find(query)
@@ -774,15 +904,23 @@ exports.getQuotations = async (req, res) => {
         const limit = parseInt(req.query.limit) || 20;
         const skip = (page - 1) * limit;
 
+        const scope = await resolveScope(req);
+        if (scope.forbidden) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+
         let query = { DocDate: { $gte: fromDate, $lte: toDate } };
 
         if (req.query.approvalStatus) query.approvalStatus = req.query.approvalStatus;
         if (req.query.cardCode) query.CardCode = { $regex: req.query.cardCode, $options: "i" };
-        if (req.query.salesAgent) query.salesAgent = req.query.salesAgent;
         if (req.query.search) {
             const s = { $regex: req.query.search, $options: "i" };
             query.$or = [{ CardCode: s }, { CardName: s }];
         }
+
+        // Restrict to the selected agent / manager's team.
+        const scopeMatch = agentMatch(scope);
+        if (Object.keys(scopeMatch).length) query = { $and: [query, scopeMatch] };
 
         const [quotations, total] = await Promise.all([
             Quotation.find(query)
@@ -994,10 +1132,12 @@ exports.getRevenueBreakdown = async (req, res) => {
  */
 exports.getActiveAgents = async (req, res) => {
     try {
-        const agents = await User.find({
-            role: "sales_agent",
-            deactivated: false,
-        })
+        // A sales manager only sees their own team in the agent-filter dropdown.
+        const agentQuery = { role: "sales_agent", deactivated: false };
+        if (req.user && req.user.role === "sales_manager") {
+            agentQuery.manager = req.user._id;
+        }
+        const agents = await User.find(agentQuery)
             .select("firstName lastName email")
             .sort({ firstName: 1, lastName: 1 })
             .lean();
@@ -1022,11 +1162,17 @@ exports.getActiveAgents = async (req, res) => {
  */
 exports.getTeamLogins = async (req, res) => {
     try {
-        // Active sales agents only (and managers) — admin/logistics excluded
-        const users = await User.find({
+        // Active sales agents only (and managers) — admin/logistics excluded.
+        // A sales manager sees only their own team.
+        const userQuery = {
             deactivated: false,
             role: { $in: ["sales_agent", "sales_manager"] },
-        })
+        };
+        if (req.user && req.user.role === "sales_manager") {
+            userQuery.role = "sales_agent";
+            userQuery.manager = req.user._id;
+        }
+        const users = await User.find(userQuery)
             .select("firstName lastName email role lastLogin createdAt")
             .sort({ lastLogin: -1 })
             .lean();
@@ -1183,32 +1329,36 @@ exports.getCustomerAnalytics = async (req, res) => {
     try {
         const { fromDate, toDate } = getDateRange(req.query);
         const dateFilter = { $gte: fromDate, $lte: toDate };
-        const agentFilter = getAgentFilter(req.query);
-        // When filtering to a single agent:
-        //   - totalCustomers becomes "customers in this agent's portfolio"
-        //     (Customer.assignedTo = agent)
-        //   - newAccounts is scoped to customers assigned to that agent
-        //   - invoiced/quoted/ordered card codes are scoped to that agent's docs
-        //   - notContacted is the agent's portfolio minus their contacted set
-        const customerScopedFilter = agentFilter.salesAgent
-            ? { assignedTo: agentFilter.salesAgent }
+        const scope = await resolveScope(req);
+        if (scope.forbidden) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+        // When scoped to an agent (or a manager's team):
+        //   - totalCustomers becomes "customers in that portfolio" (Customer.assignedTo)
+        //   - newAccounts is scoped to customers assigned to those agents
+        //   - invoiced card codes are scoped via the customer (SAP invoices have no agent)
+        //   - quoted/ordered card codes are scoped via the doc's salesAgent
+        const customerScopedFilter = scope.agentIds
+            ? { assignedTo: { $in: scope.agentIds } }
             : {};
 
         const [
             totalCustomers,
+            sapCustomers,
             newAccountsList,
             invoicedCardCodes,
             quotedCardCodes,
             orderedCardCodes,
         ] = await Promise.all([
             Customer.countDocuments(customerScopedFilter),
+            Customer.countDocuments({ ...customerScopedFilter, customerType: "sap" }),
             Customer.find({ createdAt: dateFilter, ...customerScopedFilter })
                 .select("CardCode CardName createdAt assignedTo phoneNumber Email customerType status")
                 .populate("assignedTo", "firstName lastName")
                 .lean(),
-            Invoice.distinct("CardCode", { DocDate: dateFilter, ...agentFilter }),
-            Quotation.distinct("CardCode", { DocDate: dateFilter, ...agentFilter }),
-            SalesOrder.distinct("CardCode", { DocDate: dateFilter, ...agentFilter }),
+            Invoice.distinct("CardCode", { DocDate: dateFilter, ...invoiceAgentMatch(scope) }),
+            Quotation.distinct("CardCode", { DocDate: dateFilter, ...agentMatch(scope) }),
+            SalesOrder.distinct("CardCode", { DocDate: dateFilter, ...agentMatch(scope) }),
         ]);
 
         const invoicedSet = new Set(invoicedCardCodes.filter(Boolean));
@@ -1249,6 +1399,7 @@ exports.getCustomerAnalytics = async (req, res) => {
             data: {
                 period: { fromDate, toDate },
                 totalCustomers,
+                sapCustomers,
                 newAccountsInPeriod: newAccounts.length,
                 newAccountsOrdered,
                 newAccountsConversionRate: newAccounts.length > 0
@@ -1286,12 +1437,25 @@ exports.getLeadsAnalytics = async (req, res) => {
         const { fromDate, toDate } = getDateRange(req.query);
         const dateFilter = { $gte: fromDate, $lte: toDate };
 
+        const scope = await resolveScope(req);
+        if (scope.forbidden) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+
         const filter = { createdAt: dateFilter };
-        // Accept both `assignedTo` (the underlying Lead field) and `salesAgent`
-        // (the dashboard's global filter key) — they mean the same person here.
-        const agentRaw = req.query.assignedTo || req.query.salesAgent;
+        // Default scope: admin = all, sales manager = their team, or the agent
+        // picked via the dashboard's `salesAgent` filter (handled by resolveScope).
+        if (scope.agentIds) {
+            filter.assignedTo = { $in: scope.agentIds };
+        }
+        // An explicit `assignedTo` param narrows further (validated against scope).
+        const agentRaw = req.query.assignedTo;
         if (agentRaw && mongoose.Types.ObjectId.isValid(agentRaw)) {
-            filter.assignedTo = new mongoose.Types.ObjectId(agentRaw);
+            const aId = new mongoose.Types.ObjectId(agentRaw);
+            if (scope.agentIds && !scope.agentIds.some((id) => id.equals(aId))) {
+                return res.status(403).json({ success: false, message: "Access denied" });
+            }
+            filter.assignedTo = aId;
         }
         if (req.query.status) {
             filter.status = req.query.status;
@@ -1430,25 +1594,29 @@ exports.getLeadsAnalytics = async (req, res) => {
 exports.getRecentActivity = async (req, res) => {
     try {
         const { fromDate, toDate } = getDateRange(req.query);
-        const dateFilter = { DocDate: { $gte: fromDate, $lte: toDate } };
-        if (req.query.salesAgent && mongoose.Types.ObjectId.isValid(req.query.salesAgent)) {
-            dateFilter.salesAgent = new mongoose.Types.ObjectId(req.query.salesAgent);
+        const scope = await resolveScope(req);
+        if (scope.forbidden) {
+            return res.status(403).json({ success: false, message: "Access denied" });
         }
+        const dateFilter = { DocDate: { $gte: fromDate, $lte: toDate } };
+        // Orders & quotations carry salesAgent; invoices are scoped via CardCode.
+        const docFilter = { ...dateFilter, ...agentMatch(scope) };
+        const invFilter = { ...dateFilter, ...invoiceAgentMatch(scope) };
 
         const [recentOrders, recentQuotations, recentInvoices] = await Promise.all([
-            SalesOrder.find(dateFilter)
+            SalesOrder.find(docFilter)
                 .populate("salesAgent", "firstName lastName")
                 .select("DocNum DocDate CardCode CardName DocTotal VatSum DocumentStatus salesAgent")
                 .sort({ DocDate: -1 })
                 .limit(10)
                 .lean(),
-            Quotation.find(dateFilter)
+            Quotation.find(docFilter)
                 .populate("salesAgent", "firstName lastName")
                 .select("DocNum DocDate CardCode CardName DocTotal VatSum approvalStatus ConvertedToOrderDocEntry salesAgent")
                 .sort({ DocDate: -1 })
                 .limit(10)
                 .lean(),
-            Invoice.find(dateFilter)
+            Invoice.find(invFilter)
                 .populate("salesAgent", "firstName lastName")
                 .select("DocNum DocDate CardCode CardName DocTotal VatSum paymentStatus salesAgent")
                 .sort({ DocDate: -1 })
@@ -1479,7 +1647,7 @@ exports.getRecentActivity = async (req, res) => {
                     cardName: q.CardName,
                     netTotal: netOf(q),
                     approvalStatus: q.approvalStatus,
-                    converted: !!q.ConvertedToOrderDocEntry,
+                    converted: Number(q.ConvertedToOrderDocEntry) > 0,
                     convertedToOrderDocEntry: q.ConvertedToOrderDocEntry || null,
                     agent: normalizeAgent(q.salesAgent),
                 })),

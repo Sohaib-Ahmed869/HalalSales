@@ -4,9 +4,11 @@ const router = express.Router();
 const dashboardController = require("../controllers/mainAdminDashboard.controller");
 const { auth, checkRole } = require("../middleware/auth");
 
-// All dashboard routes require auth + admin role
+// All dashboard routes require auth. Admins see everything; sales managers
+// see the same dashboard scoped to their own team (scoping enforced per-endpoint
+// in the controller via resolveScope()).
 router.use(auth);
-router.use(checkRole(["admin"]));
+router.use(checkRole(["admin", "sales_manager"]));
 
 // ─── KPI Summary ────────────────────────────────────────────
 // GET /api/dashboard/summary?fromDate=2026-03-10&toDate=2026-03-18
