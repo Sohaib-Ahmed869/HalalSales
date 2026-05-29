@@ -36,7 +36,7 @@ class WhatsappOutboundAgent extends BaseAgent {
         //   3. whatsappInboundAgent flushes the queue on the vendor's first reply.
         const templateName = process.env.WHATSAPP_RFQ_TEMPLATE
             || process.env.WHATSAPP_CALL_PERMISSION_TEMPLATE
-            || 'hello_world';
+            || 'rfq_intro';
         const templateLang = process.env.WHATSAPP_RFQ_TEMPLATE_LANG || 'en_US';
 
         for (const vendor of vendors) {

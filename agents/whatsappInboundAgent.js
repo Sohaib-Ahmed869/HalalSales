@@ -153,6 +153,40 @@ class WhatsappInboundAgent extends BaseAgent {
         super('WA-Inbound');
         // Dedup: messages processed in-memory this run
         this._processedMessageIds = new Set();
+        // Per-conversation serialization. Inbound webhooks are fire-and-forget
+        // (setImmediate), so a vendor sending a burst ("...?" then "are you
+        // there") would otherwise spawn concurrent handlers that each load the
+        // same RFQ doc, run their own LLM loop, and clobber each other's
+        // rfq.save() (last-write-wins on the whatsappHistory array). We chain
+        // handling per phone number so messages are processed strictly in order.
+        this._conversationQueues = new Map();
+    }
+
+    /**
+     * Public entry point. Serializes processing per conversation so concurrent
+     * inbound webhooks for the same vendor can't race on the shared RFQ doc.
+     */
+    async handleIncomingMessage(params) {
+        const key = String(params?.conversationId || '').replace(/\D/g, '') || 'unknown';
+        const prev = this._conversationQueues.get(key) || Promise.resolve();
+
+        // Chain the actual work after whatever is already queued for this phone.
+        const result = prev
+            .catch(() => {}) // a prior failure must not break the chain
+            .then(() => this._processIncomingMessage(params));
+
+        // The stored tail swallows rejections so the next message still runs.
+        const tail = result.catch(() => {});
+        this._conversationQueues.set(key, tail);
+
+        // Drop the map entry once the chain drains (no newer message queued).
+        tail.then(() => {
+            if (this._conversationQueues.get(key) === tail) {
+                this._conversationQueues.delete(key);
+            }
+        });
+
+        return result;
     }
 
     /**
@@ -164,7 +198,7 @@ class WhatsappInboundAgent extends BaseAgent {
      * @param {Object} params.incomingMessage - the WhatsAppMessage DB doc (lean / plain)
      * @param {Object} params.extraText - optional already-extracted text from media
      */
-    async handleIncomingMessage({ conversationId, incomingMessage, extraText = '' }) {
+    async _processIncomingMessage({ conversationId, incomingMessage, extraText = '' }) {
         if (!incomingMessage?.messageId) return { handled: false, reason: 'missing_messageId' };
         if (this._processedMessageIds.has(incomingMessage.messageId)) {
             return { handled: false, reason: 'already_processed_in_session' };
@@ -176,12 +210,20 @@ class WhatsappInboundAgent extends BaseAgent {
         const digits = conversationId.replace(/\D/g, '');
         const phoneVariants = [conversationId, '+' + digits, digits];
 
+        // IMPORTANT: keep this lookup forgiving. The conversation is identified
+        // by the vendor's phone number, NOT by transient status fields. Earlier
+        // versions gated on rfq.status in ['sent','in_progress'] and vendor
+        // status in ['sent','opened','responded']; once the agent marked a
+        // single-vendor RFQ 'completed' (or a vendor 'declined'/'responded'
+        // dropped out of the set) the lookup stopped matching and the agent went
+        // permanently silent mid-conversation. We now match any live RFQ for the
+        // phone and only exclude clearly terminal states.
         const rfq = await RFQ.findOne({
             status: { $in: ['sent', 'in_progress'] },
             'vendorsContacted': {
                 $elemMatch: {
                     phone: { $in: phoneVariants },
-                    status: { $in: ['sent', 'opened', 'responded'] },
+                    status: { $ne: 'declined' },
                 },
             },
         }).sort({ dateIssued: -1 });
@@ -393,12 +435,13 @@ ${recentHistory || '(no prior messages)'}
 ===== HANDLING BY INTENT =====
 After calling classify_message, handle based on intent:
 
-- greeting / acknowledgement → Reply warmly and briefly. Nudge them for the quote if we're still waiting. e.g. "Hi! 👋 Looking forward to your numbers whenever they're ready."
+- greeting / acknowledgement → Reply warmly and briefly. Nudge them for the quote if we're still waiting. e.g. "Hi! 👋 Looking forward to your numbers whenever they're ready." For update_rfq_vendor use status='opened' (NOT 'responded' — they haven't quoted yet).
 
 - question →
    * If it's about the RFQ (specs, quantities, delivery, terms) → answer clearly from the RFQ details above, keep it short.
    * If it's about us ("who are you?", "where are you based?") → answer from the company context, one sentence.
    * Never make up specifics you don't have.
+   * For update_rfq_vendor use status='opened' (NOT 'responded' — answering their question is not a quotation).
 
 - quotation / partial_quote → MUST do this:
    1. Call extract_quotation with the parsed prices. Be careful: "per kg" / "each" / "/unit" = unitPrice. "total" / "lot" = totalPrice. Never fill both unless both are explicitly given.
@@ -416,7 +459,9 @@ After calling classify_message, handle based on intent:
 
 - out_of_office → Note it in update_rfq_vendor, do NOT send a reply.
 
-- unclear → Ask a short, friendly clarifying question. ONE message.
+- unclear → Ask a short, friendly clarifying question. ONE message. For update_rfq_vendor use status='opened'.
+
+IMPORTANT about status: only use status='responded' when the vendor has actually sent a price/quotation (intent quotation or partial_quote) or you recorded a real negotiation decision. For greetings, questions, small talk and acknowledgements use status='opened'. Use 'declined' ONLY when they explicitly refuse to quote. Picking 'responded'/'declined' too early can close the conversation prematurely.
 
 ===== NEGOTIATION STYLE BY ROUND =====
 Round 0 (first quote received):
@@ -695,14 +740,17 @@ Process this message now.`;
             },
 
             update_rfq_vendor: async (input) => {
-                vendor.status = input.status;
+                if (input.status) vendor.status = input.status;
                 if (input.notes) vendor.notes = (vendor.notes || '') + ' | ' + input.notes;
                 if (input.negotiationStatus) vendor.negotiationStatus = input.negotiationStatus;
 
-                const allResponded = rfq.vendorsContacted.every(
-                    v => ['responded', 'declined'].includes(v.status)
-                );
-                rfq.status = allResponded ? 'completed' : 'in_progress';
+                // Keep the RFQ live while a conversation is ongoing. Do NOT
+                // auto-flip it to 'completed' just because vendors are marked
+                // 'responded'/'declined' — "responded" only means they sent
+                // something, not that a deal is done, and a 'completed' RFQ drops
+                // out of the inbound lookup and permanently ghosts the vendor.
+                // Completion happens only when an admin selects a winning vendor.
+                if (rfq.status === 'sent') rfq.status = 'in_progress';
 
                 rfq.markModified('vendorsContacted');
                 await rfq.save();
