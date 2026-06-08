@@ -3,9 +3,25 @@
 
 const NewSupplier = require("../models/NewSupplier");
 const RFQ = require("../models/RFQ");
+const discoveryAgent = require("../agents/discoveryAgent");
 const multer = require("multer");
 const XLSX = require("xlsx");
 const { v4: uuidv4 } = require("uuid");
+
+// A supplier "needs" a contact lookup when it has no email yet.
+const needsContact = (s) => !s?.email;
+
+// Fire-and-forget AI contact discovery for suppliers missing an email.
+// Never blocks the request — errors are logged inside the agent.
+const triggerAutoDiscovery = (suppliers) => {
+    const targets = (suppliers || []).filter(needsContact);
+    if (!targets.length) return;
+    setImmediate(() => {
+        discoveryAgent
+            .enrichNewSuppliers(targets)
+            .catch((err) => console.error("[NewSupplier] Auto-discovery failed:", err.message));
+    });
+};
 
 // Multer for in-memory Excel upload (keeps things simple; no disk IO)
 const upload = multer({
@@ -207,6 +223,9 @@ const newSupplierController = {
                 }
             }
 
+            // Auto-find contacts for any supplier uploaded without an email (background)
+            triggerAutoDiscovery(savedSuppliers);
+
             return res.status(200).json({
                 success: true,
                 batchId,
@@ -232,9 +251,56 @@ const newSupplierController = {
             body.productCategories = parseProductCategories(body.productCategories);
             body.uploadedBy = req.user?.id || null;
             const supplier = await NewSupplier.create(body);
+
+            // Auto-find a contact if none was provided (background)
+            triggerAutoDiscovery([supplier]);
+
             return res.status(201).json({ success: true, data: supplier });
         } catch (error) {
             return res.status(500).json({ error: "Error creating supplier", details: error.message });
+        }
+    },
+
+    /**
+     * POST /api/new-suppliers/discover-contacts
+     * Manually trigger AI contact discovery for suppliers missing an email.
+     * Body (optional): { ids: [supplierId, ...] }  — if omitted, targets ALL active
+     * suppliers without an email.
+     * Runs in the background and returns immediately with the number queued.
+     */
+    discoverContactsBulk: async (req, res) => {
+        try {
+            const ids = Array.isArray(req.body?.ids) ? req.body.ids : null;
+
+            const filter = { isActive: true, $or: [{ email: { $exists: false } }, { email: "" }, { email: null }] };
+            if (ids && ids.length) filter._id = { $in: ids };
+
+            const targets = await NewSupplier.find(filter)
+                .select("_id supplierName companyName country productCategories")
+                .lean();
+
+            if (!targets.length) {
+                return res.status(200).json({
+                    success: true,
+                    queued: 0,
+                    message: "No suppliers are missing a contact email.",
+                });
+            }
+
+            // Background — discovery is rate-limited and can take a while for big lists.
+            setImmediate(() => {
+                discoveryAgent
+                    .enrichNewSuppliers(targets)
+                    .catch((err) => console.error("[NewSupplier] Bulk discovery failed:", err.message));
+            });
+
+            return res.status(202).json({
+                success: true,
+                queued: targets.length,
+                message: `Finding contacts for ${targets.length} supplier(s) in the background. Refresh to see results.`,
+            });
+        } catch (error) {
+            return res.status(500).json({ error: "Error starting contact discovery", details: error.message });
         }
     },
 

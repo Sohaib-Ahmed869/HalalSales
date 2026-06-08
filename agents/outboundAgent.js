@@ -139,7 +139,7 @@ class OutboundAgent extends BaseAgent {
                     }
 
                     // Update vendor status in RFQ
-                    await this._updateVendorStatus(rfq, plan.vendor, 'sent', result.messageId, sendMethod);
+                    await this._updateVendorStatus(rfq, plan.vendor, 'sent', result.messageId, sendMethod, result.sentEmail);
 
                     results.push({
                         vendorCode: plan.vendor.CardCode || plan.vendor._id,
@@ -356,7 +356,16 @@ Rules:
                 : [],
         });
 
-        return result;
+        // Surface the sent content so it can be logged into the email thread.
+        return {
+            ...result,
+            sentEmail: {
+                subject: emailContent.subject,
+                body: emailContent.bodyText,
+                htmlBody: emailContent.bodyHtml,
+                attachments: pdfBuffer ? [`RFQ-${rfq.rfqNumber}.pdf`] : [],
+            },
+        };
     }
 
     /**
@@ -370,9 +379,9 @@ Rules:
     /**
      * Update vendor status in RFQ document
      */
-    async _updateVendorStatus(rfq, vendor, status, messageId, method) {
+    async _updateVendorStatus(rfq, vendor, status, messageId, method, sentEmail = null) {
         const vendorCode = vendor.CardCode;
-        const vendorContact = rfq.vendorsContacted.find(v => v.vendorCode === vendorCode);
+        let vendorContact = rfq.vendorsContacted.find(v => v.vendorCode === vendorCode);
 
         if (vendorContact) {
             vendorContact.status = status;
@@ -389,7 +398,7 @@ Rules:
             else if (vendor._isPDA) vendorSource = 'PDA_SCRAPER';
             else if (vendor.customFields?.isEmailVendor) vendorSource = 'EMAIL';
 
-            rfq.vendorsContacted.push({
+            vendorContact = {
                 vendorCode,
                 vendorName: vendor.CardName,
                 email: vendor.email,
@@ -397,6 +406,23 @@ Rules:
                 status,
                 sentDate: new Date(),
                 vendorSource,
+            };
+            rfq.vendorsContacted.push(vendorContact);
+            // Re-fetch the pushed subdoc so we can append history to it
+            vendorContact = rfq.vendorsContacted[rfq.vendorsContacted.length - 1];
+        }
+
+        // Log the outgoing email into the thread
+        if (method !== 'whatsapp' && sentEmail) {
+            if (!Array.isArray(vendorContact.emailHistory)) vendorContact.emailHistory = [];
+            vendorContact.emailHistory.push({
+                direction: 'outgoing',
+                subject: sentEmail.subject || `RFQ ${rfq.rfqNumber}`,
+                body: sentEmail.body || '',
+                htmlBody: sentEmail.htmlBody || '',
+                attachments: sentEmail.attachments || [],
+                timestamp: new Date(),
+                messageId: messageId || null,
             });
         }
 

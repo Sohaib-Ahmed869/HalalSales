@@ -55,6 +55,19 @@ const NewSupplierSchema = new Schema(
             type: String,
             trim: true,
         },
+        // AI contact discovery — auto-run when a supplier is added without an email
+        contactDiscovery: {
+            // pending = queued/running, done = contact found & saved,
+            // not_found = ran but no usable contact, failed = error
+            status: {
+                type: String,
+                enum: ["pending", "done", "not_found", "failed"],
+            },
+            confidence: { type: String }, // high | medium | low
+            source: { type: String },
+            contactPerson: { type: String },
+            discoveredAt: { type: Date },
+        },
         // Source tracking
         uploadBatchId: {
             type: String,

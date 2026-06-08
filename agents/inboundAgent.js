@@ -321,16 +321,33 @@ class InboundAgent extends BaseAgent {
             return;
         }
 
-        // Store raw email content (append to history, don't overwrite)
+        // Store raw email content. rawEmailContent keeps the LATEST inbound (used for
+        // quotation parsing); emailHistory keeps the FULL thread (both directions).
         const emailBody = email.body?.trim() || email.htmlBody?.trim() || 'No content';
+        const attachmentNames = (email.attachments || []).map(a => a.filename);
         vendor.rawEmailContent = {
             subject: email.subject || 'No subject',
             body: emailBody,
             htmlBody: email.htmlBody?.trim() || '',
             pdfContent: pdfContent || '',
             receivedDate: email.date,
-            attachments: (email.attachments || []).map(a => a.filename),
+            attachments: attachmentNames,
         };
+        // Append to the email thread (skip if we've already logged this messageId)
+        if (!Array.isArray(vendor.emailHistory)) vendor.emailHistory = [];
+        const alreadyLogged = email.messageId && vendor.emailHistory.some(e => e.messageId === email.messageId);
+        if (!alreadyLogged) {
+            vendor.emailHistory.push({
+                direction: 'incoming',
+                subject: email.subject || 'No subject',
+                body: emailBody,
+                htmlBody: email.htmlBody?.trim() || '',
+                pdfContent: pdfContent || '',
+                attachments: attachmentNames,
+                timestamp: email.date || new Date(),
+                messageId: email.messageId || null,
+            });
+        }
         vendor.responseDate = email.date;
         vendor.emailMessageId = email.messageId;
         rfq.markModified('vendorsContacted');
@@ -650,6 +667,22 @@ ${fullEmailContent}`;
                         html: input.htmlBody || input.body.replace(/\n/g, '<br>'),
                         text: input.body,
                     });
+
+                    // Log our reply into the vendor's email thread
+                    if (vendor) {
+                        if (!Array.isArray(vendor.emailHistory)) vendor.emailHistory = [];
+                        vendor.emailHistory.push({
+                            direction: 'outgoing',
+                            subject: input.subject || '',
+                            body: input.body || '',
+                            htmlBody: input.htmlBody || '',
+                            attachments: [],
+                            timestamp: new Date(),
+                            messageId: result.messageId || null,
+                        });
+                        rfq.markModified('vendorsContacted');
+                        await rfq.save();
+                    }
 
                     this.addToActionLog('reply_sent', {
                         to: input.to,

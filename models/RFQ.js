@@ -234,7 +234,22 @@ const RFQSchema = new Schema({
                 receivedDate: Date,
                 attachments: [String],
                 pdfContent: String
-            }
+            },
+            // Full email thread (both directions) — mirrors whatsappHistory.
+            // rawEmailContent above is kept as the "latest inbound" for quotation parsing.
+            emailHistory: [{
+                direction: {
+                    type: String,
+                    enum: ['incoming', 'outgoing']
+                },
+                subject: String,
+                body: String,
+                htmlBody: String,
+                pdfContent: String,
+                attachments: [String],
+                timestamp: Date,
+                messageId: String
+            }]
         }
     ],
 

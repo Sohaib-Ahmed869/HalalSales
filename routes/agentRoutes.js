@@ -110,6 +110,49 @@ router.post('/discover-contact', async (req, res) => {
 });
 
 /**
+ * POST /api/agents/discover-contacts-batch
+ * Run DiscoveryAgent for several vendors at once ("find all contacts").
+ * Body: { vendors: [{ vendorName, vendorCode, country?, productCategory?, vendorSource? }] }
+ * Each vendor's `vendorSource` (SAP | PDA_SCRAPER | NEW_SUPPLIER | EMAIL) controls which
+ * collection the discovered contact is saved to.
+ */
+router.post('/discover-contacts-batch', async (req, res) => {
+    try {
+        const { vendors } = req.body;
+
+        if (!Array.isArray(vendors) || vendors.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'vendors array is required',
+            });
+        }
+
+        const valid = vendors.filter(v => v && v.vendorName);
+        if (!valid.length) {
+            return res.status(400).json({
+                success: false,
+                error: 'Each vendor must have a vendorName',
+            });
+        }
+
+        const results = await discoveryAgent.discoverMultiple(valid);
+        const foundCount = results.filter(r => r.found).length;
+
+        res.json({
+            success: true,
+            message: `Found contacts for ${foundCount} of ${valid.length} vendor(s)`,
+            data: results,
+        });
+    } catch (error) {
+        console.error('[AgentRoutes] Batch discover error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+        });
+    }
+});
+
+/**
  * POST /api/agents/compare/:rfqId
  * Manually trigger ComparisonAgent for an RFQ
  */

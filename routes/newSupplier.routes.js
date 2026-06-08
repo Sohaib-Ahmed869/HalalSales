@@ -13,6 +13,9 @@ router.get("/match", auth, newSupplierController.matchSuppliersForProducts);
 router.post("/preview", auth, newSupplierController.uploadMiddleware, newSupplierController.previewExcel);
 router.post("/upload", auth, newSupplierController.uploadMiddleware, newSupplierController.uploadSuppliers);
 
+// Bulk AI contact discovery (for suppliers missing an email)
+router.post("/discover-contacts", auth, newSupplierController.discoverContactsBulk);
+
 // CRUD
 router.post("/", auth, newSupplierController.createSupplier);
 router.get("/", auth, newSupplierController.listSuppliers);
