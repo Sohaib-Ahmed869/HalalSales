@@ -997,6 +997,223 @@ exports.getSalesDashboardSummary = async (req, res) => {
     }
 };
 
+// Get consolidated report: all card codes with sales broken down by month/year
+exports.getConsolidatedReport = async (req, res) => {
+    try {
+        const {
+            startDate,
+            endDate,
+            granularity = "month", // "month" or "year"
+            cardCode,
+            assignedTo,
+            minAmount,
+            maxAmount,
+            sortBy = "totalSales",
+            sortOrder = "desc",
+            page = 1,
+            limit = 50,
+        } = req.query;
+
+        const gran = granularity === "year" ? "year" : "month";
+
+        // Resolve date range (default: last 12 months)
+        const end = endDate ? new Date(endDate) : new Date();
+        const start = startDate
+            ? new Date(startDate)
+            : new Date(new Date(end).setFullYear(end.getFullYear() - 1));
+
+        console.log("Fetching consolidated report...", {
+            start,
+            end,
+            gran,
+            cardCode,
+            assignedTo,
+            minAmount,
+            maxAmount,
+        });
+
+        // Customer filter: only customers (CardCode starting with C), even if no sales
+        const andConds = [{ CardCode: { $regex: /^C/i } }];
+        if (cardCode) andConds.push({ CardCode: { $regex: cardCode, $options: "i" } });
+        const customerFilter = { $and: andConds };
+        if (assignedTo) customerFilter.assignedTo = assignedTo;
+
+        const allCustomers = await Customer.find(customerFilter)
+            .populate("assignedTo", "firstName lastName")
+            .select("CardCode CardName assignedTo status Email")
+            .lean();
+
+        const cardCodes = allCustomers.map((c) => c.CardCode);
+
+        // Document date filter scoped to the matched customers
+        const docMatch = {
+            DocDate: { $gte: start, $lte: end },
+            CardCode: { $in: cardCodes },
+        };
+
+        const periodFormat = gran === "year" ? "%Y" : "%Y-%m";
+
+        // Aggregate invoices by customer + period
+        const invoiceAgg = await Invoice.aggregate([
+            { $match: docMatch },
+            {
+                $group: {
+                    _id: {
+                        cardCode: "$CardCode",
+                        period: { $dateToString: { format: periodFormat, date: "$DocDate" } },
+                    },
+                    gross: { $sum: "$DocTotal" },
+                    invoices: { $count: {} },
+                },
+            },
+        ]);
+
+        // Aggregate credit notes by customer + period
+        const creditAgg = await CreditNote.aggregate([
+            { $match: docMatch },
+            {
+                $group: {
+                    _id: {
+                        cardCode: "$CardCode",
+                        period: { $dateToString: { format: periodFormat, date: "$DocDate" } },
+                    },
+                    credit: { $sum: "$DocTotal" },
+                },
+            },
+        ]);
+
+        // cardCode -> { period -> { gross, credit, net, invoices } }
+        const breakdownMap = new Map();
+        const ensure = (cc, p) => {
+            if (!breakdownMap.has(cc)) breakdownMap.set(cc, {});
+            const obj = breakdownMap.get(cc);
+            if (!obj[p]) obj[p] = { gross: 0, credit: 0, net: 0, invoices: 0 };
+            return obj[p];
+        };
+        for (const row of invoiceAgg) {
+            const cell = ensure(row._id.cardCode, row._id.period);
+            cell.gross += row.gross;
+            cell.invoices += row.invoices;
+            cell.net = cell.gross - cell.credit;
+        }
+        for (const row of creditAgg) {
+            const cell = ensure(row._id.cardCode, row._id.period);
+            cell.credit += row.credit;
+            cell.net = cell.gross - cell.credit;
+        }
+
+        // Ordered list of period keys spanning the range
+        const periods = buildConsolidatedPeriods(start, end, gran);
+
+        // Build enriched rows for ALL customers (even with no sales)
+        let enriched = allCustomers.map((c) => {
+            const bd = breakdownMap.get(c.CardCode) || {};
+            const breakdown = {};
+            let totalSales = 0;
+            let totalInvoices = 0;
+            for (const p of periods) {
+                const cell = bd[p];
+                const net = cell ? cell.net : 0;
+                breakdown[p] = net;
+                totalSales += net;
+                totalInvoices += cell ? cell.invoices : 0;
+            }
+            return {
+                cardCode: c.CardCode,
+                customerName: c.CardName || "Unknown",
+                assignedTo: c.assignedTo?._id || null,
+                assignedToName: c.assignedTo
+                    ? `${c.assignedTo.firstName} ${c.assignedTo.lastName}`
+                    : null,
+                customerStatus: c.status || null,
+                email: c.Email || null,
+                totalSales,
+                totalInvoices,
+                breakdown,
+            };
+        });
+
+        // Sales amount filter (on total over the period)
+        const min = minAmount !== undefined && minAmount !== "" ? parseFloat(minAmount) : null;
+        const max = maxAmount !== undefined && maxAmount !== "" ? parseFloat(maxAmount) : null;
+        if (min !== null && !isNaN(min)) enriched = enriched.filter((r) => r.totalSales >= min);
+        if (max !== null && !isNaN(max)) enriched = enriched.filter((r) => r.totalSales <= max);
+
+        // Sorting
+        const validSortFields = ["totalSales", "customerName", "cardCode", "totalInvoices"];
+        const actualSortBy = validSortFields.includes(sortBy) ? sortBy : "totalSales";
+        const actualSortOrder = sortOrder === "asc" ? 1 : -1;
+        enriched.sort((a, b) => {
+            const av = a[actualSortBy];
+            const bv = b[actualSortBy];
+            if (typeof av === "string") return actualSortOrder * av.localeCompare(bv);
+            return actualSortOrder * ((av || 0) - (bv || 0));
+        });
+
+        // Column totals + grand total over the filtered set (before pagination)
+        const periodTotals = {};
+        periods.forEach((p) => (periodTotals[p] = 0));
+        let grandTotal = 0;
+        for (const r of enriched) {
+            for (const p of periods) periodTotals[p] += r.breakdown[p] || 0;
+            grandTotal += r.totalSales;
+        }
+
+        // Pagination
+        const pageNum = parseInt(page);
+        const limitNum = parseInt(limit);
+        const startIndex = (pageNum - 1) * limitNum;
+        const paginatedData = enriched.slice(startIndex, startIndex + limitNum);
+
+        res.status(200).json({
+            success: true,
+            granularity: gran,
+            periods,
+            periodTotals,
+            grandTotal,
+            count: paginatedData.length,
+            total: enriched.length,
+            page: pageNum,
+            totalPages: Math.ceil(enriched.length / limitNum) || 1,
+            data: paginatedData,
+            filters: { startDate, endDate, granularity: gran, cardCode, assignedTo, minAmount, maxAmount },
+        });
+    } catch (error) {
+        console.error("Error in getConsolidatedReport:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error fetching consolidated report",
+            error: error.message,
+        });
+    }
+};
+
+// Helper: build ordered period keys ("YYYY-MM" or "YYYY") spanning a date range (UTC)
+function buildConsolidatedPeriods(start, end, granularity) {
+    const periods = [];
+    const s = new Date(start);
+    const e = new Date(end);
+    if (granularity === "year") {
+        for (let y = s.getUTCFullYear(); y <= e.getUTCFullYear(); y++) {
+            periods.push(String(y));
+        }
+    } else {
+        let y = s.getUTCFullYear();
+        let m = s.getUTCMonth();
+        const ey = e.getUTCFullYear();
+        const em = e.getUTCMonth();
+        while (y < ey || (y === ey && m <= em)) {
+            periods.push(`${y}-${String(m + 1).padStart(2, "0")}`);
+            m++;
+            if (m > 11) {
+                m = 0;
+                y++;
+            }
+        }
+    }
+    return periods;
+}
+
 // Helper function to format period display
 function formatPeriod(period, comparisonType) {
     if (comparisonType === "year") {

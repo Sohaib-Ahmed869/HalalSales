@@ -29,4 +29,9 @@ router.get("/inactive-customers", auth, reportingController.getInactiveCustomers
 // @access  Private
 router.get("/dashboard-summary", auth, reportingController.getSalesDashboardSummary);
 
+// @route   GET /api/reporting/consolidated
+// @desc    Consolidated report: all card codes with sales broken down by month/year
+// @access  Private
+router.get("/consolidated", auth, reportingController.getConsolidatedReport);
+
 module.exports = router;

@@ -1,6 +1,7 @@
 const { google } = require('googleapis');
 const nodemailer = require('nodemailer');
 const { simpleParser } = require('mailparser');
+const config = require('../config/config');
 
 // Conditional import of pdf-parse (may not work on all systems)
 let pdfParse = null;
@@ -66,13 +67,18 @@ class GmailService {
     /**
  * Send email via Gmail API (more reliable than SMTP)
  */
-    async sendEmail({ to, subject, html, text, attachments = [] }) {
+    async sendEmail({ to, subject, html, text, attachments = [], replyTo }) {
         try {
             const email_lines = [];
             const boundary = "boundary_string";
 
+            // Replies should land in the company contact mailbox (e.g. the Gmail address
+            // suppliers see), even though we send from the configured From address.
+            const replyToAddress = replyTo || config.company?.email || '';
+
             email_lines.push(`From: ${process.env.RFQ_EMAIL_FROM}`);
             email_lines.push(`To: ${to}`);
+            if (replyToAddress) email_lines.push(`Reply-To: ${replyToAddress}`);
             email_lines.push(`Subject: ${subject}`);
             email_lines.push('MIME-Version: 1.0');
             email_lines.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
