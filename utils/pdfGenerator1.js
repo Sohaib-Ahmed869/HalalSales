@@ -2,6 +2,7 @@
 const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');
+const config = require('../config/config');
 
 /**
  * Generate RFQ PDF document with enhanced design
@@ -156,13 +157,21 @@ async function generateRFQPDF(rfq) {
 
             detailY = cardY + 38;
 
-            drawDetailRow(doc, rightCardX + 15, detailY, 'Email', rfq.contactEmail || 'N/A', colors, false);
-            detailY += lineSpacing;
+            // Real company contact details (RFQ-specific overrides win; otherwise config/.env).
+            // Lines with no value are skipped rather than printed as "N/A".
+            const company = (config && config.company) || {};
+            const contactRows = [
+                ['Email', rfq.contactEmail || company.email],
+                ['Phone', rfq.contactPhone || company.phone],
+                ['Location', rfq.location || company.address],
+                ['Web', company.website],
+                ['VAT/SIRET', company.vat],
+            ].filter(([, val]) => val);
 
-            drawDetailRow(doc, rightCardX + 15, detailY, 'Phone', rfq.contactPhone || 'N/A', colors, false);
-            detailY += lineSpacing;
-
-            drawDetailRow(doc, rightCardX + 15, detailY, 'Location', rfq.location || 'Paris, France', colors, false);
+            contactRows.forEach(([label, val]) => {
+                drawDetailRow(doc, rightCardX + 15, detailY, label, val, colors, false);
+                detailY += lineSpacing;
+            });
 
             doc.y = cardY + leftCardHeight + 25;
 
@@ -203,26 +212,38 @@ async function generateRFQPDF(rfq) {
             const headerHeight = 35;
             const rowHeight = 30;
 
-            // Table header with gradient
-            doc
-                .rect(40, tableTop, 515, headerHeight)
-                .fill(colors.secondary);
+            // Reusable table-header drawer (re-drawn at the top of each new page)
+            const drawTableHeader = (y) => {
+                doc
+                    .rect(40, y, 515, headerHeight)
+                    .fill(colors.secondary);
+                doc
+                    .fontSize(10)
+                    .font('Helvetica-Bold')
+                    .fillColor(colors.white);
+                doc.text('#', colX.no + 8, y + 12);
+                doc.text('Product Name', colX.product + 8, y + 12);
+                doc.text('Specifications', colX.specs + 8, y + 12);
+                doc.text('Quantity', colX.qty + 8, y + 12);
+                doc.text('Unit', colX.unit + 8, y + 12);
+            };
 
-            doc
-                .fontSize(10)
-                .font('Helvetica-Bold')
-                .fillColor(colors.white);
+            // Bottom limit for table rows on a page (keep clear of the page footer)
+            const ROW_BOTTOM_LIMIT = 760;
+            const PAGE_TOP = 50;
 
-            doc.text('#', colX.no + 8, tableTop + 12);
-            doc.text('Product Name', colX.product + 8, tableTop + 12);
-            doc.text('Specifications', colX.specs + 8, tableTop + 12);
-            doc.text('Quantity', colX.qty + 8, tableTop + 12);
-            doc.text('Unit', colX.unit + 8, tableTop + 12);
-
+            drawTableHeader(tableTop);
             let currentY = tableTop + headerHeight;
 
-            // Table rows with improved styling
+            // Table rows with improved styling + automatic page breaks for long lists
             rfq.items.forEach((item, index) => {
+                // Start a new page if the next row would run into the footer area
+                if (currentY + rowHeight > ROW_BOTTOM_LIMIT) {
+                    doc.addPage();
+                    drawTableHeader(PAGE_TOP);
+                    currentY = PAGE_TOP + headerHeight;
+                }
+
                 const bgColor = index % 2 === 0 ? colors.white : colors.light;
 
                 doc
@@ -287,6 +308,11 @@ async function generateRFQPDF(rfq) {
 
             // Special Requirements
             if (rfq.packagingRequirements || rfq.paymentTermsPreference || rfq.otherNotes) {
+                // If there isn't enough room left on the page, start a fresh one
+                if (doc.y > 620) {
+                    doc.addPage();
+                    doc.y = 50;
+                }
                 doc
                     .fontSize(16)
                     .font('Helvetica-Bold')
@@ -377,8 +403,13 @@ async function generateRFQPDF(rfq) {
                 doc.y = reqStartY + reqBoxHeight + 20;
             }
 
-            // Footer
-            const footerY = 750;
+            // Footer — pin to the bottom of the page, but drop to a new page if the
+            // content already runs into that area (avoids overlap on long RFQs).
+            let footerY = 750;
+            if (doc.y > footerY - 30) {
+                doc.addPage();
+                footerY = 750;
+            }
 
             // Footer separator
             doc
@@ -387,6 +418,15 @@ async function generateRFQPDF(rfq) {
                 .strokeColor(colors.border)
                 .lineWidth(1)
                 .stroke();
+
+            // Real company contact line in the footer (only the values we actually have)
+            const companyFooter = (config && config.company) || {};
+            const footerContact = [
+                companyFooter.name,
+                companyFooter.phone,
+                companyFooter.email,
+                companyFooter.website,
+            ].filter(Boolean).join('  •  ');
 
             doc
                 .fontSize(9)
@@ -407,7 +447,7 @@ async function generateRFQPDF(rfq) {
                 .fontSize(8)
                 .font('Helvetica-Bold')
                 .fillColor(colors.primary)
-                .text('HALAL FOODS — Trusted Quality Since Generations', 40, footerY + 38, {
+                .text(footerContact || (companyFooter.name || 'Halal Foods'), 40, footerY + 38, {
                     width: 515,
                     align: 'center'
                 });

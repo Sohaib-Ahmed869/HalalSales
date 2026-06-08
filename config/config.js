@@ -32,13 +32,21 @@ module.exports = {
     minVendorsPerRFQ: parseInt(process.env.RFQ_MIN_VENDORS) || 3,
   },
 
-  // Company Information
+  // Company Information — single source of truth for all outbound emails + PDF.
+  // Values come from .env. Where a value is missing we leave it EMPTY (not a
+  // placeholder), so the email/PDF omits that line instead of printing fake info.
   company: {
-    name: 'Halal Foods',
-    address: 'Paris, France',
-    phone: process.env.COMPANY_PHONE || '+33 1 XX XX XX XX',
-    email: process.env.COMPANY_EMAIL || 'contact@halalfoods.fr',
-    website: process.env.COMPANY_WEBSITE || 'www.halalfoods.fr',
+    name: process.env.COMPANY_NAME || 'Halal Foods',
+    legalName: process.env.COMPANY_LEGAL_NAME || process.env.COMPANY_NAME || 'Halal Foods',
+    address: process.env.COMPANY_ADDRESS || '',
+    phone: process.env.COMPANY_PHONE || '',
+    // Fall back to the actual sending mailbox so the footer matches the From domain.
+    email: process.env.COMPANY_EMAIL || process.env.EMAIL_USER || '',
+    website: process.env.COMPANY_WEBSITE || '',
+    // Who signs the emails — a real person reads far more human than "Procurement Team".
+    signerName: process.env.COMPANY_SIGNER_NAME || '',
+    signerTitle: process.env.COMPANY_SIGNER_TITLE || 'Procurement',
+    vat: process.env.COMPANY_VAT || '',
   },
 
   // File Upload Configuration

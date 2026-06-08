@@ -54,6 +54,58 @@ Return only the message text, no JSON.`;
 }
 
 /**
+ * Company details — single source of truth (from config/.env).
+ * Any field left empty in .env is OMITTED rather than printed as a placeholder.
+ */
+function getCompany() {
+    return (config && config.company) || {};
+}
+
+/** HTML footer contact block — only renders lines that have a real value. */
+function buildFooterHtml() {
+    const c = getCompany();
+    const line = (label, val) => (val ? `${label}${val}<br/>` : '');
+    return [
+        `<strong>${c.name || 'Halal Foods'}</strong><br/>`,
+        line('Email : ', c.email),
+        line('Tél / Phone : ', c.phone),
+        line('', c.address),
+        line('', c.website),
+        line('VAT / SIRET : ', c.vat),
+    ].join('');
+}
+
+/** Plain-text contact lines — only the ones with real values. */
+function buildContactLinesText() {
+    const c = getCompany();
+    const out = [];
+    if (c.email) out.push(`Email : ${c.email}`);
+    if (c.phone) out.push(`Tél / Phone : ${c.phone}`);
+    if (c.address) out.push(c.address);
+    if (c.website) out.push(c.website);
+    if (c.vat) out.push(`VAT / SIRET : ${c.vat}`);
+    return out;
+}
+
+/** A human signature: a real person's name + title where available, else the company team. */
+function buildSignatureHtml() {
+    const c = getCompany();
+    const name = c.signerName
+        ? `${c.signerName}${c.signerTitle ? ` <span style="color:#6b7280;">— ${c.signerTitle}</span>` : ''}`
+        : `${c.name || 'Halal Foods'} — Service Achats / Procurement`;
+    return `<p style="margin:0;color:#1a4d2e;font-weight:600;">${name}</p>
+            <p style="margin:4px 0 0 0;color:#374151;">${c.name || 'Halal Foods'}</p>`;
+}
+
+function buildSignatureText() {
+    const c = getCompany();
+    const who = c.signerName
+        ? `${c.signerName}${c.signerTitle ? ` — ${c.signerTitle}` : ''}`
+        : `${c.name || 'Halal Foods'} — Service Achats / Procurement`;
+    return `${who}\n${c.name || 'Halal Foods'}`;
+}
+
+/**
  * Enhance email HTML with professional footer and styling
  */
 function enhanceEmailHTML(bodyHtml, rfqData) {
@@ -98,15 +150,11 @@ function enhanceEmailHTML(bodyHtml, rfqData) {
                     <tr>
                         <td style="padding: 20px 0; border-top: 1px solid #cccccc;">
                             <p style="margin: 0 0 10px 0; color: #000000; font-size: 12px;">
-                                <strong>Halal Foods</strong><br/>
-                                Email: contact@halalfoods.fr<br/>
-                                Phone: +33 1 XX XX XX XX<br/>
-                                Paris, France<br/>
-                                www.halalfoods.fr
+                                ${buildFooterHtml()}
                             </p>
                             <p style="margin: 10px 0 0 0; color: #666666; font-size: 10px;">
                                 This email and any attachments are confidential.<br/>
-                                © ${new Date().getFullYear()} Halal Foods. All rights reserved.
+                                © ${new Date().getFullYear()} ${getCompany().name || 'Halal Foods'}. All rights reserved.
                             </p>
                         </td>
                     </tr>
@@ -468,9 +516,18 @@ async function generateRFQEmail(rfqData, vendor, language = 'both', isExistingVe
  * Simple email for existing vendors (no company intro)
  */
 function generateSimpleRFQEmail(rfqData, vendor) {
-    const subject = `RFQ ${rfqData.rfqNumber} - Request for Quotation`;
+    const c = getCompany();
+    const subject = `Demande de devis / Request for Quotation — RFQ ${rfqData.rfqNumber}`;
 
-    // Build items table (NO target prices — those are internal only)
+    const fmt = (d, loc) => new Date(d).toLocaleDateString(loc, { year: 'numeric', month: 'long', day: 'numeric' });
+    const dueFr = fmt(rfqData.quotationDueDate, 'fr-FR');
+    const dueEn = fmt(rfqData.quotationDueDate, 'en-GB');
+    const delFr = fmt(rfqData.deliveryBy, 'fr-FR');
+    const delEn = fmt(rfqData.deliveryBy, 'en-GB');
+    const incoterm = rfqData.specialRequirements?.incoterm || rfqData.incoterm || 'EXW';
+    const destination = rfqData.specialRequirements?.destination || rfqData.destination || c.address || '';
+
+    // Bilingual items table (NO target prices — internal only)
     const itemsTableRows = (rfqData.items || []).map((item, i) => `
                     <tr>
                         <td style="padding:8px;border-bottom:1px solid #eee;">${i + 1}</td>
@@ -480,80 +537,123 @@ function generateSimpleRFQEmail(rfqData, vendor) {
                     </tr>`).join('');
 
     const itemsTable = (rfqData.items && rfqData.items.length > 0) ? `
-            <table style="width:100%;border-collapse:collapse;margin:15px 0;">
+            <table style="width:100%;border-collapse:collapse;margin:15px 0;font-size:14px;">
                 <tr style="background:#f3f4f6;">
                     <th style="padding:8px;text-align:left;">#</th>
-                    <th style="padding:8px;text-align:left;">Product</th>
-                    <th style="padding:8px;text-align:left;">Quantity</th>
-                    <th style="padding:8px;text-align:left;">Specifications</th>
+                    <th style="padding:8px;text-align:left;">Produit / Product</th>
+                    <th style="padding:8px;text-align:left;">Qté / Qty</th>
+                    <th style="padding:8px;text-align:left;">Spécifications / Specs</th>
                 </tr>
                 ${itemsTableRows}
             </table>` : '';
 
-    const bodyHtml = `
-        <div style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;">
-            <h2 style="color: #1a4d2e; margin-bottom: 15px;">Dear ${vendor.vendorName},</h2>
+    const callPrompt = c.phone ? ` ou par téléphone au ${c.phone}` : '';
+    const callPromptEn = c.phone ? ` or by phone at ${c.phone}` : '';
+    const signature = buildSignatureHtml();
 
-            <p style="color: #4b5563; line-height: 1.6; margin-bottom: 15px;">
-                Please find attached our Request for Quotation for the products listed below.
+    const bodyHtml = `
+        <div style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;color:#374151;line-height:1.6;font-size:15px;">
+            <!-- ===== Français ===== -->
+            <p style="margin:0 0 14px;">Bonjour,</p>
+            <p style="margin:0 0 14px;">
+                J'espère que vous allez bien. Nous préparons une commande et serions ravis de recevoir votre meilleure offre
+                pour les produits repris ci-dessous. Le détail complet se trouve dans le document PDF joint.
             </p>
 
-            <div style="background-color: #f0f9ff; border-left: 4px solid #3b82f6; padding: 15px; margin: 20px 0; border-radius: 4px;">
-                <p style="margin: 0; color: #1e40af; font-weight: 600;">
-                    RFQ Number: ${rfqData.rfqNumber}<br/>
-                    Quotation Due: ${new Date(rfqData.quotationDueDate).toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' })}<br/>
-                    Delivery By: ${new Date(rfqData.deliveryBy).toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' })}<br/>
-                    Incoterm: ${rfqData.specialRequirements?.incoterm || rfqData.incoterm || 'EXW'}<br/>
-                    Destination: ${rfqData.specialRequirements?.destination || rfqData.destination || 'Paris, France'}
+            <div style="background:#f0f9ff;border-left:4px solid #3b82f6;padding:14px 16px;margin:18px 0;border-radius:4px;">
+                <p style="margin:0;color:#1e40af;font-weight:600;">
+                    RFQ ${rfqData.rfqNumber}<br/>
+                    Réponse souhaitée avant le : ${dueFr}<br/>
+                    Livraison souhaitée : ${delFr}<br/>
+                    Incoterm : ${incoterm}${destination ? `<br/>Destination : ${destination}` : ''}
                 </p>
             </div>
 
             ${itemsTable}
 
-            ${rfqData.customMessage ? `<p style="color: #4b5563; line-height: 1.6; margin-bottom: 15px; font-style: italic;">${rfqData.customMessage}</p>` : ''}
+            ${rfqData.customMessage ? `<p style="margin:14px 0;font-style:italic;">${rfqData.customMessage}</p>` : ''}
 
-            <p style="color: #4b5563; line-height: 1.6; margin-bottom: 15px;">
-                Please include in your quotation:
+            <p style="margin:14px 0 6px;">Merci de bien vouloir préciser dans votre devis :</p>
+            <ul style="margin:0 0 14px;line-height:1.8;">
+                <li>Prix unitaires et total</li>
+                <li>Délais et conditions de livraison</li>
+                <li>Conditions de paiement</li>
+                <li>Disponibilité des produits</li>
+            </ul>
+
+            <p style="margin:14px 0;">
+                N'hésitez pas à me répondre directement${callPrompt} pour toute question — je reste à votre disposition.
             </p>
-            <ul style="color: #4b5563; line-height: 1.8;">
+            <p style="margin:0 0 4px;">Bien cordialement,</p>
+            ${signature}
+
+            <div style="border-top:1px solid #e5e7eb;margin:28px 0;"></div>
+
+            <!-- ===== English ===== -->
+            <p style="margin:0 0 6px;color:#6b7280;font-size:13px;">— English version —</p>
+            <p style="margin:0 0 14px;">Hello,</p>
+            <p style="margin:0 0 14px;">
+                I hope you're doing well. We're putting together an order and would love to receive your best offer
+                for the products listed below. Full details are in the attached PDF.
+            </p>
+
+            <div style="background:#f0f9ff;border-left:4px solid #3b82f6;padding:14px 16px;margin:18px 0;border-radius:4px;">
+                <p style="margin:0;color:#1e40af;font-weight:600;">
+                    RFQ ${rfqData.rfqNumber}<br/>
+                    Please reply by: ${dueEn}<br/>
+                    Requested delivery: ${delEn}<br/>
+                    Incoterm: ${incoterm}${destination ? `<br/>Destination: ${destination}` : ''}
+                </p>
+            </div>
+
+            <p style="margin:14px 0 6px;">Please include in your quotation:</p>
+            <ul style="margin:0 0 14px;line-height:1.8;">
                 <li>Unit and total prices</li>
                 <li>Delivery terms and timeline</li>
                 <li>Payment terms</li>
                 <li>Product availability</li>
             </ul>
 
-            <p style="color: #4b5563; line-height: 1.6; margin-top: 20px;">
-                Best regards,<br/>
-                <strong>Halal Foods - Procurement Team</strong>
+            <p style="margin:14px 0;">
+                Feel free to reply to me directly${callPromptEn} with any questions — happy to help.
             </p>
+            <p style="margin:0 0 4px;">Best regards,</p>
+            ${signature}
         </div>
     `;
 
-    const incoterm = rfqData.specialRequirements?.incoterm || rfqData.incoterm || 'EXW';
-    const destination = rfqData.specialRequirements?.destination || rfqData.destination || 'Paris, France';
+    const contactLines = buildContactLinesText();
+    const bodyText = `Bonjour,
 
-    const bodyText = `
-Dear ${vendor.vendorName},
+J'espère que vous allez bien. Nous préparons une commande et serions ravis de recevoir votre meilleure offre pour les produits ci-dessous. Le détail complet se trouve dans le PDF joint.
 
-Please find attached our Request for Quotation.
-
-RFQ Number: ${rfqData.rfqNumber}
-Quotation Due: ${new Date(rfqData.quotationDueDate).toLocaleDateString('en-GB')}
-Delivery By: ${new Date(rfqData.deliveryBy).toLocaleDateString('en-GB')}
-Incoterm: ${incoterm}
-Destination: ${destination}
-
+RFQ ${rfqData.rfqNumber}
+Réponse souhaitée avant le : ${dueFr}
+Livraison souhaitée : ${delFr}
+Incoterm : ${incoterm}${destination ? `\nDestination : ${destination}` : ''}
 ${rfqData.customMessage ? `\n${rfqData.customMessage}\n` : ''}
+Merci d'indiquer vos prix unitaires, délais et conditions de livraison, conditions de paiement et la disponibilité des produits.
 
-Please include unit prices, delivery terms, payment terms, and product availability.
+Bien cordialement,
+${buildSignatureText()}
+
+— English —
+
+Hello,
+
+I hope you're doing well. We're putting together an order and would love your best offer for the products below — full details are in the attached PDF.
+
+RFQ ${rfqData.rfqNumber}
+Please reply by: ${dueEn}
+Requested delivery: ${delEn}
+Incoterm: ${incoterm}${destination ? `\nDestination: ${destination}` : ''}
+
+Please include unit and total prices, delivery terms, payment terms, and product availability.
 
 Best regards,
-Halal Foods - Procurement Team
-
----
-Contact: contact@halalfoods.fr | +33 1 XX XX XX XX
-Paris, France | www.halalfoods.fr
-    `;
+${buildSignatureText()}
+${contactLines.length ? `\n---\n${contactLines.join('\n')}` : ''}
+`;
 
     return {
         subject,
@@ -569,7 +669,7 @@ async function generateDetailedRFQEmail(rfqData, vendor) {
     const relationshipContext = `We are reaching out to establish a new business relationship.`;
 
     const incoterm = rfqData.specialRequirements?.incoterm || rfqData.incoterm || 'EXW';
-    const destination = rfqData.specialRequirements?.destination || rfqData.destination || 'Paris, France';
+    const destination = rfqData.specialRequirements?.destination || rfqData.destination || getCompany().address || '';
 
     // Product list (names + qty) so the email can reference actual products, not "[Product Name]"
     const productList = (rfqData.items || [])
@@ -578,13 +678,15 @@ async function generateDetailedRFQEmail(rfqData, vendor) {
         .join('\n');
     const moreProducts = (rfqData.items || []).length > 10 ? `\n- …and ${rfqData.items.length - 10} more (see attached PDF)` : '';
 
-    // Real sender / company details — the LLM must use these verbatim, not placeholders.
-    const senderName = 'Procurement Team';
-    const senderTitle = 'Procurement Team';
-    const companyEmail = 'contact@halalfoods.fr';
-    const companyPhone = '+33 1 XX XX XX XX';
-    const companyWebsite = 'www.halalfoods.fr';
-    const companyAddress = 'Paris, France';
+    // Real sender / company details from config (.env) — the LLM must use these verbatim.
+    // Empty values are intentionally omitted (the prompt tells the model to skip blanks).
+    const c = getCompany();
+    const senderName = c.signerName || `${c.name || 'Halal Foods'} — Service Achats / Procurement`;
+    const senderTitle = c.signerTitle || 'Procurement';
+    const companyEmail = c.email || '';
+    const companyPhone = c.phone || '';
+    const companyWebsite = c.website || '';
+    const companyAddress = c.address || '';
 
     const prompt = `Generate a professional bilingual RFQ email (French and English) for Halal Foods, a premium food wholesaler in Paris.
 
@@ -606,14 +708,17 @@ ${productList}${moreProducts}
 
 ${rfqData.customMessage ? `Additional Message: ${rfqData.customMessage}` : ''}
 
-Sender / Company details (use these EXACT values — never write placeholders like "[Votre Nom]", "[Your Name]", "[Phone]"):
+Sender / Company details (use these EXACT values — never write placeholders like "[Votre Nom]", "[Your Name]", "[Phone]"). Only the fields listed below are known; do NOT add any contact field that is not listed:
 - Greeting to vendor: "Bonjour équipe ${vendor.vendorName}," (French) / "Hello ${vendor.vendorName} team," (English) — address the company, not an unknown individual contact
 - Sender signature name: ${senderName}
 - Sender title: ${senderTitle}
-- Company email: ${companyEmail}
-- Company phone: ${companyPhone}
-- Company website: ${companyWebsite}
-- Company address: ${companyAddress}
+${[
+        companyEmail ? `- Company email: ${companyEmail}` : '',
+        companyPhone ? `- Company phone: ${companyPhone}` : '',
+        companyWebsite ? `- Company website: ${companyWebsite}` : '',
+        companyAddress ? `- Company address: ${companyAddress}` : '',
+        c.vat ? `- VAT / SIRET: ${c.vat}` : '',
+    ].filter(Boolean).join('\n')}
 
 === STRICT RULES ===
 1. NEVER output placeholder brackets of any kind — no [Nom du contact], [Contact Name], [Votre Nom], [Your Name], [Product Name], [Nom du produit], [Phone], [Numéro de téléphone], [Adresse e-mail], [Normes et certifications], [Liens vers les réseaux sociaux], [XX], [TBD], [...], etc. If you don't have a real value for something, OMIT that line entirely.
