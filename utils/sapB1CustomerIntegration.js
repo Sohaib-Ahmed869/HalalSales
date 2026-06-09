@@ -129,17 +129,35 @@ exports.getLastCustomerFromSAP = async () => {
   }
 };
 
-// Generate next CardCode based on last customer
-// Generate next CardCode based on last customer
-exports.generateNextCardCode = async () => {
+// Codes at or above this value are reserved/special accounts (e.g. C9996,
+// C9998, C9999) and must NOT be treated as part of the sequential customer
+// range. The historical corrupt code C71000 (71000) is also excluded by this.
+const RESERVED_CARDCODE_THRESHOLD = 9000;
+
+// Generate next CardCode based on the highest sequential customer code.
+//
+// IMPORTANT: We compute the maximum NUMERICALLY in JS. The SAP Service Layer's
+// `$orderby=CardCode desc` sorts CardCode as a STRING, which is unreliable once
+// codes differ in digit width (e.g. "C7999" > "C71000" lexicographically). The
+// old code also hardcoded a "C7" prefix and only incremented the 3 trailing
+// digits, so C7999 overflowed to "C71000" instead of rolling over to "C8000" —
+// and because C71000 sorts below C7999, every new customer got "C71000" forever.
+// @param {number} floorExclusive - optional. The returned code is guaranteed to
+//   be strictly greater than this number. Used by the collision-retry allocator
+//   so a duplicate attempt advances past the taken code instead of re-reading
+//   the same max.
+exports.generateNextCardCode = async (floorExclusive = -1) => {
   try {
     const sessionId = await getSessionId();
 
-    console.log("Fetching last customer in C7xxx range from SAP B1...");
+    console.log("Fetching customer CardCodes from SAP B1 to compute next code...");
 
-    // Query to filter for C7xxx customers only
+    // Fetch a generous window of the highest codes. The reserved C9xxx codes and
+    // any legacy corrupt codes sort near the top/bottom in string order, so a
+    // large window guarantees the true sequential max is included; we then pick
+    // the max numerically and ignore the reserved band.
     const response = await axios.get(
-      `${SAP_CONFIG.serviceLayerUrl}/BusinessPartners?$top=1&$orderby=CardCode desc&$filter=CardType eq 'cCustomer' and startswith(CardCode,'C7')`,
+      `${SAP_CONFIG.serviceLayerUrl}/BusinessPartners?$top=200&$select=CardCode&$orderby=CardCode desc&$filter=CardType eq 'cCustomer' and startswith(CardCode,'C')`,
       {
         headers: {
           "Content-Type": "application/json",
@@ -153,30 +171,40 @@ exports.generateNextCardCode = async () => {
       response.data.value &&
       response.data.value.length > 0
     ) {
-      const lastCustomer = response.data.value[0];
-      console.log(`Last C7xxx customer CardCode: ${lastCustomer.CardCode}`);
+      // Parse pure-numeric "C<digits>" codes, drop the reserved band, find max.
+      let maxNumber = -1;
+      for (const bp of response.data.value) {
+        const match = bp.CardCode && bp.CardCode.match(/^C(\d+)$/);
+        if (!match) continue;
+        const num = parseInt(match[1], 10);
+        if (num >= RESERVED_CARDCODE_THRESHOLD) continue; // skip reserved/corrupt
+        if (num > maxNumber) maxNumber = num;
+      }
 
-      const lastCardCode = lastCustomer.CardCode;
+      // Honour the caller's floor (collision retry) as well as the SAP max.
+      const baseNumber = Math.max(maxNumber, floorExclusive);
 
-      // Extract numeric part from CardCode (e.g., C7527 -> 7527)
-      const match = lastCardCode.match(/^C7(\d+)$/);
+      if (baseNumber >= 0) {
+        const nextNumber = baseNumber + 1;
 
-      if (match) {
-        const lastNumber = parseInt(match[1], 10);
-        const nextNumber = lastNumber + 1;
-        const nextCardCode = `C7${String(nextNumber).padStart(3, '0')}`;
+        if (nextNumber >= RESERVED_CARDCODE_THRESHOLD) {
+          throw new Error(
+            `Sequential CardCode range exhausted (next would be C${nextNumber}, ` +
+              `which collides with the reserved C${RESERVED_CARDCODE_THRESHOLD}+ band). ` +
+              `Manual intervention required to choose a new range.`
+          );
+        }
 
-        console.log(`Generated next CardCode: ${nextCardCode}`);
+        const nextCardCode = `C${nextNumber}`;
+        console.log(
+          `Highest sequential CardCode: C${maxNumber} -> next: ${nextCardCode}`
+        );
         return nextCardCode;
-      } else {
-        // If the format doesn't match C7xxx, log error and throw
-        console.error(`Unexpected CardCode format: ${lastCardCode}`);
-        throw new Error(`Invalid CardCode format: ${lastCardCode}`);
       }
     }
 
-    // If no C7xxx customers found, start with C7000
-    console.log("No C7xxx customers found, starting with C7000");
+    // No sequential customers found at all — start the range.
+    console.log("No sequential C-customers found, starting with C7000");
     return "C7000";
   } catch (error) {
     // If unauthorized, try to login again and retry once
@@ -194,6 +222,21 @@ exports.generateNextCardCode = async () => {
     throw new Error(`Failed to generate CardCode from SAP: ${error.message}`);
   }
 };
+
+// Detect SAP B1 "CardCode already exists" style errors so the allocator can
+// retry with the next code instead of stranding the customer.
+function isDuplicateCardCodeError(error) {
+  const data = error && error.response && error.response.data;
+  const sapMsg =
+    data && data.error && data.error.message && data.error.message.value;
+  const sapCode = data && data.error && data.error.code;
+  const text = `${sapMsg || ""} ${error && error.message ? error.message : ""}`.toLowerCase();
+  return (
+    sapCode === -2035 || // SAP: "Business partner ... already exists"
+    text.includes("already exist") ||
+    text.includes("-2035")
+  );
+}
 
 // Format customer data for SAP B1
 // Format customer data for SAP B1
@@ -324,8 +367,56 @@ exports.createCustomerInSAP = async (customerData) => {
       return exports.createCustomerInSAP(customerData);
     }
 
-    throw new Error(`SAP Error: ${error.message}`);
+    const wrapped = new Error(`SAP Error: ${error.message}`);
+    wrapped.isDuplicateCardCode = isDuplicateCardCodeError(error);
+    wrapped.sapErrorData = error.response && error.response.data;
+    throw wrapped;
   }
+};
+
+// Allocate a guaranteed-unique CardCode and create the customer in SAP B1 in one
+// atomic, self-healing operation.
+//
+// This is the single safe entry point for first-time SAP creation. It prevents
+// the "everyone gets the same CardCode" class of bug for good:
+//   - Concurrent approvals that read the same SAP max will collide on POST; the
+//     loser retries with the next code instead of silently failing.
+//   - A stale/duplicate code never persists, because the local CardCode is only
+//     committed to what SAP actually accepted.
+//
+// Returns the SAP response (including the final CardCode). Sets customer.CardCode
+// to the accepted code. Throws if a unique code cannot be allocated.
+exports.createCustomerInSAPWithUniqueCode = async (customer, formatFn) => {
+  const MAX_ATTEMPTS = 15;
+  let floorExclusive = -1;
+  let lastError;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const cardCode = await exports.generateNextCardCode(floorExclusive);
+    customer.CardCode = cardCode;
+
+    const sapCustomer = await (formatFn || exports.formatCustomerForSAP)(customer);
+
+    try {
+      return await exports.createCustomerInSAP(sapCustomer);
+    } catch (err) {
+      if (err.isDuplicateCardCode) {
+        const m = cardCode.match(/^C(\d+)$/);
+        if (m) floorExclusive = parseInt(m[1], 10); // force advance past the taken code
+        lastError = err;
+        console.warn(
+          `CardCode ${cardCode} already taken (attempt ${attempt}/${MAX_ATTEMPTS}), retrying with next...`
+        );
+        continue;
+      }
+      throw err; // non-collision error: surface it
+    }
+  }
+
+  throw new Error(
+    `Unable to allocate a unique CardCode after ${MAX_ATTEMPTS} attempts. ` +
+      `Last error: ${lastError && lastError.message}`
+  );
 };
 
 // Check if a customer exists in SAP

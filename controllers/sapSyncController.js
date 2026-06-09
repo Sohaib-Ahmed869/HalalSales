@@ -3,6 +3,7 @@ const {
     generateNextCardCode,
     formatCustomerForSAP,
     createCustomerInSAP,
+    createCustomerInSAPWithUniqueCode,
     checkCustomerExistsInSAP,
 } = require("../utils/sapB1CustomerIntegration");
 
@@ -47,34 +48,10 @@ exports.syncAllCustomersWithSAP = async (req, res) => {
             try {
                 console.log(`\n--- Processing customer: ${customer.CardName} ---`);
 
-                // Generate new CardCode from SAP
-                const newCardCode = await generateNextCardCode();
-                console.log(`Generated CardCode: ${newCardCode} for ${customer.CardName}`);
-
-                // Check if this CardCode already exists in SAP
-                const existsInSAP = await checkCustomerExistsInSAP(newCardCode);
-
-                if (existsInSAP) {
-                    console.log(`CardCode ${newCardCode} already exists in SAP, skipping to next...`);
-                    // This shouldn't happen if generateNextCardCode works correctly
-                    // But as a safety measure, we'll skip this iteration
-                    results.errors.push({
-                        customer: customer.CardName,
-                        email: customer.Email,
-                        error: `CardCode ${newCardCode} already exists in SAP`,
-                    });
-                    results.failed++;
-                    continue;
-                }
-
-                // Update customer with new CardCode
-                customer.CardCode = newCardCode;
-
-                // Format customer data for SAP
-                const sapCustomerData = await formatCustomerForSAP(customer);
-
-                // Create customer in SAP
-                const sapResponse = await createCustomerInSAP(sapCustomerData);
+                // Allocate a unique CardCode and create in SAP atomically. This
+                // self-heals against collisions instead of skipping the customer.
+                const sapResponse = await createCustomerInSAPWithUniqueCode(customer);
+                console.log(`Synced ${customer.CardName} as ${sapResponse.CardCode}`);
 
                 // Update customer in database
                 customer.SyncedWithSAP = true;
@@ -153,42 +130,38 @@ exports.syncSingleCustomer = async (req, res) => {
 
         console.log(`Syncing customer: ${customer.CardName}`);
 
-        // Check if customer needs a new CardCode
-        let needsNewCardCode = false;
-        if (!customer.CardCode || customer.CardCode === "C6001") {
-            needsNewCardCode = true;
-        }
+        // A customer needs a freshly allocated CardCode if it has none or still
+        // carries the placeholder "C6001".
+        const needsNewCardCode =
+            !customer.CardCode || customer.CardCode === "C6001";
 
         if (needsNewCardCode) {
-            // Generate new CardCode
-            const newCardCode = await generateNextCardCode();
-            console.log(`Generated new CardCode: ${newCardCode}`);
-            customer.CardCode = newCardCode;
+            // Allocate a unique CardCode and create in SAP atomically.
+            await createCustomerInSAPWithUniqueCode(customer);
+        } else {
+            // Already has an intended CardCode — create with it, unless it is
+            // already present in SAP (then just mark it synced locally).
+            const existsInSAP = await checkCustomerExistsInSAP(customer.CardCode);
+
+            if (existsInSAP) {
+                customer.SyncedWithSAP = true;
+                customer.LocalStatus = "Synced";
+                customer.LastSyncAttempt = new Date();
+                await customer.save();
+
+                return res.status(200).json({
+                    success: true,
+                    message: "Customer already exists in SAP",
+                    customer: {
+                        name: customer.CardName,
+                        cardCode: customer.CardCode,
+                    },
+                });
+            }
+
+            const sapCustomerData = await formatCustomerForSAP(customer);
+            await createCustomerInSAP(sapCustomerData);
         }
-
-        // Check if already exists in SAP
-        const existsInSAP = await checkCustomerExistsInSAP(customer.CardCode);
-
-        if (existsInSAP) {
-            // Update local database to reflect it's synced
-            customer.SyncedWithSAP = true;
-            customer.LocalStatus = "Synced";
-            customer.LastSyncAttempt = new Date();
-            await customer.save();
-
-            return res.status(200).json({
-                success: true,
-                message: "Customer already exists in SAP",
-                customer: {
-                    name: customer.CardName,
-                    cardCode: customer.CardCode,
-                },
-            });
-        }
-
-        // Format and create in SAP
-        const sapCustomerData = await formatCustomerForSAP(customer);
-        const sapResponse = await createCustomerInSAP(sapCustomerData);
 
         // Update database
         customer.SyncedWithSAP = true;

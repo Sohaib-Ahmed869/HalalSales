@@ -28,17 +28,17 @@ const {
   generateNextCardCode,
   formatCustomerForSAP,
   createCustomerInSAP,
+  createCustomerInSAPWithUniqueCode,
   checkCustomerExistsInSAP,
 } = require("../utils/sapB1CustomerIntegration");
 
 // Helper function to push customer to SAP
 async function pushCustomerToSAPInternal(customer) {
   try {
-    // Format the customer for SAP B1
-    const sapCustomer = await formatCustomerForSAP(customer);
-
-    // Push to SAP B1
-    const sapResponse = await createCustomerInSAP(sapCustomer);
+    // Allocate a guaranteed-unique CardCode and create in SAP atomically.
+    // This self-heals against concurrent approvals and never persists a
+    // duplicate code (see createCustomerInSAPWithUniqueCode for details).
+    const sapResponse = await createCustomerInSAPWithUniqueCode(customer);
 
     // Update local customer with SAP CardCode if successful
     if (sapResponse && sapResponse.CardCode) {
@@ -183,27 +183,19 @@ exports.syncPendingC7000Customers = async (req, res) => {
       try {
         console.log(`Processing customer: ${customer.CardName} (${customer.CardCode})`);
 
-        // Generate next CardCode from SAP
-        const nextCardCode = await generateNextCardCode();
-        console.log(`Generated new CardCode: ${nextCardCode}`);
-
-        // Update customer with new CardCode
-        customer.CardCode = nextCardCode;
-        customer.updatedAt = new Date();
-        await customer.save();
-
-        // Push to SAP
+        // Push to SAP. The CardCode is allocated atomically inside the push
+        // (createCustomerInSAPWithUniqueCode), so it can never collide.
         const sapResult = await pushCustomerToSAPInternal(customer);
 
         if (sapResult.success) {
           results.synced++;
-          console.log(`✓ Successfully synced ${customer.CardName} with CardCode ${nextCardCode}`);
+          console.log(`✓ Successfully synced ${customer.CardName} with CardCode ${sapResult.CardCode}`);
         } else {
           results.failed++;
           results.errors.push({
             customerName: customer.CardName,
             oldCardCode: "C7000",
-            newCardCode: nextCardCode,
+            newCardCode: customer.CardCode,
             error: sapResult.error
           });
           console.log(`✗ Failed to sync ${customer.CardName}: ${sapResult.error}`);
@@ -966,21 +958,18 @@ exports.approveCustomer = async (req, res) => {
       });
     }
 
-    // Get the next CardCode from SAP
-    console.log("Getting next CardCode from SAP...");
-    const nextCardCode = await generateNextCardCode();
-
-    // Update customer with approval details
+    // Update customer with approval details. The CardCode is assigned atomically
+    // by the SAP push below (createCustomerInSAPWithUniqueCode) so it can never
+    // collide with a concurrently-approved customer.
     customer.approvalStatus = "approved";
     customer.approvedBy = req.user._id;
     customer.approvedAt = new Date();
-    customer.CardCode = nextCardCode;
     customer.status = "active";
     customer.updatedAt = new Date();
 
     await customer.save();
 
-    // Push to SAP automatically after approval
+    // Push to SAP automatically after approval (allocates the final CardCode)
     console.log("Pushing approved customer to SAP...");
     const sapResult = await pushCustomerToSAPInternal(customer);
 

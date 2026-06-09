@@ -799,33 +799,10 @@ exports.convertLeadToCustomer = async (req, res) => {
       }
     }
 
-    // Generate CardCode for new customer - get next CardCode from SAP
-    console.log("Getting next CardCode from SAP for converted lead...");
-    let newCardCode;
-
-    try {
-      const {
-        generateNextCardCode,
-      } = require("../utils/sapB1CustomerIntegration");
-
-      newCardCode = await generateNextCardCode();
-    } catch (error) {
-      console.error("Error getting CardCode from SAP, using fallback:", error);
-      // Fallback to NC- prefix if SAP is unavailable
-      const lastCustomer = await Customer.findOne({
-        CardCode: /^NC-/,
-      }).sort({ CardCode: -1 });
-
-      let nextNumber = 1;
-      if (lastCustomer && lastCustomer.CardCode) {
-        const match = lastCustomer.CardCode.match(/NC-(\d+)/);
-        if (match) {
-          nextNumber = parseInt(match[1]) + 1;
-        }
-      }
-
-      newCardCode = `NC-${nextNumber.toString().padStart(6, "0")}`;
-    }
+    // Assign a temporary placeholder CardCode. The real, unique SAP CardCode is
+    // allocated atomically during the SAP push below (collision-safe), so a
+    // failed push never leaves a fake C-code on an unsynced customer.
+    const newCardCode = `TEMP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
     // Parse fullName into firstName and lastName
     const nameParts = lead.fullName.trim().split(" ");
@@ -863,17 +840,11 @@ exports.convertLeadToCustomer = async (req, res) => {
     try {
       // Import the SAP integration function
       const {
-        getLastCustomerFromSAP,
-        generateNextCardCode,
-        formatCustomerForSAP,
-        createCustomerInSAP,
+        createCustomerInSAPWithUniqueCode,
       } = require("../utils/sapB1CustomerIntegration");
 
-      // Format the customer for SAP B1
-      const sapCustomer = await formatCustomerForSAP(customer);
-
-      // Push to SAP B1
-      const sapResponse = await createCustomerInSAP(sapCustomer);
+      // Allocate a unique CardCode and create in SAP atomically (collision-safe).
+      const sapResponse = await createCustomerInSAPWithUniqueCode(customer);
 
       // Update local customer with SAP CardCode if successful
       if (sapResponse && sapResponse.CardCode) {

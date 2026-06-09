@@ -24,11 +24,30 @@ exports.pushBusinessPartnerToSAP = async (customer) => {
   try {
     const sessionId = await getSessionId();
 
-    // ✅ FIX: Truncate/sanitize CardCode to SAP's 15 char limit
     let cardCode = customer.CardCode;
-    if (cardCode && cardCode.length > 15) {
-      // Take last 15 chars (usually the unique part) or use a hash
-      cardCode = cardCode.replace("TEMP-", "C").slice(-15);
+
+    // If the customer has no valid sequential CardCode yet (e.g. a TEMP-/NC-
+    // placeholder, or none at all), allocate a proper unique one and create it
+    // in SAP atomically. This avoids inventing garbage codes via string slicing
+    // and guarantees no two customers ever share a CardCode.
+    const hasValidSequentialCode = /^C\d+$/.test(cardCode || "");
+    if (!hasValidSequentialCode) {
+      const {
+        createCustomerInSAPWithUniqueCode,
+      } = require("./sapB1CustomerIntegration");
+      const sapResponse = await createCustomerInSAPWithUniqueCode(customer);
+
+      const Customer = require("../models/Customer");
+      await Customer.findByIdAndUpdate(customer._id, {
+        CardCode: sapResponse.CardCode,
+        SyncedWithSAP: true,
+        LocalStatus: "Synced",
+        customerType: "sap",
+      });
+      console.log(
+        `Allocated CardCode ${sapResponse.CardCode} for ${customer.CardName} (was ${customer.CardCode || "none"})`
+      );
+      return { success: true, CardCode: sapResponse.CardCode };
     }
 
     const bpData = {

@@ -19,17 +19,16 @@ const {
   generateNextCardCode,
   formatCustomerForSAP,
   createCustomerInSAP,
+  createCustomerInSAPWithUniqueCode,
   checkCustomerExistsInSAP,
 } = require("../utils/sapB1CustomerIntegration");
 
 // Helper function to push customer to SAP
 async function pushCustomerToSAPInternal(customer) {
   try {
-    // Format the customer for SAP B1
-    const sapCustomer = await formatCustomerForSAP(customer);
-
-    // Push to SAP B1
-    const sapResponse = await createCustomerInSAP(sapCustomer);
+    // Allocate a guaranteed-unique CardCode and create in SAP atomically
+    // (collision-safe — see createCustomerInSAPWithUniqueCode).
+    const sapResponse = await createCustomerInSAPWithUniqueCode(customer);
 
     // Update local customer with SAP CardCode if successful
     if (sapResponse && sapResponse.CardCode) {
@@ -327,20 +326,18 @@ exports.approveCustomerFromTask = async (req, res) => {
     const customer = task.relatedCustomer;
 
     if (action === 'approve') {
-      // Get the next CardCode from SAP
-      const nextCardCode = await generateNextCardCode();
-
-      // Update customer with approval details
+      // Update customer with approval details. The CardCode is allocated
+      // atomically by the SAP push below so it can never collide with a
+      // concurrently-approved customer.
       customer.approvalStatus = "approved";
       customer.approvedBy = req.user._id;
       customer.approvedAt = new Date();
-      customer.CardCode = nextCardCode;
       customer.status = "active";
       customer.updatedAt = new Date();
 
       await customer.save();
 
-      // Push to SAP automatically after approval
+      // Push to SAP automatically after approval (allocates the final CardCode)
       const sapResult = await pushCustomerToSAPInternal(customer);
 
       // Update task status
