@@ -38,6 +38,15 @@ const invoiceSchema = new mongoose.Schema(
       default: false,
     },
 
+    // Automated daily invoice email tracking
+    // Set once the daily auto-email job has emailed this invoice to the customer,
+    // so the same invoice is never emailed twice.
+    autoEmail: {
+      sentAt: { type: Date, default: null },
+      recipient: { type: String, default: null },
+      emailLog: { type: mongoose.Schema.Types.ObjectId, ref: "EmailLog", default: null },
+    },
+
     // Original SAP B1 fields
     DocEntry: {
       type: Number,

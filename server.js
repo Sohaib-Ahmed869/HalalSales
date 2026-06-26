@@ -87,6 +87,8 @@ const agentRoutes = require('./routes/agentRoutes');
 const newSupplierRoutes = require('./routes/newSupplier.routes');
 const ringoverExportRoutes = require('./routes/ringoverExport.routes');
 const { startDailyCron } = require('./services/ringoverDailyExportCron');
+const invoiceEmailSettingsRoutes = require('./routes/invoiceEmailSettings.routes');
+const { initInvoiceEmailCron } = require('./services/dailyInvoiceEmailCron');
 // Initialize express app
 const app = express();
 
@@ -253,6 +255,7 @@ app.use("/api/whatsapp-ai", whatsappAIAgentRoutes);
 app.use("/api/agents", agentRoutes);
 app.use("/api/new-suppliers", newSupplierRoutes);
 app.use("/api/ringover-export", ringoverExportRoutes);
+app.use("/api/invoice-email-settings", invoiceEmailSettingsRoutes);
 // Health check route
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });
@@ -282,6 +285,13 @@ httpServer.listen(PORT, () => {
   } catch (error) {
     console.error("❌ Error starting Ringover cron:", error);
   }
+
+  // Start Daily Invoice Email Cron (configurable French-clock send time)
+  initInvoiceEmailCron()
+    .then(() => console.log("📧 Daily invoice email cron initialised"))
+    .catch((error) =>
+      console.error("❌ Error starting daily invoice email cron:", error)
+    );
 });
 // Handle unhandled promise rejections
 process.on("unhandledRejection", (err) => {

@@ -515,7 +515,7 @@ When calling extract_quotation, disambiguate unitPrice vs totalPrice carefully:
      - overallDecision "request_complete_quote" → update_rfq_vendor stays "sent", send_reply requesting pricing for missing items
      - overallDecision "escalate_to_human" → update_rfq_vendor notes "NEEDS HUMAN REVIEW", do NOT send_reply
    - question → send_reply using company info and RFQ details above
-   - decline → update_rfq_vendor status "declined", send_reply acknowledging professionally
+   - decline → ONLY when the vendor explicitly refuses to supply at all. update_rfq_vendor status "declined", send_reply acknowledging professionally. ⚠️ DO NOT classify as decline if the vendor says "this is our best/final price" while still willing to sell — that is a quotation, handle it as quotation with the appropriate negotiation decision.
    - out_of_office → update_rfq_vendor notes with reminder, do NOT send_reply
    - unclear → send_reply asking for clarification
 3. Always call mark_email_read at the end.
@@ -710,11 +710,12 @@ ${fullEmailContent}`;
                     };
                 }
 
-                // Check if all vendors responded
-                const allResponded = rfq.vendorsContacted.every(
-                    v => ['responded', 'declined'].includes(v.status)
-                );
-                rfq.status = allResponded ? 'completed' : 'in_progress';
+                // Keep the RFQ live while negotiations are ongoing.
+                // Only an admin can mark an RFQ as 'completed' — auto-completing
+                // as soon as all vendors have 'responded'/'declined' was causing
+                // active negotiations to drop out of the inbox check permanently
+                // (the RFQ fell out of the status:{$in:['sent','in_progress']} query).
+                if (rfq.status === 'sent') rfq.status = 'in_progress';
 
                 rfq.markModified('vendorsContacted');
                 await rfq.save();

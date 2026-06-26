@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AI-Powered Client &amp; Supplier Outreach — Scoping Session</title>
+<style>
+  :root{
+    --bg:#0a0e17;
+    --bg2:#0f1320;
+    --panel:rgba(255,255,255,0.04);
+    --panel-brd:rgba(255,255,255,0.09);
+    --ink:#eef2f9;
+    --muted:#97a3b6;
+    --faint:#5f6b80;
+    --teal:#2dd4bf;
+    --teal-d:#0d9488;
+    --gold:#f5c451;
+    --violet:#a78bfa;
+    --rose:#fb7185;
+    --blue:#60a5fa;
+    --green:#34d399;
+    --ok:#34d399;
+    --shadow:0 24px 60px rgba(0,0,0,.45);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:
+      radial-gradient(1200px 700px at 80% -10%, rgba(45,212,191,.10), transparent 60%),
+      radial-gradient(1000px 700px at -10% 110%, rgba(167,139,250,.10), transparent 55%),
+      var(--bg);
+    color:var(--ink);
+    font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+    overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+  /* ---------- Deck mechanics ---------- */
+  .deck{position:fixed;inset:0}
+  .slide{
+    position:absolute;inset:0;
+    display:flex;flex-direction:column;justify-content:center;
+    padding:6vh 7vw;
+    opacity:0;visibility:hidden;
+    transform:translateY(24px) scale(.99);
+    transition:opacity .5s ease, transform .5s ease, visibility .5s;
+    overflow:hidden;
+  }
+  .slide.active{opacity:1;visibility:visible;transform:none;z-index:2}
+  .slide.prev{transform:translateY(-24px) scale(.99)}
+
+  /* progress + chrome */
+  .progress{position:fixed;top:0;left:0;height:3px;background:linear-gradient(90deg,var(--teal),var(--gold));z-index:50;transition:width .4s ease}
+  .chrome{position:fixed;bottom:18px;right:26px;z-index:50;display:flex;gap:14px;align-items:center;color:var(--faint);font-size:12px;letter-spacing:.08em}
+  .chrome b{color:var(--muted);font-weight:600}
+  .brandmark{position:fixed;top:22px;left:34px;z-index:50;display:flex;align-items:center;gap:10px;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
+  .dot{width:9px;height:9px;border-radius:50%;background:linear-gradient(135deg,var(--teal),var(--gold));box-shadow:0 0 14px rgba(45,212,191,.7)}
+  .hint{position:fixed;bottom:18px;left:26px;z-index:50;color:var(--faint);font-size:11px;letter-spacing:.05em}
+  kbd{background:rgba(255,255,255,.07);border:1px solid var(--panel-brd);border-radius:5px;padding:1px 6px;font-size:11px;color:var(--muted)}
+
+  /* ---------- Typography ---------- */
+  .eyebrow{font-size:13px;letter-spacing:.28em;text-transform:uppercase;color:var(--teal);font-weight:600;margin-bottom:20px}
+  h1{font-size:clamp(34px,5.4vw,72px);line-height:1.04;font-weight:800;letter-spacing:-.02em}
+  h2{font-size:clamp(26px,3.6vw,46px);line-height:1.08;font-weight:800;letter-spacing:-.015em;margin-bottom:8px}
+  h3{font-size:clamp(17px,1.5vw,21px);font-weight:700}
+  .lead{font-size:clamp(16px,1.7vw,22px);color:var(--muted);max-width:60ch;line-height:1.5;margin-top:18px}
+  .grad{background:linear-gradient(120deg,var(--teal),var(--gold));-webkit-background-clip:text;background-clip:text;color:transparent}
+  p{color:var(--muted);line-height:1.55}
+  .small{font-size:13px}
+  .slidehead{margin-bottom:30px}
+  .slidehead .eyebrow{margin-bottom:12px}
+
+  /* ---------- Layout helpers ---------- */
+  .grid{display:grid;gap:20px}
+  .g2{grid-template-columns:repeat(2,1fr)}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  .g4{grid-template-columns:repeat(4,1fr)}
+  .row{display:flex;gap:18px;align-items:center}
+  .wrap{display:flex;flex-wrap:wrap;gap:14px}
+
+  .card{
+    background:var(--panel);border:1px solid var(--panel-brd);border-radius:18px;
+    padding:24px;backdrop-filter:blur(8px);position:relative;overflow:hidden;
+  }
+  .card.tint::before{content:"";position:absolute;inset:0;background:linear-gradient(160deg,var(--tint,rgba(45,212,191,.10)),transparent 70%);pointer-events:none}
+  .card h3{margin-bottom:8px}
+  .card p{font-size:14.5px}
+  .ico{width:42px;height:42px;border-radius:11px;display:grid;place-items:center;font-size:20px;margin-bottom:14px;background:rgba(255,255,255,.06);border:1px solid var(--panel-brd)}
+  .tag{display:inline-flex;align-items:center;gap:7px;font-size:11.5px;letter-spacing:.04em;padding:5px 11px;border-radius:999px;border:1px solid var(--panel-brd);background:rgba(255,255,255,.04);color:var(--muted)}
+  .tag.live{color:var(--green);border-color:rgba(52,211,153,.35);background:rgba(52,211,153,.08)}
+  .tag.build{color:var(--gold);border-color:rgba(245,196,81,.35);background:rgba(245,196,81,.08)}
+  .pill{font-size:11px;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.06);color:var(--muted);border:1px solid var(--panel-brd)}
+
+  /* ---------- Flow / pipeline ---------- */
+  .flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap}
+  .step{
+    flex:1;min-width:130px;background:var(--panel);border:1px solid var(--panel-brd);
+    border-radius:14px;padding:16px 16px;position:relative;
+  }
+  .step .n{font-size:11px;color:var(--teal);font-weight:700;letter-spacing:.1em}
+  .step h4{font-size:15px;margin:6px 0 5px;font-weight:700}
+  .step p{font-size:12.5px;line-height:1.4}
+  .arrow{display:grid;place-items:center;color:var(--faint);font-size:22px;padding:0 6px;align-self:center}
+
+  .lane{display:grid;grid-template-columns:140px 1fr;gap:0;border:1px solid var(--panel-brd);border-radius:14px;overflow:hidden;margin-bottom:14px}
+  .lane .label{background:rgba(255,255,255,.04);padding:16px;display:flex;flex-direction:column;justify-content:center;gap:6px;border-right:1px solid var(--panel-brd)}
+  .lane .label .em{font-size:22px}
+  .lane .label h4{font-size:15px}
+  .lane .label span{font-size:11.5px;color:var(--faint)}
+  .lane .body{padding:14px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .chip{font-size:12.5px;padding:8px 13px;border-radius:10px;background:rgba(255,255,255,.05);border:1px solid var(--panel-brd);color:var(--ink);white-space:nowrap}
+  .chip .k{color:var(--teal);font-weight:600}
+  .mini-arr{color:var(--faint);font-size:16px}
+
+  .kpi{display:flex;flex-direction:column;gap:4px}
+  .kpi .num{font-size:clamp(30px,3.6vw,46px);font-weight:800;letter-spacing:-.02em}
+  .kpi .num.g{background:linear-gradient(120deg,var(--teal),var(--gold));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .kpi .lbl{font-size:13px;color:var(--muted)}
+
+  ul.clean{list-style:none;display:flex;flex-direction:column;gap:11px}
+  ul.clean li{display:flex;gap:11px;font-size:15px;color:var(--ink);line-height:1.45;align-items:flex-start}
+  ul.clean li::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--teal);margin-top:8px;flex:none;box-shadow:0 0 10px rgba(45,212,191,.6)}
+  ul.clean li b{color:var(--ink)}
+  ul.clean li span{color:var(--muted)}
+
+  .quad{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .quad .card{padding:22px}
+  .seg-h{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+  .seg-h .em{font-size:26px}
+  .seg-h .pct{margin-left:auto;font-size:13px;color:var(--faint)}
+
+  .speaker{position:fixed;left:0;right:0;bottom:0;z-index:60;background:linear-gradient(0deg,rgba(5,8,13,.98),rgba(5,8,13,.92));border-top:1px solid var(--panel-brd);padding:18px 26px 26px;transform:translateY(101%);transition:transform .35s ease;max-height:42vh;overflow:auto}
+  .speaker.show{transform:none}
+  .speaker .sp-ttl{font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--teal);margin-bottom:8px}
+  .speaker p{color:var(--ink);font-size:14.5px;line-height:1.55;max-width:90ch}
+  .speaker.hidden-note{display:none}
+
+  .legend{display:flex;gap:16px;margin-top:8px;flex-wrap:wrap}
+  .legend span{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
+  .swatch{width:11px;height:11px;border-radius:3px;display:inline-block}
+
+  .center{align-items:center;text-align:center}
+  .center .lead{margin-left:auto;margin-right:auto}
+  .stack{display:flex;flex-direction:column;gap:18px}
+
+  .num-track{display:flex;gap:18px;flex-wrap:wrap;margin-top:10px}
+  .footer-note{margin-top:auto;padding-top:18px;color:var(--faint);font-size:12.5px;display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+  .div{height:1px;background:var(--panel-brd);margin:18px 0}
+
+  .ringer{position:absolute;right:-80px;top:-80px;width:280px;height:280px;border-radius:50%;background:conic-gradient(from 0deg,var(--teal),var(--gold),var(--violet),var(--teal));filter:blur(60px);opacity:.18;pointer-events:none}
+
+  .phase{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border:1px solid var(--panel-brd);border-radius:16px;overflow:hidden}
+  .phase .p{padding:22px;border-right:1px solid var(--panel-brd);position:relative}
+  .phase .p:last-child{border-right:none}
+  .phase .p .ph{font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--teal);font-weight:700}
+  .phase .p h3{margin:8px 0 4px;font-size:19px}
+  .phase .p .when{font-size:12px;color:var(--faint);margin-bottom:12px}
+  .phase .p ul{list-style:none;display:flex;flex-direction:column;gap:8px}
+  .phase .p ul li{font-size:13.5px;color:var(--muted);display:flex;gap:8px}
+  .phase .p ul li::before{content:"›";color:var(--teal)}
+
+  .ask{display:flex;flex-direction:column;gap:13px}
+  .ask .q{display:flex;gap:14px;align-items:flex-start;background:var(--panel);border:1px solid var(--panel-brd);border-radius:13px;padding:16px 18px}
+  .ask .q .qn{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;background:rgba(245,196,81,.12);color:var(--gold);font-weight:700;flex:none;border:1px solid rgba(245,196,81,.3)}
+  .ask .q h4{font-size:15.5px;margin-bottom:3px}
+  .ask .q p{font-size:13px}
+
+  @media (max-width:900px){
+    .g3,.g4,.quad,.phase{grid-template-columns:1fr 1fr}
+    .lane{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+<div class="progress" id="prog"></div>
+<div class="brandmark"><span class="dot"></span> Client Outreach · AI Agents</div>
+<div class="chrome"><b id="snum">01</b> / <span id="stot">16</span></div>
+<div class="hint"><kbd>→</kbd> next · <kbd>←</kbd> back · <kbd>N</kbd> notes · <kbd>F</kbd> fullscreen</div>
+
+<div class="deck" id="deck">
+
+  <!-- 1 — TITLE -->
+  <section class="slide center" data-note="Welcome. This is a scoping session, not a final proposal. The goal today is to align on the vision, show you what's already running, and agree on what we build first. By the end you'll see exactly how AI agents take over the repetitive, high-volume parts of client and supplier outreach — and where you stay in control.">
+    <div class="ringer"></div>
+    <div class="eyebrow">Scoping Session · Confidential</div>
+    <h1>AI-Powered <span class="grad">Client &amp; Supplier</span><br/>Outreach</h1>
+    <p class="lead">An autonomous outreach layer for your B2B wholesale business — agents that reactivate dormant accounts, nurture active buyers, find the customers you're missing, onboard new ones, and run your promotions across WhatsApp &amp; email. With you in control.</p>
+    <div class="wrap" style="margin-top:34px;justify-content:center">
+      <span class="tag live">● Built on your live platform</span>
+      <span class="tag">WhatsApp · Email · SAP · HubSpot</span>
+      <span class="tag">GPT-4o agents</span>
+    </div>
+  </section>
+
+  <!-- 2 — AGENDA -->
+  <section class="slide" data-note="Here's the 20-minute arc. We'll start with why manual outreach hits a ceiling, then the agent model, then walk each customer segment, the campaign engine, supplier sourcing, the architecture, and finally the decisions I need from you to scope phase one.">
+    <div class="slidehead"><div class="eyebrow">Agenda</div><h2>What we'll cover today</h2></div>
+    <div class="grid g3">
+      <div class="card tint"><div class="ico">01</div><h3>The opportunity</h3><p>Why manual outreach caps your growth — and where AI changes the math.</p></div>
+      <div class="card tint"><div class="ico">02</div><h3>The agent model</h3><p>One orchestrator, a team of specialist agents, always-on.</p></div>
+      <div class="card tint"><div class="ico">03</div><h3>Customer segments</h3><p>Active · Dormant · Unreachable · New — a flow for each.</p></div>
+      <div class="card tint"><div class="ico">04</div><h3>Campaigns &amp; promotions</h3><p>How a single promo reaches the right people the right way.</p></div>
+      <div class="card tint"><div class="ico">05</div><h3>Supplier sourcing</h3><p>Finding &amp; verifying suppliers — grounded, not guessed.</p></div>
+      <div class="card tint"><div class="ico">06</div><h3>Roadmap &amp; decisions</h3><p>What we build first, and what I need from you.</p></div>
+    </div>
+  </section>
+
+  <!-- 3 — PROBLEM -->
+  <section class="slide" data-note="The core problem: outreach quality scales with attention, and human attention is fixed. A rep can meaningfully touch maybe a few dozen accounts a week. Dormant customers go cold silently. Records with a missing email or a dead phone number just sit there. Promotions go to whoever someone remembers to message. None of this is a people problem — it's a throughput problem. That's exactly what agents fix.">
+    <div class="slidehead"><div class="eyebrow">The opportunity</div><h2>Outreach quality scales with attention.<br/>Attention doesn't scale.</h2></div>
+    <div class="grid g2" style="align-items:start">
+      <div class="stack">
+        <div class="card tint" style="--tint:rgba(251,113,133,.12)">
+          <h3 style="color:var(--rose)">Where revenue leaks today</h3>
+          <ul class="clean" style="margin-top:12px">
+            <li><span><b>Dormant accounts go cold silently</b> — nobody notices a buyer stopped ordering until the quarter closes.</span></li>
+            <li><span><b>Incomplete records rot</b> — a missing email or dead number means that account is simply unreachable.</span></li>
+            <li><span><b>Promotions are ad-hoc</b> — campaigns reach whoever a rep happens to remember.</span></li>
+            <li><span><b>Follow-up is the first thing dropped</b> when the team is busy.</span></li>
+          </ul>
+        </div>
+      </div>
+      <div class="stack">
+        <div class="grid g2">
+          <div class="card kpi"><div class="num g">24/7</div><div class="lbl">Agents never sleep, never forget a follow-up</div></div>
+          <div class="card kpi"><div class="num g">100s</div><div class="lbl">Accounts touched per day vs. dozens manually</div></div>
+          <div class="card kpi"><div class="num g">&lt;5min</div><div class="lbl">Reply latency — agent answers while intent is hot</div></div>
+          <div class="card kpi"><div class="num g">1</div><div class="lbl">Inbox of truth — every channel, one timeline</div></div>
+        </div>
+        <div class="card" style="--tint:rgba(45,212,191,.1)">
+          <p style="font-size:15px;color:var(--ink)">The team stops doing the repetitive 80% and spends its time on the deals that actually need a human.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4 — THE AGENT MODEL -->
+  <section class="slide" data-note="Think of it as a digital outreach team. At the centre is an orchestrator — it watches for events: a customer went quiet, a campaign launched, a supplier replied. It dispatches the right specialist agent. Each agent has one job and does it well. They all read and write to your existing systems — SAP, HubSpot, the customer database — so nothing lives in a silo. And critically, anything sensitive routes to a human for approval before it goes out.">
+    <div class="slidehead"><div class="eyebrow">The agent model</div><h2>Not one chatbot — a coordinated team</h2></div>
+    <div class="grid" style="grid-template-columns:1.1fr 1fr;align-items:center;gap:34px">
+      <div>
+        <div class="card" style="--tint:rgba(167,139,250,.14);text-align:center;padding:28px">
+          <span class="tag" style="margin-bottom:10px">Always-on</span>
+          <h3 style="font-size:22px;margin-bottom:6px">Orchestrator Agent</h3>
+          <p style="font-size:13.5px">Watches every event · decides who acts · enforces guardrails &amp; timing</p>
+        </div>
+        <div style="text-align:center;color:var(--faint);font-size:24px;margin:6px 0">↓ dispatches ↓</div>
+        <div class="grid g2">
+          <div class="step"><span class="n">SPECIALIST</span><h4>🔄 Reactivation</h4><p>Wins back dormant buyers</p></div>
+          <div class="step"><span class="n">SPECIALIST</span><h4>💬 Nurture</h4><p>Reorders &amp; upsell for actives</p></div>
+          <div class="step"><span class="n">SPECIALIST</span><h4>🔎 Discovery</h4><p>Finds missing contact data</p></div>
+          <div class="step"><span class="n">SPECIALIST</span><h4>📣 Campaign</h4><p>Runs promotions across segments</p></div>
+        </div>
+      </div>
+      <div class="stack">
+        <h3 style="margin-bottom:4px">Three things make it work</h3>
+        <ul class="clean">
+          <li><span><b>Event-driven, not blast-driven.</b> Agents react to real signals — a quiet account, a hot reply, a launched promo — so every message has a reason.</span></li>
+          <li><span><b>Grounded in your data.</b> Agents read &amp; write SAP, HubSpot and your customer DB live. No parallel spreadsheet, no stale copy.</span></li>
+          <li><span><b>Human-in-the-loop by design.</b> Pricing, big accounts, anything sensitive — the agent drafts, a person approves.</span></li>
+        </ul>
+        <div class="card small" style="--tint:rgba(45,212,191,.1)"><span class="tag live" style="margin-bottom:8px">● Foundation live today</span><p style="font-size:13.5px">Your platform already runs an event-driven orchestrator, WhatsApp + email agents, and SAP/HubSpot sync. We're extending a working spine — not starting from zero.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5 — SEGMENTATION OVERVIEW -->
+  <section class="slide" data-note="Every customer record falls into one of four buckets, and each bucket needs a completely different conversation. Active buyers need nurture and timely reorders. Dormant accounts need a reason to come back. Unreachable records — missing or dead contact info — need to be found and enriched before any outreach is even possible. And brand-new prospects need onboarding. The agent reads the signals — last order date, contact completeness, lifecycle status — and routes each account to the right play automatically. The next four slides walk each one.">
+    <div class="slidehead"><div class="eyebrow">Customer segments</div><h2>Four kinds of customer. Four different plays.</h2></div>
+    <div class="quad">
+      <div class="card tint" style="--tint:rgba(52,211,153,.12)">
+        <div class="seg-h"><span class="em">🟢</span><h3>Active</h3><span class="pct">ordering recently</span></div>
+        <p>Buying on cadence. <b>Goal:</b> protect &amp; grow — timely reorders, basket upsell, never let them drift.</p>
+      </div>
+      <div class="card tint" style="--tint:rgba(245,196,81,.12)">
+        <div class="seg-h"><span class="em">🟡</span><h3>Dormant / Dead</h3><span class="pct">gone quiet</span></div>
+        <p>Once bought, now silent. <b>Goal:</b> reactivate with a relevant reason — win-back offer, "we miss you", new range.</p>
+      </div>
+      <div class="card tint" style="--tint:rgba(96,165,250,.12)">
+        <div class="seg-h"><span class="em">🔵</span><h3>Unreachable</h3><span class="pct">missing contact data</span></div>
+        <p>The record exists but the email/phone is missing or dead. <b>Goal:</b> find &amp; verify a real contact first, then engage.</p>
+      </div>
+      <div class="card tint" style="--tint:rgba(167,139,250,.12)">
+        <div class="seg-h"><span class="em">🟣</span><h3>New / Prospect</h3><span class="pct">just arrived</span></div>
+        <p>Fresh lead or first-time buyer. <b>Goal:</b> fast welcome, qualify, onboard into SAP, and convert to a repeat account.</p>
+      </div>
+    </div>
+    <div class="footer-note"><span>Routing signal: <b style="color:var(--muted)">last activity date</b></span><span>·</span><span><b style="color:var(--muted)">contact completeness</b></span><span>·</span><span><b style="color:var(--muted)">lifecycle status</b></span><span>·</span><span><b style="color:var(--muted)">order history</b></span></div>
+  </section>
+
+  <!-- 6 — ACTIVE FLOW -->
+  <section class="slide" data-note="Active buyers. The agent watches order cadence per account — if someone reorders every three weeks and week four is approaching with no order, that's a signal. It opens a friendly WhatsApp or email at the right moment, suggests the usual basket plus a relevant add-on based on what similar buyers take, and if they reply it can take the reorder straight into the system. Anything involving custom pricing pauses for rep approval. The win here is zero accounts silently drifting from active to dormant.">
+    <div class="slidehead"><div class="eyebrow">Segment 1 · 🟢 Active buyers</div><h2>Protect the cadence, grow the basket</h2></div>
+    <div class="flow" style="margin-bottom:22px">
+      <div class="step"><span class="n">SIGNAL</span><h4>Cadence watch</h4><p>Order rhythm slips vs. this account's normal pattern</p></div>
+      <div class="arrow">→</div>
+      <div class="step"><span class="n">REACH</span><h4>Timely nudge</h4><p>WhatsApp/email at the right moment — "time to restock?"</p></div>
+      <div class="arrow">→</div>
+      <div class="step"><span class="n">GROW</span><h4>Smart upsell</h4><p>Suggests add-ons similar buyers take</p></div>
+      <div class="arrow">→</div>
+      <div class="step"><span class="n">CONVERT</span><h4>Capture reorder</h4><p>Drafts the order; pricing routes to a human</p></div>
+      <div class="arrow">→</div>
+      <div class="step"><span class="n">LOG</span><h4>Sync</h4><p>Activity &amp; order written back to SAP/CRM</p></div>
+    </div>
+    <div class="grid g3">
+      <div class="card"><h3 style="font-size:16px">Trigger examples</h3><ul class="clean" style="margin-top:10px;font-size:13.5px"><li><span>Reorder window approaching</span></li><li><span>Basket shrinking month-on-month</span></li><li><span>Bought A but never tried complementary B</span></li></ul></div>
+      <div class="card"><h3 style="font-size:16px">Guardrails</h3><ul class="clean" style="margin-top:10px;font-size:13.5px"><li><span>Custom pricing → rep approval</span></li><li><span>Frequency caps per account</span></li><li><span>Quiet hours &amp; opt-out respected</span></li></ul></div>
+      <div class="card kpi" style="justify-content:center"><div class="num g">0</div><div class="lbl">active accounts silently drifting to dormant</div></div>
+    </div>
+  </section>
+
+  <!-- 7 — DORMANT FLOW -->
+  <section class="slide" data-note="Dormant or dead accounts — the biggest hidden revenue pool. The agent flags anyone past their normal reorder window by a wide margin, segments them by why they likely left and what they used to buy, and runs a structured win-back: a soft re-open, then a reason to return — a returning-customer offer, a new range in their category, restocked items they used to buy. It tries a couple of angles spaced over time, and the moment someone re-engages it hands a warm, context-rich thread to a rep or closes the reorder itself. Accounts that stay cold after the sequence get parked, so we're never spamming.">
+    <div class="slidehead"><div class="eyebrow">Segment 2 · 🟡 Dormant / Dead</div><h2>Win back the buyers you've gone quiet with</h2></div>
+    <div class="grid" style="grid-template-columns:1.05fr 1fr;gap:28px;align-items:start">
+      <div>
+        <div class="lane"><div class="label"><span class="em">🔎</span><h4>Detect</h4><span>far past reorder window</span></div><div class="body"><span class="chip"><span class="k">Signal:</span> no order in N× cadence</span><span class="mini-arr">→</span><span class="chip">segment by category &amp; reason</span></div></div>
+        <div class="lane"><div class="label"><span class="em">✉️</span><h4>Re-open</h4><span>low-pressure touch</span></div><div class="body"><span class="chip">"We've missed you"</span><span class="mini-arr">→</span><span class="chip">listen for the why</span></div></div>
+        <div class="lane"><div class="label"><span class="em">🎁</span><h4>Reason to return</h4><span>relevant, not generic</span></div><div class="body"><span class="chip">win-back offer</span><span class="mini-arr">·</span><span class="chip">new range</span><span class="mini-arr">·</span><span class="chip">restocked favourites</span></div></div>
+        <div class="lane"><div class="label"><span class="em">🤝</span><h4>Hand-off / close</h4><span>on re-engagement</span></div><div class="body"><span class="chip">warm thread → rep</span><span class="mini-arr">or</span><span class="chip">agent takes reorder</span></div></div>
+      </div>
+      <div class="stack">
+        <div class="card" style="--tint:rgba(245,196,81,.12)">
+          <h3>Why it works where blasts fail</h3>
+          <ul class="clean" style="margin-top:12px">
+            <li><span><b>Personal &amp; specific</b> — references what <i>this</i> account actually bought.</span></li>
+            <li><span><b>Patient sequencing</b> — a few angles over weeks, not one shout.</span></li>
+            <li><span><b>Knows when to stop</b> — no response after the sequence → parked, not spammed.</span></li>
+          </ul>
+        </div>
+        <div class="card kpi"><div class="num g">Latent</div><div class="lbl">This segment is usually the fastest ROI — the relationship already existed.</div></div>
+        <div class="card small"><span class="tag build">⚙ To scope</span> <p style="margin-top:8px;font-size:13px">Today the platform tracks <b>last-activity date</b> but has no formal "dormant" lifecycle stage on customers. Defining that threshold is a phase-one decision (see closing slide).</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 8 — UNREACHABLE / DISCOVERY -->
+  <section class="slide" data-note="This is the segment most systems ignore: the customer is 'not there' — the record exists but you can't reach them. Missing email, dead phone, no contact at all. You can't outreach to a blank. So before any message, a discovery agent goes and finds a real, verified contact. And this is important for the client to hear — it does not make contacts up. It searches the open web, finds the company's official site, crawls the contact and legal pages, extracts real emails and phone numbers, and verifies them — domain match plus a live mail-server check — before anything is trusted. Only verified contacts flow into outreach. This exact pipeline already runs in your system for suppliers; we point it at customers.">
+    <div class="slidehead"><div class="eyebrow">Segment 3 · 🔵 Unreachable — "the customers that aren't there"</div><h2>You can't message a blank. So first, we find them.</h2></div>
+    <div class="flow" style="margin-bottom:20px">
+      <div class="step"><span class="n">1 · SEARCH</span><h4>Find the company</h4><p>Targeted web search → official website</p></div>
+      <div class="arrow">→</div>
+      <div class="step"><span class="n">2 · CRAWL</span><h4>Read the right pages</h4><p>Contact · Impressum · Mentions légales</p></div>
+      <div class="arrow">→</div>
+      <div class="step"><span class="n">3 · EXTRACT</span><h4>Pull real contacts</h4><p>Emails &amp; phones from the page text</p></div>
+      <div class="arrow">→</div>
+      <div class="step" style="border-color:rgba(52,211,153,.4)"><span class="n" style="color:var(--green)">4 · VERIFY</span><h4>Prove they're real</h4><p>Domain match + live mail-server (MX) check</p></div>
+      <div class="arrow">→</div>
+      <div class="step"><span class="n">5 · ENGAGE</span><h4>Hand to outreach</h4><p>Only verified contacts proceed</p></div>
+    </div>
+    <div class="grid g2" style="align-items:start">
+      <div class="card" style="--tint:rgba(52,211,153,.1)"><span class="tag live">● Running today (for suppliers)</span><p style="margin-top:10px;font-size:14.5px"><b>The agent never invents a contact.</b> The AI only <i>ranks</i> what was actually scraped and verified from the real web. If nothing checks out, the record is flagged for a human — never a fabricated email.</p></div>
+      <div class="card"><h3 style="font-size:16px">What this unlocks</h3><ul class="clean" style="margin-top:10px;font-size:14px"><li><span>Dead records in your DB become reachable accounts</span></li><li><span>Bounce rates stay low — every address is pre-checked</span></li><li><span>Sales reps get clean, verified contacts handed to them</span></li></ul></div>
+    </div>
+  </section>
+
+  <!-- 9 — NEW / PROSPECT -->
+  <section class="slide" data-note="New customers and fresh leads. Speed is everything here — intent decays by the hour. The moment a lead lands from any source, the agent acknowledges within minutes, asks a couple of qualifying questions, and based on the answers either books the rep or starts onboarding: collecting the details needed to create the account, and provisioning it in SAP with a proper customer code automatically. The first order is the hardest; the agent removes the friction and the wait. Then it loops the new account into the active-buyer nurture flow so they actually come back.">
+    <div class="slidehead"><div class="eyebrow">Segment 4 · 🟣 New / Prospect</div><h2>Win the first order before intent cools</h2></div>
+    <div class="flow" style="margin-bottom:22px">
+      <div class="step"><span class="n">CAPTURE</span><h4>Instant ack</h4><p>Lead lands → reply in minutes, any channel</p></div>
+      <div class="arrow">→</div>
+      <div class="step"><span class="n">QUALIFY</span><h4>Smart questions</h4><p>Business type, volume, category of interest</p></div>
+      <div class="arrow">→</div>
+      <div class="step"><span class="n">ROUTE</span><h4>Book or onboard</h4><p>High-value → rep · self-serve → continue</p></div>
+      <div class="arrow">→</div>
+      <div class="step"><span class="n">PROVISION</span><h4>Create account</h4><p>Auto-create in SAP with a unique customer code</p></div>
+      <div class="arrow">→</div>
+      <div class="step"><span class="n">NURTURE</span><h4>Into the loop</h4><p>Joins the active-buyer cadence flow</p></div>
+    </div>
+    <div class="grid g3">
+      <div class="card kpi" style="justify-content:center"><div class="num g">&lt;5min</div><div class="lbl">First response — while the lead is still warm</div></div>
+      <div class="card"><span class="tag live">● Live</span><p style="margin-top:8px;font-size:13.5px">Auto-provisioning into SAP with sequential, collision-safe customer codes already runs in your platform.</p></div>
+      <div class="card"><span class="tag build">⚙ To scope</span><p style="margin-top:8px;font-size:13.5px">Lead-capture channels &amp; qualification script — which sources feed in, and what defines a "qualified" lead.</p></div>
+    </div>
+  </section>
+
+  <!-- 10 — CAMPAIGN ENGINE -->
+  <section class="slide" data-note="Now the part you specifically asked about: a marketing campaign launches, a promotion needs to go out — how does the agent handle it? The key idea is that a campaign is not a blast. You define the promo once — the offer, the target, the window. The agent then resolves the audience from live data, and here's the crucial bit: it adapts the message per segment. An active buyer gets 'here's a deal on your usuals.' A dormant account gets 'come back, and here's a reason.' An unreachable record first goes through discovery. A new prospect gets a welcome-flavoured version. Same promo, four conversations. Then it picks the right channel per contact and — importantly for WhatsApp — it respects the platform rules automatically.">
+    <div class="slidehead"><div class="eyebrow">Campaigns &amp; promotions</div><h2>One promo in. The right message to each person, out.</h2></div>
+    <div class="grid" style="grid-template-columns:0.85fr 1.15fr;gap:26px;align-items:center">
+      <div class="card tint" style="--tint:rgba(245,196,81,.14);text-align:center;padding:26px">
+        <span class="tag" style="margin-bottom:10px">You define once</span>
+        <h3 style="font-size:20px">📣 Campaign brief</h3>
+        <p style="margin-top:8px;font-size:13.5px">Offer · target audience · time window · channel preference · guardrails</p>
+        <div class="div"></div>
+        <p style="font-size:12.5px;color:var(--faint)">Agent resolves the audience from live SAP / CRM data — no manual list-building.</p>
+      </div>
+      <div>
+        <p style="font-size:13px;color:var(--faint);margin-bottom:10px;letter-spacing:.05em">AGENT ADAPTS THE SAME PROMO PER SEGMENT →</p>
+        <div class="lane"><div class="label"><span class="em">🟢</span><h4>Active</h4></div><div class="body"><span class="chip"><span class="k">Angle:</span> "deal on your usuals + stock up now"</span></div></div>
+        <div class="lane"><div class="label"><span class="em">🟡</span><h4>Dormant</h4></div><div class="body"><span class="chip"><span class="k">Angle:</span> "come back — here's a reason &amp; an offer"</span></div></div>
+        <div class="lane"><div class="label"><span class="em">🔵</span><h4>Unreachable</h4></div><div class="body"><span class="chip">discovery first</span><span class="mini-arr">→</span><span class="chip">then promo</span></div></div>
+        <div class="lane" style="margin-bottom:0"><div class="label"><span class="em">🟣</span><h4>New</h4></div><div class="body"><span class="chip"><span class="k">Angle:</span> "welcome offer to start your first order"</span></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 11 — CAMPAIGN COMPLIANCE / CHANNEL -->
+  <section class="slide" data-note="Two things make this safe to run at scale. First, channel and compliance. On WhatsApp, you legally cannot just message people — the first business-initiated message must be a pre-approved template, and free-form conversation is only allowed inside a 24-hour window after they reply. Your platform already enforces this exactly: it sends the approved template, then queues the AI conversation and releases it the moment they reply. The client doesn't have to think about it — it just stays compliant. Second, every campaign has a live dashboard: who was reached, who replied, who converted, who opted out — and opt-outs are permanent and respected everywhere.">
+    <div class="slidehead"><div class="eyebrow">Campaigns · safe at scale</div><h2>Right channel, by the rules, fully measured</h2></div>
+    <div class="grid g2" style="align-items:start">
+      <div class="card" style="--tint:rgba(45,212,191,.1)">
+        <span class="tag live">● Compliance already built-in</span>
+        <h3 style="margin-top:12px">WhatsApp, done correctly</h3>
+        <div class="flow" style="margin-top:14px">
+          <div class="step"><span class="n">STEP 1</span><h4>Approved template</h4><p>First touch uses a pre-approved WhatsApp template — policy-compliant</p></div>
+          <div class="arrow">→</div>
+          <div class="step"><span class="n">STEP 2</span><h4>They reply</h4><p>Opens the 24-hour conversation window</p></div>
+          <div class="arrow">→</div>
+          <div class="step"><span class="n">STEP 3</span><h4>AI converses</h4><p>Queued conversation releases automatically</p></div>
+        </div>
+        <p class="small" style="margin-top:14px">Email follows the same discipline — verified addresses, opt-out honoured, sender reputation protected.</p>
+      </div>
+      <div class="stack">
+        <div class="card">
+          <h3>Every campaign is measured live</h3>
+          <div class="grid g2" style="margin-top:14px;gap:12px">
+            <div class="kpi"><div class="num g">Reached</div><div class="lbl">delivered per segment</div></div>
+            <div class="kpi"><div class="num g">Replied</div><div class="lbl">engagement rate</div></div>
+            <div class="kpi"><div class="num g">Converted</div><div class="lbl">orders attributed</div></div>
+            <div class="kpi"><div class="num g">Opted-out</div><div class="lbl">permanent, respected</div></div>
+          </div>
+        </div>
+        <div class="card small"><h3 style="font-size:15px">Hard rules the agent enforces</h3><ul class="clean" style="margin-top:10px;font-size:13.5px"><li><span>Frequency caps — no one gets hammered</span></li><li><span>Quiet hours &amp; timezone aware</span></li><li><span>Unsubscribed &amp; non-marketing flags obeyed</span></li></ul></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 12 — SUPPLIER SOURCING -->
+  <section class="slide" data-note="Outreach runs both directions. On the supply side, when you need to source a product, the agent finds candidate suppliers from multiple sources — your existing SAP vendors, manually uploaded lists, and live scraping of B2B directories like Europages and Alibaba. It fills in missing contact details with that same verified-discovery pipeline. Then it sends the RFQ over WhatsApp or email, and here's the powerful part — it negotiates. It reads each reply, extracts the quoted price into a structured format, answers the supplier's questions, and pushes toward your target price, in English or French. Finally it builds a side-by-side comparison and flags it for a human to pick the winner. This whole loop is live in your platform today.">
+    <div class="slidehead"><div class="eyebrow">The other direction · Supplier sourcing</div><h2>Find suppliers, send RFQs, negotiate — automatically</h2></div>
+    <div class="flow" style="margin-bottom:20px">
+      <div class="step"><span class="n">SOURCE</span><h4>Find suppliers</h4><p>SAP vendors · uploaded lists · live B2B-directory scraping</p></div>
+      <div class="arrow">→</div>
+      <div class="step"><span class="n">ENRICH</span><h4>Verify contacts</h4><p>Same grounded discovery + verification pipeline</p></div>
+      <div class="arrow">→</div>
+      <div class="step"><span class="n">SEND</span><h4>RFQ out</h4><p>WhatsApp/email, bilingual EN/FR, with PDF</p></div>
+      <div class="arrow">→</div>
+      <div class="step" style="border-color:rgba(167,139,250,.4)"><span class="n" style="color:var(--violet)">NEGOTIATE</span><h4>AI back-and-forth</h4><p>Extract quotes · answer questions · push to target price</p></div>
+      <div class="arrow">→</div>
+      <div class="step"><span class="n">DECIDE</span><h4>Compare</h4><p>Side-by-side report → human picks winner</p></div>
+    </div>
+    <div class="grid g3">
+      <div class="card"><span class="tag live">● Live</span><p style="margin-top:8px;font-size:13.5px">Scrapes Europages, Freshdi, Global Sources &amp; Alibaba — European-only filter, progress-tracked.</p></div>
+      <div class="card"><span class="tag live">● Live</span><p style="margin-top:8px;font-size:13.5px">AI reads replies, extracts structured pricing, and negotiates toward your internal target — never revealed to the supplier.</p></div>
+      <div class="card"><span class="tag live">● Live</span><p style="margin-top:8px;font-size:13.5px">Final pick always stays with a person — the agent recommends, you decide.</p></div>
+    </div>
+  </section>
+
+  <!-- 13 — ARCHITECTURE -->
+  <section class="slide" data-note="A quick look under the hood for confidence, not detail. The intelligence is GPT-4o doing structured tasks — classifying messages, extracting data, drafting copy — not freewheeling. It plugs into the channels you already use: WhatsApp Business, email, telephony. It reads and writes your systems of record: SAP, HubSpot, your product catalogue. Everything funnels into one unified conversation timeline so a rep can pick up any thread with full context. And it's all running on your existing live platform — this is an extension, which is why phase one is weeks, not quarters.">
+    <div class="slidehead"><div class="eyebrow">Under the hood</div><h2>How it fits together</h2></div>
+    <div class="grid g4" style="align-items:stretch">
+      <div class="card tint" style="--tint:rgba(167,139,250,.12)"><div class="ico">🧠</div><h3>Intelligence</h3><p style="font-size:13.5px">GPT-4o agents for structured tasks — classify, extract, draft, negotiate. Validated, not freeform.</p></div>
+      <div class="card tint" style="--tint:rgba(45,212,191,.12)"><div class="ico">📡</div><h3>Channels</h3><p style="font-size:13.5px">WhatsApp Business API, email (Gmail/IMAP), telephony — inbound &amp; outbound.</p></div>
+      <div class="card tint" style="--tint:rgba(96,165,250,.12)"><div class="ico">🗄️</div><h3>Systems of record</h3><p style="font-size:13.5px">SAP Business One, HubSpot, PrestaShop, product catalogue — live read/write.</p></div>
+      <div class="card tint" style="--tint:rgba(245,196,81,.12)"><div class="ico">🧵</div><h3>Unified inbox</h3><p style="font-size:13.5px">Every message, every channel, one timeline — reps take over any thread with full context.</p></div>
+    </div>
+    <div class="div"></div>
+    <div class="row" style="justify-content:space-between;flex-wrap:wrap;gap:14px">
+      <span class="pill">Event-driven orchestrator</span>
+      <span class="pill">WhatsApp template + 24h-window compliance</span>
+      <span class="pill">Grounded web discovery + MX verification</span>
+      <span class="pill">Realtime sync &amp; activity logging</span>
+      <span class="pill">Secure: JWT · rate-limit · audit trail</span>
+    </div>
+    <div class="footer-note"><span class="tag live">● Built on your live, in-production stack — phase one extends it, not rebuilds it</span></div>
+  </section>
+
+  <!-- 14 — HUMAN IN THE LOOP -->
+  <section class="slide center" data-note="Before we talk roadmap, the line that matters most to leadership: the agents do the volume, humans keep the judgment. The agent handles detection, drafting, the repetitive follow-up, the data hygiene. Anything that carries risk — pricing, large or sensitive accounts, anything off-script — pauses and waits for a person. Every action is logged and reversible. This isn't AI replacing your team; it's giving each rep the output of ten, while they stay in command.">
+    <div class="eyebrow">The operating principle</div>
+    <h2 style="max-width:20ch;margin:0 auto 22px">Agents do the volume.<br/><span class="grad">Humans keep the judgment.</span></h2>
+    <div class="grid g3" style="max-width:1000px;margin:0 auto;width:100%">
+      <div class="card"><div class="ico">🤖</div><h3>Agent owns</h3><ul class="clean" style="margin-top:10px;font-size:13.5px"><li><span>Detection &amp; timing</span></li><li><span>Drafting &amp; follow-up</span></li><li><span>Data discovery &amp; hygiene</span></li></ul></div>
+      <div class="card" style="--tint:rgba(245,196,81,.12)"><div class="ico">✋</div><h3>Human approves</h3><ul class="clean" style="margin-top:10px;font-size:13.5px"><li><span>Pricing &amp; discounts</span></li><li><span>Large / sensitive accounts</span></li><li><span>Anything off-script</span></li></ul></div>
+      <div class="card"><div class="ico">🛡️</div><h3>Always true</h3><ul class="clean" style="margin-top:10px;font-size:13.5px"><li><span>Every action logged</span></li><li><span>Opt-outs permanent</span></li><li><span>Reversible &amp; auditable</span></li></ul></div>
+    </div>
+  </section>
+
+  <!-- 15 — ROADMAP -->
+  <section class="slide" data-note="How we'd phase it. Phase one — crawl — is the fastest payback and leans on what's already live: turn on reactivation for dormant accounts and contact-discovery for unreachable ones, with full human approval, on one channel. Phase two — walk — adds the active-buyer nurture cadence and the campaign engine with per-segment messaging. Phase three — run — is full autonomy across all four segments and both channels, new-lead onboarding, and a self-serve campaign console for your team. Each phase ships value on its own; you decide to continue based on results, not promises.">
+    <div class="slidehead"><div class="eyebrow">Roadmap</div><h2>Phased — each step pays for the next</h2></div>
+    <div class="phase">
+      <div class="p">
+        <div class="ph">Phase 1 · Crawl</div>
+        <h3>Prove it on the hidden money</h3>
+        <div class="when">Fastest payback · builds on live foundation</div>
+        <ul>
+          <li>Dormant reactivation sequence</li>
+          <li>Unreachable → discovery &amp; verify</li>
+          <li>One channel, full human approval</li>
+          <li>Baseline dashboard &amp; reporting</li>
+        </ul>
+      </div>
+      <div class="p">
+        <div class="ph">Phase 2 · Walk</div>
+        <h3>Scale &amp; campaigns</h3>
+        <div class="when">After phase-1 results land</div>
+        <ul>
+          <li>Active-buyer nurture &amp; reorder</li>
+          <li>Campaign engine, per-segment messaging</li>
+          <li>WhatsApp + email together</li>
+          <li>Frequency, quiet-hours, opt-out controls</li>
+        </ul>
+      </div>
+      <div class="p">
+        <div class="ph">Phase 3 · Run</div>
+        <h3>Autonomous outreach layer</h3>
+        <div class="when">Full operating model</div>
+        <ul>
+          <li>All four segments, both channels</li>
+          <li>New-lead onboarding into SAP</li>
+          <li>Self-serve campaign console</li>
+          <li>Continuous optimisation</li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer-note"><span>Phase 1 deliberately starts where the platform is <b style="color:var(--green)">already strongest</b> — so we show results in weeks.</span></div>
+  </section>
+
+
+</div>
+
+<div class="speaker" id="speaker"><div class="sp-ttl">Speaker notes</div><p id="spnote"></p></div>
+
+<script>
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  const prog = document.getElementById('prog');
+  const snum = document.getElementById('snum');
+  const stot = document.getElementById('stot');
+  const speaker = document.getElementById('speaker');
+  const spnote = document.getElementById('spnote');
+  let i = 0, notesOn = false;
+  stot.textContent = String(slides.length).padStart(2,'0');
+
+  function render(){
+    slides.forEach((s,idx)=>{
+      s.classList.toggle('active', idx===i);
+      s.classList.toggle('prev', idx<i);
+    });
+    prog.style.width = ((i+1)/slides.length*100)+'%';
+    snum.textContent = String(i+1).padStart(2,'0');
+    spnote.textContent = slides[i].dataset.note || '';
+  }
+  function go(n){ i = Math.max(0, Math.min(slides.length-1, n)); render(); }
+
+  document.addEventListener('keydown', e=>{
+    if(e.key==='ArrowRight'||e.key==='PageDown'||e.key===' '){ e.preventDefault(); go(i+1); }
+    else if(e.key==='ArrowLeft'||e.key==='PageUp'){ e.preventDefault(); go(i-1); }
+    else if(e.key==='Home'){ go(0); }
+    else if(e.key==='End'){ go(slides.length-1); }
+    else if(e.key==='n'||e.key==='N'){ notesOn=!notesOn; speaker.classList.toggle('show', notesOn); }
+    else if(e.key==='f'||e.key==='F'){ if(!document.fullscreenElement) document.documentElement.requestFullscreen(); else document.exitFullscreen(); }
+  });
+
+  // click navigation (right half = next, left half = back)
+  document.getElementById('deck').addEventListener('click', e=>{
+    if(e.target.closest('a,button')) return;
+    if(e.clientX > window.innerWidth*0.5) go(i+1); else go(i-1);
+  });
+
+  // touch swipe
+  let tx=0;
+  document.addEventListener('touchstart',e=>tx=e.changedTouches[0].clientX,{passive:true});
+  document.addEventListener('touchend',e=>{const dx=e.changedTouches[0].clientX-tx; if(Math.abs(dx)>50) go(dx<0?i+1:i-1);},{passive:true});
+
+  render();
+</script>
+</body>
+</html>

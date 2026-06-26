@@ -455,7 +455,8 @@ After calling classify_message, handle based on intent:
       * request_complete_quote → briefly ask for the missing items by name.
       * escalate_to_human → just call update_rfq_vendor with notes="NEEDS HUMAN REVIEW" and DO NOT send a reply.
 
-- decline → Acknowledge politely, thank them, keep relationship open, ONE short message. Call update_rfq_vendor status='declined'.
+- decline → ONLY use this when the vendor explicitly refuses to supply the product at all ("we don't carry this", "we can't help", "we're not interested in working with you"). Call update_rfq_vendor status='declined', then send ONE polite message.
+  ⚠️ DO NOT use decline when the vendor says "this is my best/final price" while still willing to sell — that is a quotation. Handle it as quotation/partial_quote with the appropriate negotiation decision (round 2+ → accept or escalate_to_human; DO NOT use reject unless round 3+ and still very far from target).
 
 - out_of_office → Note it in update_rfq_vendor, do NOT send a reply.
 

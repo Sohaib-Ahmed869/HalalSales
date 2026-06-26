@@ -468,6 +468,45 @@ const generateInvoicePage = async (doc, invoice, logoBuffer, isFirstInvoice = fa
     drawFooter();
 };
 
+/**
+ * Build a single PDF buffer containing one page per invoice.
+ * Reusable helper so other services (e.g. the automated daily invoice email
+ * job) render invoices exactly the same way as the manual flows above.
+ *
+ * @param {Array} invoices - array of (lean or hydrated) invoice documents
+ * @returns {Promise<Buffer>} the generated PDF as a Buffer
+ */
+exports.buildInvoicesPdfBuffer = async (invoices) => {
+    if (!Array.isArray(invoices) || invoices.length === 0) {
+        throw new Error("buildInvoicesPdfBuffer requires a non-empty array of invoices");
+    }
+
+    // Download logo once
+    const logoUrl = "https://imageshfs.s3.ap-southeast-2.amazonaws.com/image-removebg-preview+(1).png";
+    const logoBuffer = await downloadImage(logoUrl);
+
+    const doc = new PDFDocument({
+        size: "A4",
+        margins: { top: 40, bottom: 40, left: 40, right: 40 },
+        bufferPages: true,
+    });
+
+    const chunks = [];
+    doc.on("data", (chunk) => chunks.push(chunk));
+
+    const pdfPromise = new Promise((resolve, reject) => {
+        doc.on("end", () => resolve(Buffer.concat(chunks)));
+        doc.on("error", reject);
+    });
+
+    for (let i = 0; i < invoices.length; i++) {
+        await generateInvoicePage(doc, invoices[i], logoBuffer, i === 0);
+    }
+
+    doc.end();
+    return pdfPromise;
+};
+
 // controllers/invoicePdfController.js
 // Add this helper function at the end of the file
 // Bulk email invoices grouped by customer
