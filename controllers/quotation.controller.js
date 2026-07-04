@@ -1604,7 +1604,16 @@ exports.convertToOrder = async (req, res) => {
     }
 
     const userId = req.user._id;
-    const userName = req.user.firstName + " " + req.user.lastName;
+
+    // Note should credit the quotation's original sales agent, not whoever converts it
+    let quotationAgentName = req.user.firstName + " " + req.user.lastName;
+    if (quotation.salesAgent) {
+      const quotationAgent = await User.findById(quotation.salesAgent);
+      if (quotationAgent) {
+        quotationAgentName =
+          quotationAgent.firstName + " " + quotationAgent.lastName;
+      }
+    }
 
     // Generate DocEntry for the new order
     const lastOrder = await SalesOrder.findOne().sort({ DocEntry: -1 });
@@ -1615,7 +1624,7 @@ exports.convertToOrder = async (req, res) => {
 
     const salesAgentName =
       "This order was created from a quotation by " +
-      userName +
+      quotationAgentName +
       " (Quotation ID: " +
       quotation.DocEntry +
       "). With the payment status " +
