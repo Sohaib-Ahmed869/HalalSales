@@ -3114,11 +3114,39 @@ exports.getCustomersPaginated = async (req, res) => {
     }
 
     if (search) {
+      const searchRegex = { $regex: search, $options: "i" };
+
+      // Build a phone-only variant (digits) so numbers stored with spaces/() +
+      // still match a plain-digit search term.
+      const searchDigits = String(search).replace(/\D/g, "");
+
       query.$or = [
-        { CardName: { $regex: search, $options: "i" } },
-        { CardCode: { $regex: search, $options: "i" } },
-        { Email: { $regex: search, $options: "i" } },
+        { CardName: searchRegex },
+        { CardCode: searchRegex },
+        { Email: searchRegex },
+        { firstName: searchRegex },
+        { lastName: searchRegex },
+        { company: searchRegex },
+        { phoneNumber: searchRegex },
+        { additionalPhoneNumbers: searchRegex },
+        // Town / city
+        { "address.city": searchRegex },
+        { "deliveryAddress.city": searchRegex },
+        { "addresses.city": searchRegex },
+        // Postcode / zip
+        { "address.zipCode": searchRegex },
+        { "deliveryAddress.zipCode": searchRegex },
+        { "addresses.zipCode": searchRegex },
       ];
+
+      if (searchDigits.length >= 3) {
+        const digitsRegex = { $regex: searchDigits, $options: "i" };
+        query.$or.push(
+          { phoneNumber: digitsRegex },
+          { additionalPhoneNumbers: digitsRegex }
+        );
+      }
+
       console.log("Added search filter:", search);
     }
 
