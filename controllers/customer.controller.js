@@ -3113,7 +3113,22 @@ exports.getCustomersPaginated = async (req, res) => {
       console.log("Added assignedTo filter:", assignedTo);
     }
 
-    if (search) {
+    // When the search term looks like a SAP card code — the letter 'C' followed
+    // only by digits, e.g. "C1234" — treat it as a precise card-code lookup
+    // instead of a broad free-text search across every field. The old behaviour
+    // matched the term as an unanchored substring against ~14 fields (name,
+    // email, phone, town, postcode…), which returned far too many results for a
+    // structured code. An exact, anchored CardCode match returns just the one
+    // customer the user is after.
+    const trimmedSearch = String(search || "").trim();
+    const isCardCodeSearch = /^[Cc]\d+$/.test(trimmedSearch);
+
+    if (isCardCodeSearch) {
+      // Anchored, case-insensitive exact match on CardCode.
+      const escaped = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      query.CardCode = { $regex: new RegExp(`^${escaped}$`, "i") };
+      console.log("Detected SAP card code search — exact match:", trimmedSearch);
+    } else if (search) {
       const searchRegex = { $regex: search, $options: "i" };
 
       // Build a phone-only variant (digits) so numbers stored with spaces/() +
@@ -3150,14 +3165,19 @@ exports.getCustomersPaginated = async (req, res) => {
       console.log("Added search filter:", search);
     }
 
-    // 🎯 EXCLUDE customers with CardCode starting with 'S'
-    query.CardCode = { $not: { $regex: /^S/i } };
+    // 🎯 EXCLUDE customers with CardCode starting with 'S'.
+    // Skip this when the user did an exact card-code lookup above — a 'Cxxxx'
+    // exact match can never start with 'S', and overwriting query.CardCode here
+    // would clobber that precise filter.
+    if (!isCardCodeSearch) {
+      query.CardCode = { $not: { $regex: /^S/i } };
 
-    if (sapCustomersOnly === 'true') {
-      query.CardCode.$regex = /^C/i;
-      console.log("Filtering to see only SAP customers (CardCode starts with 'C')");
+      if (sapCustomersOnly === 'true') {
+        query.CardCode.$regex = /^C/i;
+        console.log("Filtering to see only SAP customers (CardCode starts with 'C')");
+      }
+      console.log("Added exclusion filter: CardCode NOT starting with 'S'");
     }
-    console.log("Added exclusion filter: CardCode NOT starting with 'S'");
 
     console.log("Final MongoDB query:", JSON.stringify(query, null, 2));
 

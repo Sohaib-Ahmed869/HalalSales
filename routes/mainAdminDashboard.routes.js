@@ -42,6 +42,10 @@ router.get("/revenue-breakdown", dashboardController.getRevenueBreakdown);
 // Per-agent orders, revenue, quotations, target achievement.
 router.get("/team-performance", dashboardController.getTeamPerformance);
 
+// GET /api/dashboard/sales-by-agent?fromDate=...&toDate=...&limit=10
+// Ranked per-agent NET sales (excl. VAT), invoice count and distinct customers.
+router.get("/sales-by-agent", dashboardController.getSalesByAgent);
+
 // GET /api/dashboard/team-logins
 // Login activity summary and per-user last login.
 router.get("/team-logins", dashboardController.getTeamLogins);

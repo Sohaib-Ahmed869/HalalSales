@@ -742,6 +742,110 @@ exports.getTeamPerformance = async (req, res) => {
 };
 
 /**
+ * GET /api/main-admin-dashboard/sales-by-agent?fromDate=...&toDate=...&limit=10
+ *
+ * Ranked per-agent NET sales (excl. VAT) for the period, alongside the number
+ * of invoices and the number of distinct customers invoiced. Mirrors the Top
+ * Customers / Top Products ranked-list widgets.
+ *
+ * SAP-synced invoices carry no `salesAgent`, so — exactly like getTeamPerformance
+ * and getTopCustomers — invoice revenue is attributed to the agent each customer
+ * is assigned to (Customer.assignedTo -> CardCode).
+ */
+exports.getSalesByAgent = async (req, res) => {
+    try {
+        const { fromDate, toDate } = getDateRange(req.query);
+        const limit = Math.min(parseInt(req.query.limit, 10) || 10, 100);
+
+        const scope = await resolveScope(req);
+        if (scope.forbidden) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+
+        // Only active sales agents; a sales manager sees just their own team.
+        const agentQuery = { role: "sales_agent", deactivated: false };
+        if (scope.agentIds) agentQuery._id = { $in: scope.agentIds };
+        const agents = await User.find(agentQuery)
+            .select("firstName lastName email")
+            .lean();
+
+        const agentIds = agents.map((a) => a._id);
+
+        // Map each customer's CardCode to its assigned agent.
+        const customers = await Customer.find({ assignedTo: { $in: agentIds } })
+            .select("CardCode assignedTo")
+            .lean();
+        const cardCodeToAgent = {};
+        const scopedCardCodes = [];
+        customers.forEach((c) => {
+            if (c.CardCode && c.assignedTo) {
+                cardCodeToAgent[c.CardCode] = c.assignedTo.toString();
+                scopedCardCodes.push(c.CardCode);
+            }
+        });
+
+        // Invoice revenue per customer (NET = DocTotal - VatSum) for the period.
+        const invoicesByCard = await Invoice.aggregate([
+            {
+                $match: {
+                    DocDate: { $gte: fromDate, $lte: toDate },
+                    CardCode: { $in: scopedCardCodes },
+                },
+            },
+            {
+                $addFields: {
+                    netTotal: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] },
+                },
+            },
+            {
+                $group: {
+                    _id: "$CardCode",
+                    invoiceCount: { $sum: 1 },
+                    totalRevenue: { $sum: "$netTotal" },
+                },
+            },
+        ]);
+
+        // Roll each customer's totals up to their assigned agent. One aggregation
+        // row per CardCode, so counting rows gives distinct invoiced customers.
+        const perAgent = {};
+        agents.forEach((a) => {
+            perAgent[a._id.toString()] = {
+                agentId: a._id,
+                name: `${a.firstName || ""} ${a.lastName || ""}`.trim(),
+                email: a.email,
+                totalRevenue: 0,
+                invoiceCount: 0,
+                customerCount: 0,
+            };
+        });
+        invoicesByCard.forEach((row) => {
+            const bucket = perAgent[cardCodeToAgent[row._id]];
+            if (!bucket) return;
+            bucket.totalRevenue += row.totalRevenue;
+            bucket.invoiceCount += row.invoiceCount;
+            bucket.customerCount += 1;
+        });
+
+        const data = Object.values(perAgent)
+            .map((a) => ({
+                ...a,
+                totalRevenue: parseFloat((a.totalRevenue || 0).toFixed(2)),
+                avgInvoiceValue: a.invoiceCount > 0
+                    ? parseFloat((a.totalRevenue / a.invoiceCount).toFixed(2))
+                    : 0,
+            }))
+            .sort((x, y) => y.totalRevenue - x.totalRevenue)
+            .slice(0, limit);
+
+        res.status(200).json({ success: true, data });
+    } catch (error) {
+        console.error("Error in getSalesByAgent:", error);
+        res.status(500).json({ success: false, message: "Error fetching sales by agent", error: error.message });
+    }
+};
+
+/**
  * GET /api/dashboard/invoices
  * Invoices list with pagination for the period (for side-drawer "view all")
  */
