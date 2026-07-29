@@ -1,7 +1,15 @@
 // config/config.js
 // Add this to your existing config file
 
+// Fixed mailbox for every RFQ: printed as the contact on the RFQ PDF/email and
+// set as Reply-To on all outbound RFQ mail, so supplier replies always land in
+// the shared inbox the inbound agent watches. Deliberately NOT env-driven and
+// not editable from the UI — agents were entering personal addresses and the
+// replies were never picked up.
+const RFQ_CONTACT_EMAIL = 'halalfoods.services@gmail.com';
+
 module.exports = {
+  RFQ_CONTACT_EMAIL,
   // Other configurations...
   mongodb: {
     uri: process.env.MONGODB_URI,

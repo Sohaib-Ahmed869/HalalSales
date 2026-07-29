@@ -88,6 +88,16 @@ const TaskSchema = new Schema({
   },
 });
 
+// Indexes for the task list endpoints, which filter on owner/status and always
+// sort by createdAt. Without these the paginated queries and their matching
+// countDocuments do full collection scans.
+TaskSchema.index({ assignedTo: 1, createdAt: 1 });
+TaskSchema.index({ createdBy: 1, createdAt: 1 });
+TaskSchema.index({ status: 1, createdAt: 1 });
+TaskSchema.index({ dueDate: 1 });
+TaskSchema.index({ leadId: 1 });
+TaskSchema.index({ relatedQuotation: 1 });
+
 // Update the updatedAt timestamp on save
 TaskSchema.pre("save", function (next) {
   this.updatedAt = Date.now();

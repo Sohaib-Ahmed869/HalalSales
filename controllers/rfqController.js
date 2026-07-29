@@ -10,6 +10,7 @@ const { sendEmail } = require('../utils/emailService');
 const { generateRFQPDF } = require('../utils/pdfGenerator1');
 const { processFormBasedRFQ, processFormBasedRFQForNewSuppliers } = require('../services/rfqService');
 const { sendRFQViaWhatsApp } = require('../services/whatsappService');
+const { RFQ_CONTACT_EMAIL } = require('../config/config');
 /**
  * Get items from inventory for form selection
  * GET /api/rfq/items
@@ -1582,7 +1583,8 @@ exports.rerunRFQ = async (req, res) => {
             deliveryBy: deliveryBy
                 ? new Date(deliveryBy)
                 : new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
-            contactEmail: originalRFQ.contactEmail,
+            // Fixed company mailbox, not whatever the original RFQ carried
+            contactEmail: RFQ_CONTACT_EMAIL,
             contactPhone: originalRFQ.contactPhone,
             location: originalRFQ.location,
             destination: originalRFQ.destination,

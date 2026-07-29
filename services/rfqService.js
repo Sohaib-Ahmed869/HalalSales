@@ -9,6 +9,7 @@ const {
 } = require('./aiService');
 const EmailVendorHistory = require('../models/EmailVendorHistory');
 const vendorEmailService = require('./vendorEmailService');
+const { RFQ_CONTACT_EMAIL } = require('../config/config');
 
 /**
  * Process natural language RFQ request
@@ -668,7 +669,8 @@ async function createRFQFromAnalysis(analysisResult, additionalData = {}) {
             analysisResult.parsedData.deliveryPreferences?.preferredDeliveryDate ||
             new Date(Date.now() + 14 * 24 * 60 * 60 * 1000), // 14 days default
 
-        contactEmail: additionalData.contactEmail || 'contact@halalfoods.fr',
+        // Always the shared RFQ mailbox — ignore whatever the client sent.
+        contactEmail: RFQ_CONTACT_EMAIL,
         contactPhone: additionalData.contactPhone || '+33 1 XX XX XX XX',
         location: 'Paris, France',
         incoterm: additionalData.incoterm || 'EXW',

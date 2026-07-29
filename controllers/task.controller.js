@@ -23,6 +23,131 @@ const {
   checkCustomerExistsInSAP,
 } = require("../utils/sapB1CustomerIntegration");
 
+// Task list responses used to embed whole SAP customer documents per task and
+// ran a query-per-task to resolve quotation customers. On large boards that
+// produced multi-MB payloads that the proxy cut off mid-body
+// (ERR_CONTENT_LENGTH_MISMATCH in the browser). The helpers below keep list
+// payloads projected and resolve related documents in batch.
+
+// Heaviest sub-documents on Customer; nothing in the task UI reads them.
+const CUSTOMER_LIST_PROJECTION = "-documents -paymentAllocation";
+
+// Hard ceilings so a list response can never grow unbounded again.
+const MAX_TASKS_PER_PAGE = 200;
+const MAX_TASKS_UNPAGINATED = 1000;
+
+/**
+ * Read page/limit off the query string.
+ * Callers that pass neither keep the old "everything" behaviour, but capped.
+ */
+function parseTaskPagination(query) {
+  const paginated = query.page !== undefined || query.limit !== undefined;
+
+  if (!paginated) {
+    return { paginated: false, page: 1, limit: MAX_TASKS_UNPAGINATED, skip: 0 };
+  }
+
+  const page = Math.max(parseInt(query.page, 10) || 1, 1);
+  const limit = Math.min(
+    Math.max(parseInt(query.limit, 10) || MAX_TASKS_PER_PAGE, 1),
+    MAX_TASKS_PER_PAGE
+  );
+
+  return { paginated: true, page, limit, skip: (page - 1) * limit };
+}
+
+/**
+ * Build the pagination block returned alongside `data`.
+ */
+function buildPaginationMeta({ page, limit, skip }, total, returned) {
+  return {
+    page,
+    limit,
+    total,
+    totalPages: Math.max(Math.ceil(total / limit), 1),
+    hasMore: skip + returned < total,
+    // True when the caller asked for no paging and hit the safety cap.
+    truncated: skip + returned < total,
+  };
+}
+
+/**
+ * Resolve `customerDetails` for quotation-backed tasks in two queries total
+ * instead of two queries per task.
+ */
+async function attachQuotationCustomers(tasks) {
+  const docEntries = [
+    ...new Set(
+      tasks
+        .filter((task) => task.relatedQuotation != null)
+        .map((task) => task.relatedQuotation)
+    ),
+  ];
+
+  if (!docEntries.length) return tasks;
+
+  const quotations = await Quotation.find({ DocEntry: { $in: docEntries } })
+    .select("DocEntry CardCode")
+    .lean();
+
+  const cardCodeByDocEntry = new Map(
+    quotations.map((q) => [String(q.DocEntry), q.CardCode])
+  );
+
+  const cardCodes = [
+    ...new Set(quotations.map((q) => q.CardCode).filter(Boolean)),
+  ];
+
+  const customers = cardCodes.length
+    ? await Customer.find({ CardCode: { $in: cardCodes } })
+        .select(CUSTOMER_LIST_PROJECTION)
+        .lean()
+    : [];
+
+  const customerByCardCode = new Map(customers.map((c) => [c.CardCode, c]));
+
+  for (const task of tasks) {
+    if (task.relatedQuotation == null) continue;
+    // The quotation or its customer may have been deleted — leave this null
+    // rather than throwing, which used to 500 the whole list.
+    const cardCode = cardCodeByDocEntry.get(String(task.relatedQuotation));
+    task.customerDetails = cardCode
+      ? customerByCardCode.get(cardCode) || null
+      : null;
+  }
+
+  return tasks;
+}
+
+/**
+ * Resolve `relatedRestaurant.details` in one query instead of one per task.
+ */
+async function attachRestaurantDetails(tasks) {
+  const Restaurant = require("../models/Restaurant");
+
+  const restaurantIds = [
+    ...new Set(
+      tasks
+        .filter((task) => task.relatedRestaurant?.restaurant)
+        .map((task) => String(task.relatedRestaurant.restaurant))
+    ),
+  ];
+
+  if (!restaurantIds.length) return tasks;
+
+  const restaurants = await Restaurant.find({ _id: { $in: restaurantIds } }).lean();
+  const restaurantById = new Map(restaurants.map((r) => [String(r._id), r]));
+
+  for (const task of tasks) {
+    const restaurantId = task.relatedRestaurant?.restaurant;
+    if (!restaurantId) continue;
+    task.relatedRestaurant.details =
+      restaurantById.get(String(restaurantId)) || null;
+  }
+
+  return tasks;
+}
+
 // Helper function to push customer to SAP
 async function pushCustomerToSAPInternal(customer) {
   try {
@@ -213,39 +338,36 @@ exports.getTasks = async (req, res) => {
     }
 
     // Get tasks
-    let tasks = await Task.find(query)
-      .populate("assignedTo", "firstName lastName email role")
-      .populate("createdBy", "firstName lastName email role")
-      .populate("leadId", "fullName email company")
-      .populate("relatedCustomer")
-      .populate("relatedRestaurant")
-      .sort({ createdAt: 1, priority: -1 })
-      .lean();
+    const pagination = parseTaskPagination(req.query);
 
-    tasks = await Promise.all(
-      tasks.map(async (task) => {
-        if (task.relatedQuotation) {
-          const Quotation = require("../models/Quotation");
-          console.log("Related Quotation ID:", task.relatedQuotation);
-          const quotationDetails = await Quotation.findOne(
-            { DocEntry: task.relatedQuotation }
-          )
-          const Customer = require("../models/Customer");
-          const customerDetails = await Customer.findOne(
-            { CardCode: quotationDetails.CardCode }
-          );
-          console.log("Customer CardCode:", quotationDetails.CardCode, customerDetails);
-          task.customerDetails = customerDetails;
-        }
-        return task;
-      })
-    );
+    const [total, tasks] = await Promise.all([
+      Task.countDocuments(query),
+      Task.find(query)
+        .populate("assignedTo", "firstName lastName email role")
+        .populate("createdBy", "firstName lastName email role")
+        .populate("leadId", "fullName email company")
+        .populate({ path: "relatedCustomer", select: CUSTOMER_LIST_PROJECTION })
+        .populate("relatedRestaurant")
+        .sort({ createdAt: 1, priority: -1 })
+        .skip(pagination.skip)
+        .limit(pagination.limit)
+        .lean(),
+    ]);
 
+    await attachQuotationCustomers(tasks);
 
+    const meta = buildPaginationMeta(pagination, total, tasks.length);
+
+    if (!pagination.paginated && meta.truncated) {
+      console.warn(
+        `getTasks: returned ${tasks.length} of ${total} tasks (safety cap ${MAX_TASKS_UNPAGINATED}). Caller should paginate.`
+      );
+    }
 
     return res.status(200).json({
       success: true,
       data: tasks,
+      pagination: meta,
     });
   } catch (error) {
     console.error("Error fetching tasks:", error);
@@ -901,16 +1023,24 @@ exports.getAgentTasks = async (req, res) => {
     if (type) query.type = type;
 
     // Get tasks
-    const tasks = await Task.find(query)
-      .populate("leadId", "fullName email company")
-      .populate("createdBy", "firstName lastName email role")
-      .populate("relatedCustomer")
-      .sort({ createdAt: 1, priority: -1 })
-      .lean();
+    const pagination = parseTaskPagination(req.query);
+
+    const [total, tasks] = await Promise.all([
+      Task.countDocuments(query),
+      Task.find(query)
+        .populate("leadId", "fullName email company")
+        .populate("createdBy", "firstName lastName email role")
+        .populate({ path: "relatedCustomer", select: CUSTOMER_LIST_PROJECTION })
+        .sort({ createdAt: 1, priority: -1 })
+        .skip(pagination.skip)
+        .limit(pagination.limit)
+        .lean(),
+    ]);
 
     return res.status(200).json({
       success: true,
       data: tasks,
+      pagination: buildPaginationMeta(pagination, total, tasks.length),
     });
   } catch (error) {
     console.error("Error fetching agent tasks:", error);
@@ -966,57 +1096,35 @@ exports.getMyTasks = async (req, res) => {
       }
     }
     // Get tasks
-    let tasks = await Task.find(query)
-      .populate("leadId", "fullName email company")
-      .populate("createdBy", "firstName lastName email role")
-      .populate("relatedCustomer")
-      .populate("relatedRestaurant")
-      .sort({ createdAt: 1, priority: -1 })
-      .lean();
+    const pagination = parseTaskPagination(req.query);
+
+    const [total, tasks, statusCounts] = await Promise.all([
+      Task.countDocuments(query),
+      Task.find(query)
+        .populate("leadId", "fullName email company")
+        .populate("createdBy", "firstName lastName email role")
+        .populate({ path: "relatedCustomer", select: CUSTOMER_LIST_PROJECTION })
+        .populate("relatedRestaurant")
+        .sort({ createdAt: 1, priority: -1 })
+        .skip(pagination.skip)
+        .limit(pagination.limit)
+        .lean(),
+      // Get task counts by status for statistics
+      Task.aggregate([
+        { $match: { assignedTo: req.user._id } },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
+    ]);
 
     // if task is restaurant related or customer related, populate those details
-    tasks = await Promise.all(
-      tasks.map(async (task) => {
-        if (task.relatedRestaurant) {
-          const Restaurant = require("../models/Restaurant");
-          const restaurantDetails = await Restaurant.findById(
-            task.relatedRestaurant.restaurant
-          ).lean();
-          task.relatedRestaurant.details = restaurantDetails;
-        }
-        return task;
-      })
-    );
+    await attachRestaurantDetails(tasks);
 
     //if task is quotation related, populate customer details
-    tasks = await Promise.all(
-      tasks.map(async (task) => {
-        if (task.relatedQuotation) {
-          const Quotation = require("../models/Quotation");
-          console.log("Related Quotation ID:", task.relatedQuotation);
-          const quotationDetails = await Quotation.findOne(
-            { DocEntry: task.relatedQuotation }
-          )
-          const Customer = require("../models/Customer");
-          const customerDetails = await Customer.findOne(
-            { CardCode: quotationDetails.CardCode }
-          );
-          console.log("Customer CardCode:", quotationDetails.CardCode, customerDetails);
-          task.customerDetails = customerDetails;
-        }
-        return task;
-      })
-    );
-
-    // Get task counts by status for statistics
-    const statusCounts = await Task.aggregate([
-      { $match: { assignedTo: req.user._id } },
-      { $group: { _id: "$status", count: { $sum: 1 } } },
-    ]);
+    await attachQuotationCustomers(tasks);
 
     // Format status counts
     const counts = {
-      total: tasks.length,
+      total,
       pending: 0,
       pending_approval: 0,
       completed: 0,
@@ -1031,6 +1139,7 @@ exports.getMyTasks = async (req, res) => {
       success: true,
       data: tasks,
       counts,
+      pagination: buildPaginationMeta(pagination, total, tasks.length),
     });
   } catch (error) {
     console.error("Error fetching assigned tasks:", error);
@@ -1087,22 +1196,28 @@ exports.getCreatedTasks = async (req, res) => {
       }
     }
     // Get tasks
-    const tasks = await Task.find(query)
-      .populate("assignedTo", "firstName lastName email role")
-      .populate("leadId", "fullName email company")
-      .populate("relatedCustomer")
-      .sort({ createdAt: 1, priority: -1 })
-      .lean();
+    const pagination = parseTaskPagination(req.query);
 
-    // Get task counts by status for statistics
-    const statusCounts = await Task.aggregate([
-      { $match: { createdBy: req.user._id } },
-      { $group: { _id: "$status", count: { $sum: 1 } } },
+    const [total, tasks, statusCounts] = await Promise.all([
+      Task.countDocuments(query),
+      Task.find(query)
+        .populate("assignedTo", "firstName lastName email role")
+        .populate("leadId", "fullName email company")
+        .populate({ path: "relatedCustomer", select: CUSTOMER_LIST_PROJECTION })
+        .sort({ createdAt: 1, priority: -1 })
+        .skip(pagination.skip)
+        .limit(pagination.limit)
+        .lean(),
+      // Get task counts by status for statistics
+      Task.aggregate([
+        { $match: { createdBy: req.user._id } },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
     ]);
 
     // Format status counts
     const counts = {
-      total: tasks.length,
+      total,
       pending: 0,
       pending_approval: 0,
       completed: 0,
@@ -1117,6 +1232,7 @@ exports.getCreatedTasks = async (req, res) => {
       success: true,
       data: tasks,
       counts,
+      pagination: buildPaginationMeta(pagination, total, tasks.length),
     });
   } catch (error) {
     console.error("Error fetching created tasks:", error);

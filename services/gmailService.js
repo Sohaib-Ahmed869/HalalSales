@@ -67,14 +67,14 @@ class GmailService {
     /**
  * Send email via Gmail API (more reliable than SMTP)
  */
-    async sendEmail({ to, subject, html, text, attachments = [], replyTo }) {
+    async sendEmail({ to, subject, html, text, attachments = [] }) {
         try {
             const email_lines = [];
             const boundary = "boundary_string";
 
-            // Replies should land in the company contact mailbox (e.g. the Gmail address
-            // suppliers see), even though we send from the configured From address.
-            const replyToAddress = replyTo || config.company?.email || '';
+            // Replies must always land in the shared RFQ mailbox the inbound agent
+            // watches — never in a caller-supplied or env-configured address.
+            const replyToAddress = config.RFQ_CONTACT_EMAIL;
 
             email_lines.push(`From: ${process.env.RFQ_EMAIL_FROM}`);
             email_lines.push(`To: ${to}`);
