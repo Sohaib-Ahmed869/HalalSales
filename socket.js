@@ -5,6 +5,10 @@ const JWT_SECRET = process.env.JWT_SECRET || "your_secret_key"; // ← must matc
 
 let io = null;
 
+// Admins and sales managers share this room — the RFQ "needs attention" badge is
+// a single global count, not a per-user one.
+const RFQ_ATTENTION_ROOM = "rfq:attention";
+
 const initSocket = (httpServer) => {
     io = new Server(httpServer, {
         cors: {
@@ -33,9 +37,22 @@ const initSocket = (httpServer) => {
         }
     });
 
-    io.on("connection", (socket) => {
+    io.on("connection", async (socket) => {
         console.log(`[Socket] Agent connected: ${socket.userId} (${socket.id})`);
         socket.join(`agent:${socket.userId}`);
+
+        // The RFQ attention badge is a global admin/manager count, so those users
+        // join a shared room rather than receiving it on their personal channel.
+        try {
+            const User = require("./models/User");
+            const user = await User.findById(socket.userId).select("role").lean();
+            if (user && ["admin", "sales_manager"].includes(user.role)) {
+                socket.join(RFQ_ATTENTION_ROOM);
+            }
+        } catch (err) {
+            // Non-fatal: the client falls back to its slow poll for this badge.
+            console.warn(`[Socket] Could not resolve role for ${socket.userId}:`, err.message);
+        }
 
         socket.on("join_conversation", (phoneNumber) => socket.join(`conv:${phoneNumber}`));
         socket.on("leave_conversation", (phoneNumber) => socket.leave(`conv:${phoneNumber}`));
@@ -70,4 +87,31 @@ const emitToAgent = (agentId, event, data) => {
     io.to(room).emit(event, data);
 };
 
-module.exports = { initSocket, getIO, emitNewMessage, emitMessageStatus, emitToAgent };
+/**
+ * Push a user's unread-notification count to every tab they have open.
+ * Replaces the 30s badge poll the frontend used to run.
+ */
+const emitUnreadCount = (userId, count) => {
+    if (!io || !userId) return;
+    io.to(`agent:${userId}`).emit("notification:unread_count", { count });
+};
+
+/**
+ * Push the global RFQ "needs attention" count to admins and sales managers.
+ * Replaces the 15s sidebar badge poll.
+ */
+const emitRfqAttentionCount = (count) => {
+    if (!io) return;
+    io.to(RFQ_ATTENTION_ROOM).emit("rfq:attention_count", { count });
+};
+
+module.exports = {
+    initSocket,
+    getIO,
+    emitNewMessage,
+    emitMessageStatus,
+    emitToAgent,
+    emitUnreadCount,
+    emitRfqAttentionCount,
+    RFQ_ATTENTION_ROOM,
+};

@@ -36,10 +36,27 @@ class NotificationService {
       });
 
       await notification.save();
+      await this.pushUnreadCount(recipient);
       return notification;
     } catch (error) {
       console.error("Error creating notification:", error);
       throw error;
+    }
+  }
+
+  /**
+   * Push a recipient's current unread count over the socket. This is what lets
+   * the frontend badge drop its 30s poll — delivery is best-effort, and the
+   * client keeps a slow fallback poll for reconnects.
+   */
+  static async pushUnreadCount(userId) {
+    if (!userId) return;
+    try {
+      const { emitUnreadCount } = require("../socket");
+      const count = await this.getUnreadCount(userId);
+      emitUnreadCount(userId, count);
+    } catch (error) {
+      console.warn("[NotificationService] pushUnreadCount failed:", error.message);
     }
   }
 
@@ -74,6 +91,12 @@ class NotificationService {
       );
       const saved = notifications.filter(Boolean);
       console.log(`[NotificationService] notifyAdminsAboutRFQ: created ${saved.length}/${admins.length} notifications (type=${type}, rfq=${rfq.rfqNumber})`);
+
+      // Flagging an RFQ for review is what raises the sidebar attention badge —
+      // push the new count instead of making every admin poll for it.
+      const { pushPendingAttentionCount } = require("./rfqAttention");
+      await pushPendingAttentionCount();
+
       return saved;
     } catch (error) {
       console.error("Error notifying admins about RFQ:", error);
@@ -201,18 +224,22 @@ class NotificationService {
   }
 
   static async markAsRead(notificationId, userId) {
-    return Notification.findOneAndUpdate(
+    const updated = await Notification.findOneAndUpdate(
       { _id: notificationId, recipient: userId },
       { isRead: true },
       { new: true }
     );
+    await this.pushUnreadCount(userId);
+    return updated;
   }
 
   static async markAllAsRead(userId) {
-    return Notification.updateMany(
+    const result = await Notification.updateMany(
       { recipient: userId, isRead: false },
       { isRead: true }
     );
+    await this.pushUnreadCount(userId);
+    return result;
   }
 
   static async getUserNotifications(userId, limit = 20, skip = 0) {

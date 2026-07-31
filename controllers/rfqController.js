@@ -1173,6 +1173,9 @@ exports.selectWinningVendor = async (req, res) => {
         rfq.status = 'completed';
         await rfq.save();
 
+        // Clearing the pending flags lowers the admin attention badge — push it.
+        await require('../utils/rfqAttention').pushPendingAttentionCount();
+
         // Track win for NewSupplier
         if (selectedVendor.vendorSource === 'NEW_SUPPLIER' && /^[0-9a-fA-F]{24}$/.test(vendorCode)) {
             try {
@@ -1245,6 +1248,9 @@ exports.overrideBotRecommendation = async (req, res) => {
         rfq.markModified('vendorsContacted');
         await rfq.save();
 
+        // continue_negotiating / reject clear the pending flag — refresh the badge.
+        await require('../utils/rfqAttention').pushPendingAttentionCount();
+
         res.json({ success: true, data: { rfq: rfq.toObject() } });
     } catch (error) {
         console.error('Error overriding recommendation:', error);
@@ -1259,21 +1265,11 @@ exports.overrideBotRecommendation = async (req, res) => {
 exports.getPendingAttentionRFQs = async (req, res) => {
     try {
         const { countOnly } = req.query;
-
-        const filter = {
-            status: { $nin: ['completed', 'cancelled'] },
-            vendorsContacted: {
-                $elemMatch: {
-                    $or: [
-                        { pendingAdminReview: true },
-                        { negotiationStatus: { $in: ['awaiting_admin_approval', 'stalled'] } },
-                    ],
-                },
-            },
-        };
+        const { PENDING_ATTENTION_FILTER, getPendingAttentionCount } = require('../utils/rfqAttention');
+        const filter = PENDING_ATTENTION_FILTER;
 
         if (countOnly === 'true') {
-            const count = await RFQ.countDocuments(filter);
+            const count = await getPendingAttentionCount();
             return res.json({ success: true, count });
         }
 

@@ -37,6 +37,21 @@ const auth = async (req, res, next) => {
 
 
 
+/**
+ * Same checks as `auth`, but also accepts the token as ?token= in the query string.
+ *
+ * ONLY for endpoints the browser navigates to directly — window.open, <iframe src>,
+ * <a href> — where no Authorization header can be set. Query-string tokens land in
+ * access logs, browser history and Referer headers, so do not reach for this
+ * anywhere a normal fetch/axios call would do.
+ */
+const authAllowQueryToken = async (req, res, next) => {
+  if (!req.header("Authorization") && req.query.token) {
+    req.headers.authorization = `Bearer ${req.query.token}`;
+  }
+  return auth(req, res, next);
+};
+
 // Check role middleware
 const checkRole = (roles) => {
   return (req, res, next) => {
@@ -157,6 +172,7 @@ const updateLastLogin = async (req, res, next) => {
 
 module.exports = {
   auth,
+  authAllowQueryToken,
   checkRole,
   canManageUser,
   canManageCustomer,

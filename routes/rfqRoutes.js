@@ -2,6 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const rfqController = require('../controllers/rfqController');
+const { auth, authAllowQueryToken } = require('../middleware/auth');
 
 
 /**
@@ -10,7 +11,7 @@ const rfqController = require('../controllers/rfqController');
  * @access  Private
  * @body    { naturalLanguageInput: string }
  */
-router.post('/analyze', rfqController.analyzeRFQRequest);
+router.post('/analyze', auth, rfqController.analyzeRFQRequest);
 
 /**
  * @route   POST /api/rfq/create
@@ -26,7 +27,7 @@ router.post('/analyze', rfqController.analyzeRFQRequest);
  *            paymentTerms: string
  *          }
  */
-router.post('/create', rfqController.createRFQDraft);
+router.post('/create', auth, rfqController.createRFQDraft);
 
 /**
  * @route   POST /api/rfq/:rfqId/send
@@ -34,15 +35,19 @@ router.post('/create', rfqController.createRFQDraft);
  * @access  Private
  * @body    { vendorCodes: string[], customMessage: string }
  */
-router.post('/:rfqId/send', rfqController.sendRFQToVendors);
+router.post('/:rfqId/send', auth, rfqController.sendRFQToVendors);
 
-router.get('/gmail/auth-url', (req, res) => {
+router.get('/gmail/auth-url', auth, (req, res) => {
     const gmailService = require('../services/gmailService');
     const authUrl = gmailService.getAuthUrl();
     res.json({ authUrl });
 });
 
 // Add this to your routes (temporary)
+// NOTE: deliberately left unauthenticated — Google redirects the browser here
+// with ?code=, so no Authorization header can be attached. It is a one-off setup
+// utility that returns a refresh_token; it should be removed from production or
+// gated behind an env flag rather than left exposed.
 router.get('/gmail/get-token', async (req, res) => {
     const { code } = req.query;
     const gmailService = require('../services/gmailService');
@@ -64,7 +69,7 @@ router.get('/gmail/get-token', async (req, res) => {
  * @access  Private
  * @query   { search: string, limit: number }
  */
-router.get('/items', rfqController.getInventoryItems);
+router.get('/items', auth, rfqController.getInventoryItems);
 
 /**
  * @route   GET /api/rfq/recommend-products
@@ -72,7 +77,7 @@ router.get('/items', rfqController.getInventoryItems);
  * @access  Private
  * @query   { productName: string, limit: number }
  */
-router.get('/recommend-products', rfqController.getProductRecommendations);
+router.get('/recommend-products', auth, rfqController.getProductRecommendations);
 
 /**
  * @route   POST /api/rfq/:rfqId/vendor-response
@@ -88,7 +93,7 @@ router.get('/recommend-products', rfqController.getProductRecommendations);
  *            status: string
  *          }
  */
-router.post('/:rfqId/vendor-response', rfqController.recordVendorResponse);
+router.post('/:rfqId/vendor-response', auth, rfqController.recordVendorResponse);
 
 /**
  * @route   POST /api/rfq/:rfqId/select-vendor
@@ -96,7 +101,7 @@ router.post('/:rfqId/vendor-response', rfqController.recordVendorResponse);
  * @access  Private
  * @body    { vendorCode: string, notes: string }
  */
-router.post('/:rfqId/select-vendor', rfqController.selectWinningVendor);
+router.post('/:rfqId/select-vendor', auth, rfqController.selectWinningVendor);
 
 /**
  * @route   POST /api/rfq/:rfqId/override-recommendation
@@ -104,7 +109,7 @@ router.post('/:rfqId/select-vendor', rfqController.selectWinningVendor);
  * @access  Private
  * @body    { vendorCode: string, action: 'continue_negotiating'|'reject'|'review_later', reason?: string }
  */
-router.post('/:rfqId/override-recommendation', rfqController.overrideBotRecommendation);
+router.post('/:rfqId/override-recommendation', auth, rfqController.overrideBotRecommendation);
 
 /**
  * @route   GET /api/rfq/pending-attention
@@ -112,7 +117,7 @@ router.post('/:rfqId/override-recommendation', rfqController.overrideBotRecommen
  * @query   countOnly=true for just the count (used by sidebar badge)
  * @access  Private
  */
-router.get('/pending-attention', rfqController.getPendingAttentionRFQs);
+router.get('/pending-attention', auth, rfqController.getPendingAttentionRFQs);
 
 /**
  * @route   GET /api/rfq
@@ -120,21 +125,21 @@ router.get('/pending-attention', rfqController.getPendingAttentionRFQs);
  * @access  Private
  * @query   { page: number, limit: number, status: string, sortBy: string, sortOrder: string }
  */
-router.get('/', rfqController.getAllRFQs);
+router.get('/', auth, rfqController.getAllRFQs);
 
 /**
  * @route   GET /api/rfq/:rfqId
  * @desc    Get single RFQ by ID
  * @access  Private
  */
-router.get('/:rfqId', rfqController.getRFQById);
+router.get('/:rfqId', auth, rfqController.getRFQById);
 
 /**
  * @route   GET /api/rfq/:rfqId/compare
  * @desc    Compare vendor responses for an RFQ
  * @access  Private
  */
-router.get('/:rfqId/compare', rfqController.compareVendorResponses);
+router.get('/:rfqId/compare', auth, rfqController.compareVendorResponses);
 
 /**
  * @route   POST /api/rfq/:rfqId/rerun
@@ -142,7 +147,7 @@ router.get('/:rfqId/compare', rfqController.compareVendorResponses);
  * @access  Private
  * @body    { quotationDueDate, deliveryBy, includeVendors, additionalVendorCodes, excludeVendorCodes }
  */
-router.post('/:rfqId/rerun', rfqController.rerunRFQ);
+router.post('/:rfqId/rerun', auth, rfqController.rerunRFQ);
 
 /**
  * @route   POST /api/rfq/:rfqId/cancel
@@ -150,13 +155,13 @@ router.post('/:rfqId/rerun', rfqController.rerunRFQ);
  * @access  Private
  * @body    { reason: string }
  */
-router.post('/:rfqId/cancel', rfqController.cancelRFQ);
+router.post('/:rfqId/cancel', auth, rfqController.cancelRFQ);
 
 // NEW: Download RFQ PDF in specific language
 // Query params: ?language=fr or ?language=en
-router.get('/:rfqId/download-pdf', rfqController.downloadRFQPDF);
+router.get('/:rfqId/download-pdf', auth, rfqController.downloadRFQPDF);
 
 // NEW: Preview RFQ PDF in browser
-router.get('/:rfqId/preview-pdf', rfqController.previewRFQPDF);
+router.get('/:rfqId/preview-pdf', authAllowQueryToken, rfqController.previewRFQPDF);
 
 module.exports = router;
