@@ -1,9 +1,11 @@
 // controllers/map.controller.js
 const Customer = require("../models/Customer");
+const CustomerGroup = require("../models/CustomerGroup");
 const Invoice = require("../models/Invoice");
 const SalesOrder = require("../models/SalesOrder");
 const Quotation = require("../models/Quotation");
 const { geocodingService } = require("../utils/geocodingService");
+const { buildAddressKey } = require("../utils/addressNormalization");
 
 /**
  * Get color for invoice based on amount
@@ -33,12 +35,321 @@ const getInvoiceColor = (amount, minAmount, maxAmount) => {
 };
 
 /**
+ * Round coordinates to ~11m so that accounts geocoded to the same building
+ * collapse onto a single pin.
+ */
+const locationKey = (coords) =>
+    `${Number(coords.lat).toFixed(4)},${Number(coords.lng).toFixed(4)}`;
+
+/**
+ * Lifetime sales per customer, for every requested card code, in one round trip.
+ * Replaces a per-customer Invoice.find() that ran hundreds of queries per
+ * request and dominated the response time.
+ */
+const getCustomerSalesTotals = async (cardCodes) => {
+    if (!cardCodes.length) return new Map();
+
+    const rows = await Invoice.aggregate([
+        { $match: { CardCode: { $in: cardCodes } } },
+        {
+            $group: {
+                _id: "$CardCode",
+                totalSales: { $sum: "$DocTotal" },
+                totalInvoices: { $sum: 1 },
+                lastInvoiceDate: { $max: "$DocDate" },
+            },
+        },
+    ]);
+
+    return new Map(rows.map((r) => [r._id, r]));
+};
+
+/**
+ * Build one pin per physical location instead of one per document.
+ *
+ * A month of data produced ~9,500 markers, each mounted as a React component
+ * with a popup subtree — enough to hang the browser tab. Collapsing by
+ * coordinate takes that to a few hundred, and has the useful side effect of
+ * making multi-account sites visible: a pin that covers more than one account
+ * name is exactly the "same shop, different account" case.
+ */
+const buildLocations = ({
+    customersWithCoords,
+    invoices,
+    orders,
+    quotations,
+    salesTotals,
+    shopGroupByCustomerId,
+    includePotential,
+}) => {
+    const locations = new Map();
+
+    const ensure = (customer) => {
+        if (!customer?.coordinates || customer.coordinates.lat == null) return null;
+        const key = locationKey(customer.coordinates);
+
+        if (!locations.has(key)) {
+            locations.set(key, {
+                id: key,
+                coordinates: {
+                    lat: customer.coordinates.lat,
+                    lng: customer.coordinates.lng,
+                },
+                address: customer.deliveryAddress?.street
+                    ? customer.deliveryAddress
+                    : customer.address,
+                accounts: [],
+                accountsByCode: new Map(),
+                invoiceCount: 0,
+                invoiceTotal: 0,
+                orderCount: 0,
+                orderTotal: 0,
+                quotationCount: 0,
+                quotationTotal: 0,
+                lastInvoiceDate: null,
+            });
+        }
+
+        const location = locations.get(key);
+
+        if (!location.accountsByCode.has(customer.CardCode)) {
+            const totals = salesTotals.get(customer.CardCode);
+            const account = {
+                cardCode: customer.CardCode,
+                cardName: customer.CardName,
+                customerId: customer._id,
+                shopGroupId: shopGroupByCustomerId.get(String(customer._id)) || null,
+                // Normalised "<street>|<zip>". Coordinates alone cannot be
+                // trusted for this: geocoding falls back to street or town
+                // centroids, so unrelated shops routinely land on one point.
+                addressKey: buildAddressKey(customer),
+                lifetimeSales: totals ? Math.round(totals.totalSales * 100) / 100 : 0,
+                lifetimeInvoices: totals ? totals.totalInvoices : 0,
+                lastInvoiceDate: totals ? totals.lastInvoiceDate : null,
+                invoiceCount: 0,
+                invoiceTotal: 0,
+            };
+            location.accounts.push(account);
+            location.accountsByCode.set(customer.CardCode, account);
+        }
+
+        return location;
+    };
+
+    // Seed every geocoded customer so "potential" sites exist even with no docs.
+    if (includePotential) customersWithCoords.forEach(ensure);
+
+    const addDoc = (doc, customerMap, kind) => {
+        const customer = customerMap.get(doc.CardCode);
+        const location = ensure(customer);
+        if (!location) return;
+
+        const amount = doc.DocTotal || 0;
+        const account = location.accountsByCode.get(doc.CardCode);
+
+        if (kind === "invoice") {
+            location.invoiceCount += 1;
+            location.invoiceTotal += amount;
+            account.invoiceCount += 1;
+            account.invoiceTotal += amount;
+            if (!location.lastInvoiceDate || doc.DocDate > location.lastInvoiceDate) {
+                location.lastInvoiceDate = doc.DocDate;
+            }
+        } else if (kind === "order") {
+            location.orderCount += 1;
+            location.orderTotal += amount;
+        } else {
+            location.quotationCount += 1;
+            location.quotationTotal += amount;
+        }
+    };
+
+    const customerMap = new Map(customersWithCoords.map((c) => [c.CardCode, c]));
+    invoices.forEach((d) => addDoc(d, customerMap, "invoice"));
+    orders.forEach((d) => addDoc(d, customerMap, "order"));
+    quotations.forEach((d) => addDoc(d, customerMap, "quotation"));
+
+    const amounts = [...locations.values()]
+        .map((l) => l.invoiceTotal)
+        .filter((a) => a > 0);
+    const min = amounts.length ? Math.min(...amounts) : 0;
+    const max = amounts.length ? Math.max(...amounts) : 0;
+
+    return [...locations.values()].map((location) => {
+        const { accountsByCode, ...rest } = location;
+        const hasActivity =
+            location.invoiceCount + location.orderCount + location.quotationCount > 0;
+
+        // Accounts sharing a pin are only flagged as the same shop when they
+        // also share a normalised address or a confirmed link. Sharing a
+        // coordinate on its own means very little.
+        const byAddressKey = new Map();
+        location.accounts.forEach((account) => {
+            if (!account.addressKey) return;
+            if (!byAddressKey.has(account.addressKey)) byAddressKey.set(account.addressKey, []);
+            byAddressKey.get(account.addressKey).push(account);
+        });
+
+        const byShopGroup = new Map();
+        location.accounts.forEach((account) => {
+            if (!account.shopGroupId) return;
+            const id = String(account.shopGroupId);
+            if (!byShopGroup.has(id)) byShopGroup.set(id, []);
+            byShopGroup.get(id).push(account);
+        });
+
+        const duplicateSets = [
+            ...[...byAddressKey.values()].filter((set) => set.length > 1),
+            ...[...byShopGroup.values()].filter((set) => set.length > 1),
+        ];
+        const duplicateAccounts = new Set(
+            duplicateSets.flat().map((account) => account.cardCode)
+        );
+        const distinctDuplicateNames = new Set(
+            duplicateSets
+                .flat()
+                .map((account) => (account.cardName || "").trim().toLowerCase())
+        );
+
+        return {
+            ...rest,
+            invoiceTotal: Math.round(location.invoiceTotal * 100) / 100,
+            orderTotal: Math.round(location.orderTotal * 100) / 100,
+            quotationTotal: Math.round(location.quotationTotal * 100) / 100,
+            accounts: location.accounts.sort((a, b) => b.lifetimeSales - a.lifetimeSales),
+            accountCount: location.accounts.length,
+            // How many accounts here look like the same shop, and whether they
+            // trade under different names (the rename case).
+            duplicateAccountCount: duplicateAccounts.size,
+            hasMultipleAccounts: duplicateAccounts.size > 1,
+            hasDifferentNames: distinctDuplicateNames.size > 1,
+            hasConfirmedShopGroup: byShopGroup.size > 0,
+            isPotential: !hasActivity,
+            type: hasActivity ? "location" : "potentialLocation",
+            color: hasActivity
+                ? getInvoiceColor(location.invoiceTotal, min, max)
+                : "#95a5a6",
+        };
+    });
+};
+
+/**
+ * Aggregated map response: one pin per physical location.
+ */
+const respondWithLocations = async ({
+    res,
+    start,
+    end,
+    type,
+    includePotential,
+    customersWithCoords,
+}) => {
+    const dateFilter = { $gte: start, $lte: end };
+    const wants = (kind) => type === "all" || type === kind;
+
+    const [invoices, orders, quotations] = await Promise.all([
+        wants("invoice")
+            ? Invoice.find({ DocDate: dateFilter })
+                .select("DocEntry DocNum DocDate CardCode DocTotal DocumentStatus")
+                .lean()
+            : [],
+        wants("order")
+            ? SalesOrder.find({ DocDate: dateFilter })
+                .select("DocEntry DocNum DocDate CardCode DocTotal DocumentStatus")
+                .lean()
+            : [],
+        wants("quotation")
+            ? Quotation.find({ DocDueDate: dateFilter })
+                .select("DocEntry DocNum DocDate DocDueDate CardCode DocTotal DocumentStatus")
+                .lean()
+            : [],
+    ]);
+
+    // Lifetime KPIs only for the customers that actually appear on the map.
+    const activeCardCodes = [
+        ...new Set([
+            ...invoices.map((d) => d.CardCode),
+            ...orders.map((d) => d.CardCode),
+            ...quotations.map((d) => d.CardCode),
+        ].filter(Boolean)),
+    ];
+
+    const [salesTotals, shopGroups] = await Promise.all([
+        getCustomerSalesTotals(activeCardCodes),
+        CustomerGroup.find({ kind: "shop" }).select("members.customer").lean(),
+    ]);
+
+    const shopGroupByCustomerId = new Map();
+    shopGroups.forEach((group) =>
+        (group.members || []).forEach((m) =>
+            shopGroupByCustomerId.set(String(m.customer), group._id)
+        )
+    );
+
+    const locations = buildLocations({
+        customersWithCoords,
+        invoices,
+        orders,
+        quotations,
+        salesTotals,
+        shopGroupByCustomerId,
+        includePotential,
+    });
+
+    // Documents whose customer has no coordinates never reach the map. Report
+    // the count so the gap is visible instead of silently swallowed.
+    const geocodedCodes = new Set(customersWithCoords.map((c) => c.CardCode));
+    const unmapped = new Map();
+    invoices.forEach((inv) => {
+        if (geocodedCodes.has(inv.CardCode)) return;
+        const entry = unmapped.get(inv.CardCode) || { cardCode: inv.CardCode, count: 0, total: 0 };
+        entry.count += 1;
+        entry.total += inv.DocTotal || 0;
+        unmapped.set(inv.CardCode, entry);
+    });
+
+    const active = locations.filter((l) => !l.isPotential);
+
+    return res.json({
+        success: true,
+        data: {
+            locations,
+            stats: {
+                totalLocations: locations.length,
+                activeLocations: active.length,
+                potentialLocations: locations.length - active.length,
+                totalInvoices: invoices.length,
+                totalOrders: orders.length,
+                totalQuotations: quotations.length,
+                mappedInvoices: active.reduce((s, l) => s + l.invoiceCount, 0),
+                invoiceTotal:
+                    Math.round(active.reduce((s, l) => s + l.invoiceTotal, 0) * 100) / 100,
+                // Locations where several accounts share an address — the
+                // duplicate / renamed-shop signal, surfaced on the map itself.
+                multiAccountLocations: locations.filter((l) => l.hasMultipleAccounts).length,
+                renamedShopLocations: locations.filter((l) => l.hasDifferentNames).length,
+                unmappedInvoices: [...unmapped.values()].reduce((s, u) => s + u.count, 0),
+                unmappedCustomers: unmapped.size,
+            },
+            unmapped: [...unmapped.values()]
+                .sort((a, b) => b.total - a.total)
+                .slice(0, 50),
+        },
+        dateRange: { startDate: start, endDate: end },
+    });
+};
+
+/**
  * Get all documents (invoices, orders, quotations) within a date range
  * with customer coordinates for map display
  */
 exports.getDocumentsByDateRange = async (req, res) => {
     try {
         const { startDate, endDate, type = "all", includePotentialCustomers = "false" } = req.query;
+        // Opt-in aggregated response: one pin per location rather than one per
+        // document. The legacy per-document arrays are still returned to any
+        // caller that does not ask for this.
+        const aggregated = req.query.aggregate === "true" || req.query.aggregate === true;
 
         if (!startDate || !endDate) {
             return res.status(400).json({
@@ -84,6 +395,17 @@ exports.getDocumentsByDateRange = async (req, res) => {
 
         console.log(`Found ${customersWithCoords.length} customers with coordinates`);
 
+        if (aggregated) {
+            return await respondWithLocations({
+                res,
+                start,
+                end,
+                type,
+                includePotential: includePotentialCustomers === "true" || includePotentialCustomers === true,
+                customersWithCoords,
+            });
+        }
+
         // Fetch Invoices
         if (type === "all" || type === "invoice") {
             const invoices = await Invoice.find({
@@ -101,54 +423,16 @@ exports.getDocumentsByDateRange = async (req, res) => {
             }
 
             let invoicesWithCoords = 0;
-            let invoicesGeocoded = 0;
             let invoicesFailed = 0;
 
+            // Note: customerMap only ever contains customers that already have
+            // coordinates, so there is nothing to geocode here. Geocoding gaps
+            // are handled by the dedicated batch endpoints below, not inline on
+            // a request that a user is waiting on.
             for (const invoice of invoices) {
-                let customer = customerMap.get(invoice.CardCode);
-                let coordinates = customer?.coordinates;
+                const customer = customerMap.get(invoice.CardCode);
+                const coordinates = customer?.coordinates;
 
-                // If customer has no coordinates, try to geocode NOW
-                if (!coordinates && customer) {
-                    const addr = customer.address || customer.deliveryAddress;
-                    if (addr) {
-                        try {
-                            const geocoded = await geocodeWithPhoton(customer);
-                            if (geocoded) {
-                                coordinates = {
-                                    lat: geocoded.lat,
-                                    lng: geocoded.lng,
-                                };
-
-                                // Save to database for future use
-                                await Customer.updateOne(
-                                    { CardCode: customer.CardCode },
-                                    {
-                                        $set: {
-                                            coordinates: {
-                                                lat: geocoded.lat,
-                                                lng: geocoded.lng,
-                                                geocodedAt: new Date(),
-                                                geocodeSource: "photon-ondemand",
-                                                displayName: geocoded.displayName,
-                                            },
-                                        },
-                                    }
-                                );
-
-                                // Update customerMap so other invoices for same customer don't re-geocode
-                                customer.coordinates = coordinates;
-                                customerMap.set(customer.CardCode, customer);
-
-                                invoicesGeocoded++;
-                            }
-                        } catch (err) {
-                            console.error(`Failed to geocode ${customer.CardCode}:`, err.message);
-                        }
-                    }
-                }
-
-                // Now add invoice if we have coordinates
                 if (coordinates) {
                     results.invoices.push({
                         type: "invoice",
@@ -176,17 +460,8 @@ exports.getDocumentsByDateRange = async (req, res) => {
                 }
             }
 
-            console.log(`Invoices with existing coordinates: ${invoicesWithCoords - invoicesGeocoded}`);
-            console.log(`Invoices geocoded on-the-fly: ${invoicesGeocoded}`);
+            console.log(`Invoices with coordinates: ${invoicesWithCoords}`);
             console.log(`Invoices without coordinates (excluded): ${invoicesFailed}`);
-
-            //give the number of invoices with card code as c9999
-            const c9999Invoices = results.failedinvoices.filter(inv => inv.cardCode === "C9999").length;
-            console.log(`Number of invoices with card code C9999: ${c9999Invoices}`);
-
-            //just print the failed invoices other than c9999
-            const otherFailedInvoices = results.failedinvoices.filter(inv => inv.cardCode !== "C9999");
-            console.log(`Failed invoices other than C9999: ${JSON.stringify(otherFailedInvoices)}`);
 
             results.stats.totalInvoices = results.invoices.length;
         }
@@ -255,29 +530,21 @@ exports.getDocumentsByDateRange = async (req, res) => {
 
         // Get customers who have invoices in date range WITH KPIS
         if (type === "all" || type === "customer") {
-            const uniqueCustomerCodes = new Set();
-            // CHANGED: Use invoices instead of orders
-            for (const invoice of results.invoices) {
-                uniqueCustomerCodes.add(invoice.cardCode);
-            }
+            const uniqueCustomerCodes = [
+                ...new Set(results.invoices.map((invoice) => invoice.cardCode)),
+            ];
 
-            // CHANGED: Fetch customer KPIs
+            // One aggregation for every customer's lifetime KPIs. This used to
+            // be a separate Invoice.find() per customer, which was the bulk of
+            // the request time.
+            const salesTotals = await getCustomerSalesTotals(uniqueCustomerCodes);
+
             for (const cardCode of uniqueCustomerCodes) {
                 const customer = customerMap.get(cardCode);
                 if (customer && customer.coordinates) {
-                    // Calculate customer KPIs
-                    const customerInvoices = await Invoice.find({ CardCode: cardCode })
-                        .select("DocTotal DocDate")
-                        .lean();
-
-                    const totalSales = customerInvoices.reduce((sum, inv) => sum + (inv.DocTotal || 0), 0);
-                    const lastInvoice = customerInvoices.length > 0
-                        ? customerInvoices.sort((a, b) => new Date(b.DocDate) - new Date(a.DocDate))[0]
-                        : null;
-
-                    const avgOrderValue = customerInvoices.length > 0
-                        ? totalSales / customerInvoices.length
-                        : 0;
+                    const totals = salesTotals.get(cardCode);
+                    const totalSales = totals ? totals.totalSales : 0;
+                    const totalInvoices = totals ? totals.totalInvoices : 0;
 
                     results.customers.push({
                         type: "customer",
@@ -288,17 +555,15 @@ exports.getDocumentsByDateRange = async (req, res) => {
                         color: "#f39c12",
                         kpis: {
                             totalSales: totalSales,
-                            totalInvoices: customerInvoices.length,
-                            lastInvoiceDate: lastInvoice ? lastInvoice.DocDate : null,
-                            avgOrderValue: avgOrderValue,
+                            totalInvoices: totalInvoices,
+                            lastInvoiceDate: totals ? totals.lastInvoiceDate : null,
+                            avgOrderValue: totalInvoices ? totalSales / totalInvoices : 0,
                         },
                     });
                 }
             }
             results.stats.totalCustomers = results.customers.length;
         }
-
-        console.log(includePotentialCustomers);
 
         // Get potential customers (those WITHOUT invoices in date range)
         if (includePotentialCustomers === "true" || type === "potential" || type === "all") {

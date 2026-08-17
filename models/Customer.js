@@ -290,6 +290,16 @@ const CustomerSchema = new Schema({
   // NEW: Multiple addresses array
   addresses: [AddressSchema],
 
+  // Set once a reviewer confirms this account is the same physical shop as
+  // other accounts (typically after the shop was re-registered under a new
+  // name). See models/CustomerGroup.js.
+  shopGroup: {
+    type: Schema.Types.ObjectId,
+    ref: "CustomerGroup",
+    index: true,
+    sparse: true,
+  },
+
   lastRestaurantAnalysis: Date,
 
   // NEW DOCUMENT FIELDS

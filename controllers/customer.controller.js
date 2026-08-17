@@ -1,5 +1,6 @@
 // controllers/customer.controller.js
 const Customer = require("../models/Customer");
+const CustomerGroup = require("../models/CustomerGroup");
 const User = require("../models/User");
 const csv = require("csv-parser");
 const fs = require("fs");
@@ -2290,7 +2291,7 @@ exports.getCustomers = async (req, res) => {
     // Use aggregation for better performance
     const [customers, totalCount] = await Promise.all([
       Customer.find(query)
-        .select('CardCode CardName Email phoneNumber status assignedTo createdAt')
+        .select('CardCode CardName Email phoneNumber status assignedTo createdAt shopGroup')
         .populate('assignedTo', 'firstName lastName email')
         .sort({ CardName: 1 })
         .skip(skip)
@@ -2298,6 +2299,27 @@ exports.getCustomers = async (req, res) => {
         .lean(),
       Customer.countDocuments(query)
     ]);
+
+    // Flag the accounts on this page that are confirmed to be the same physical
+    // shop as another account, so the list can show it without a lookup per row.
+    const groupIds = [...new Set(customers.map((c) => c.shopGroup).filter(Boolean).map(String))];
+    if (groupIds.length) {
+      const groups = await CustomerGroup.find({ _id: { $in: groupIds } })
+        .select("name members")
+        .lean();
+      const byId = new Map(groups.map((g) => [String(g._id), g]));
+
+      customers.forEach((customer) => {
+        const group = customer.shopGroup && byId.get(String(customer.shopGroup));
+        customer.shopGroup = group
+          ? {
+              _id: group._id,
+              name: group.name,
+              memberCount: (group.members || []).length,
+            }
+          : null;
+      });
+    }
 
     res.json({
       success: true,

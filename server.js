@@ -2,6 +2,7 @@ const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const helmet = require("helmet");
+const compression = require("compression");
 const morgan = require("morgan");
 const path = require("path");
 const fs = require("fs");
@@ -120,6 +121,9 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 app.use(helmet());
+// The map and reporting endpoints return multi-megabyte JSON. Nothing was
+// compressing it, so every byte went over the wire raw.
+app.use(compression());
 
 // Create uploads directory if it doesn't exist
 const uploadsDir = path.join(process.cwd(), "uploads");
@@ -242,6 +246,7 @@ app.use("/api/financial-statements", require('./routes/financialStatements.route
 app.use("/api/reconciliation/parser-payments", parserPaymentsRoutes);
 app.use('/api/pda', pdaRoutes);
 app.use("/api/map", mapRoutes);
+app.use("/api/duplicates", require("./routes/duplicates.routes"));
 app.use("/api/ai-summary", aiSummaryRoutes);
 app.use("/api/area-analysis", areaAnalysisRoutes);
 app.use('/api/truck-routes', truckRouteRoutes);

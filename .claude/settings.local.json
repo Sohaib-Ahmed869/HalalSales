@@ -39,7 +39,9 @@
       "Bash(node --check agents/whatsappInboundAgent.js)",
       "Bash(node --check agents/orchestratorAgent.js)",
       "Bash(node --check controllers/whatsappAIAgent.controller.js)",
-      "Bash(node -e ' *)"
+      "Bash(node -e ' *)",
+      "Bash(rm -f .__minisrv.tmp.js)",
+      "Bash(taskkill //F //IM node.exe //FI \"MEMUSAGE gt 100000\")"
     ],
     "additionalDirectories": [
       "d:\\Calcite Codes\\SalesFrontend\\src\\pages\\Dashboard\\SalesAgent\\WhatsApp",
