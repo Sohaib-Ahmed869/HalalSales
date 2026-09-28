@@ -5,6 +5,7 @@ const csv = require("csv-parser");
 const fs = require("fs");
 const path = require("path");
 const XLSX = require("xlsx");
+const { geocodeCustomer } = require("../utils/geocodingService");
 
 // Process customer data from text format
 const processCustomerData = (text) => {
@@ -161,6 +162,11 @@ exports.createCustomer = async (req, res) => {
       assignedTo,
       status,
       notes,
+      company,
+      address,
+      openingTime,
+      closingTime,
+      marketingStatus,
     } = req.body;
 
     // Validate required fields
@@ -197,9 +203,22 @@ exports.createCustomer = async (req, res) => {
       assignedTo,
       status: status || "active",
       notes,
+      company,
+      address,
+      openingTime,
+      closingTime,
+      marketingStatus,
     });
 
     await newCustomer.save();
+
+    // Best-effort geocode of the address just entered. Never blocks/fails
+    // customer creation if geocoding is unavailable or the address is bad.
+    if (address && (address.street || address.zipCode || address.city)) {
+      geocodeCustomer(newCustomer).catch((err) =>
+        console.error("Geocode on create failed:", err.message)
+      );
+    }
 
     res.status(201).json({
       message: "Customer created successfully",
@@ -224,6 +243,11 @@ exports.updateCustomer = async (req, res) => {
       assignedTo,
       status,
       notes,
+      company,
+      address,
+      openingTime,
+      closingTime,
+      marketingStatus,
     } = req.body;
 
     // Find customer
@@ -241,6 +265,31 @@ exports.updateCustomer = async (req, res) => {
     if (hubspotId !== undefined) updateData.hubspotId = hubspotId;
     if (status) updateData.status = status;
     if (notes !== undefined) updateData.notes = notes;
+    if (company !== undefined) updateData.company = company;
+    if (openingTime !== undefined) updateData.openingTime = openingTime;
+    if (closingTime !== undefined) updateData.closingTime = closingTime;
+    if (marketingStatus !== undefined) updateData.marketingStatus = marketingStatus;
+
+    // Address changed? Merge onto existing address and flag for re-geocode.
+    let addressChanged = false;
+    if (address !== undefined) {
+      const existing = customer.address || {};
+      const merged = {
+        street: address.street !== undefined ? address.street : existing.street,
+        zipCode: address.zipCode !== undefined ? address.zipCode : existing.zipCode,
+        city: address.city !== undefined ? address.city : existing.city,
+        country: address.country !== undefined ? address.country : existing.country,
+      };
+      addressChanged =
+        merged.street !== existing.street ||
+        merged.zipCode !== existing.zipCode ||
+        merged.city !== existing.city ||
+        merged.country !== existing.country;
+      updateData.address = merged;
+      if (addressChanged) {
+        updateData.geo = { ...(customer.geo || {}), geocodeStatus: "pending" };
+      }
+    }
 
     // Handle assignedTo separately with permission checks
     if (assignedTo !== undefined) {
@@ -268,6 +317,12 @@ exports.updateCustomer = async (req, res) => {
       updateData,
       { new: true, runValidators: true }
     ).populate("assignedTo", "firstName lastName email hubspotId");
+
+    if (addressChanged) {
+      geocodeCustomer(updatedCustomer).catch((err) =>
+        console.error("Geocode on update failed:", err.message)
+      );
+    }
 
     res.json({
       message: "Customer updated successfully",

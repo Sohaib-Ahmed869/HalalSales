@@ -47,6 +47,42 @@ const CustomerSchema = new Schema({
   notes: {
     type: String,
   },
+  // Logistics / delivery fields (added for Sales Map Report + Truck Schedules)
+  company: {
+    type: String,
+    trim: true,
+  },
+  address: {
+    street: { type: String, trim: true },
+    zipCode: { type: String, trim: true },
+    city: { type: String, trim: true },
+    country: { type: String, trim: true },
+  },
+  geo: {
+    lat: { type: Number },
+    lng: { type: Number },
+    geocodedAt: { type: Date },
+    geocodeStatus: {
+      type: String,
+      enum: ["pending", "ok", "failed", "manual"],
+      default: "pending",
+    },
+  },
+  openingTime: {
+    type: String, // "HH:MM"
+  },
+  closingTime: {
+    type: String, // "HH:MM"
+  },
+  fulfillmentMethod: {
+    type: String,
+    enum: ["delivery", "pickup"],
+    default: "delivery",
+  },
+  marketingStatus: {
+    type: String,
+    trim: true,
+  },
 });
 
 // Update timestamps on save
