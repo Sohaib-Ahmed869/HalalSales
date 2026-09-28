@@ -384,6 +384,64 @@ function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, maxPasse
   });
 }
 
+/**
+ * Computes real distance/duration/wait/feasibility for a route in the EXACT
+ * order given — no construction, no 2-opt, no reordering at all. Used after
+ * a dispatcher manually drags/reorders stops: their chosen order must be
+ * respected exactly, but the displayed totals (distance, ETA, wait, "time-
+ * window issue" flags) still need to reflect what that specific order
+ * actually costs, not go stale until the next full re-optimize.
+ *
+ * @param {Array} stops - in the exact order to evaluate
+ * @param {Object} depot - { lat, lng }
+ * @param {number} departureMin
+ * @param {number} speedKmh
+ * @returns {Object} { sequence: [stop...with seq/etaMin/infeasible, same order as input], totalDistanceKm, totalDurationMin, totalWaitMin }
+ */
+function evaluateFixedRoute(stops, depot, departureMin = 8 * 60, speedKmh = DEFAULT_SPEED_KMH) {
+  const geocoded = stops.filter(
+    (s) => s.coordinates && Number.isFinite(s.coordinates.lat) && Number.isFinite(s.coordinates.lng)
+  );
+  if (geocoded.length === 0) {
+    return { sequence: [], totalDistanceKm: 0, totalDurationMin: 0, totalWaitMin: 0 };
+  }
+
+  const point = (s) => (s === "DEPOT" ? depot : s.coordinates);
+  const route = ["DEPOT", ...geocoded, "DEPOT"];
+
+  let clock = departureMin;
+  let totalDistanceKm = 0;
+  let totalWaitMin = 0;
+  const sequence = [];
+  let seq = 1;
+
+  for (let i = 1; i < route.length; i++) {
+    const dist = roadKm(point(route[i - 1]), point(route[i]));
+    totalDistanceKm += dist;
+    clock += durationMin(dist, speedKmh);
+
+    const stop = route[i];
+    if (stop === "DEPOT") continue;
+
+    let waitMin = 0;
+    if (stop.windowOpen != null && clock < stop.windowOpen) {
+      waitMin = stop.windowOpen - clock;
+      clock = stop.windowOpen;
+    }
+    totalWaitMin += waitMin;
+
+    const infeasible = stop.windowClose != null && clock > stop.windowClose;
+    sequence.push({ ...stop, seq: seq++, etaMin: Math.round(clock), infeasible });
+  }
+
+  return {
+    sequence,
+    totalDistanceKm: Math.round(totalDistanceKm * 10) / 10,
+    totalDurationMin: Math.round(clock - departureMin),
+    totalWaitMin: Math.round(totalWaitMin),
+  };
+}
+
 module.exports = {
   haversineKm,
   roadKm,
@@ -393,4 +451,5 @@ module.exports = {
   sequenceRoute,
   pickSmallestFittingTruck,
   crossRouteImprove,
+  evaluateFixedRoute,
 };

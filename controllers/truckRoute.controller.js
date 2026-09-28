@@ -10,6 +10,7 @@ const {
   parseTimeToMinutes,
   pickSmallestFittingTruck,
   crossRouteImprove,
+  evaluateFixedRoute,
 } = require("../utils/routeOptimizer");
 const { getWarehouse, regionForAddress } = require("../utils/regions");
 const { geocodeCustomer } = require("../utils/geocodingService");
@@ -475,6 +476,30 @@ exports.reorderOrders = async (req, res) => {
     });
 
     route.orders = reordered;
+
+    // Recompute real distance/ETA/wait/infeasible-flags for the exact order
+    // just chosen — a manual drag-reorder previously left these at whatever
+    // the last auto-sequence produced, stale and wrong the moment the order
+    // actually changed. evaluateFixedRoute respects the given order exactly
+    // (unlike resequenceRoute, which would ignore these stops entirely once
+    // every one of them is locked).
+    const depot = getDepot(route.tenant);
+    const { sequence, totalDistanceKm, totalDurationMin, totalWaitMin } = evaluateFixedRoute(
+      route.orders.map(toOptimizerStop),
+      depot
+    );
+    const byId = new Map(sequence.map((s) => [s.id, s]));
+    route.orders.forEach((o) => {
+      const evaluated = byId.get(String(o._id));
+      if (evaluated) {
+        o.etaMin = evaluated.etaMin;
+        o.status = evaluated.infeasible ? "infeasible" : o.status;
+      }
+    });
+    route.totalDistanceKm = totalDistanceKm;
+    route.totalDurationMin = totalDurationMin;
+    route.totalWaitMin = totalWaitMin;
+
     await route.save();
 
     res.json({ message: "Order sequence updated", route });
@@ -733,9 +758,19 @@ exports.autoFillAllTrucks = async (req, res) => {
         message: "No trucks initialized for this date — run Initialize Date first",
       });
     }
-    routes.forEach((r) => {
-      r.strategy = strategy;
-    });
+    // Persist the chosen strategy on every route for this date right away —
+    // not just the ones that end up in touchedRoutes below. A region with no
+    // unassigned orders this run never enters that set, so without this a
+    // route in it would keep showing "least_wait" chosen but silently still
+    // be set to "shortest" in the database until something else saves it.
+    await Promise.all(
+      routes
+        .filter((r) => r.strategy !== strategy)
+        .map((r) => {
+          r.strategy = strategy;
+          return r.save();
+        })
+    );
 
     const deliveryNotes = await DeliveryNote.find({
       Cancelled: { $ne: "Y" },
