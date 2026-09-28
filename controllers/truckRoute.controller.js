@@ -336,6 +336,13 @@ exports.assignOrderToTruck = async (req, res) => {
     const customersByCode = new Map(customer ? [[customer.CardCode, customer]] : []);
     const built = await buildDeliverableOrder(invoice, customersByCode, route.tenant);
 
+    const projectedWeight = route.totalWeightKg + (built.totalWeight || 0);
+    if (projectedWeight > route.maxWeightKg) {
+      return res.status(400).json({
+        message: `Adding this order would put the truck over capacity (${projectedWeight.toFixed(1)} / ${route.maxWeightKg} kg). Remove another stop first, or assign it to a truck with more room.`,
+      });
+    }
+
     route.orders.push({
       order: {
         _id: built._id,
