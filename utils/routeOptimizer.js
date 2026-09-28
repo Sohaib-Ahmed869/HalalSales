@@ -189,7 +189,23 @@ function sequenceRoute(stops, depot, departureMin = 8 * 60, speedKmh = DEFAULT_S
     return arrivals[arrivals.length - 1].arrival - departureMin;
   }
 
-  const routeCost = strategy === "least_wait" ? routeElapsedCost : routeDistanceCost;
+  // "shortest" is distance-first, but a pure distance cost leaves ties
+  // (e.g. a simple 2-stop loop costs the *same* total distance regardless of
+  // which stop is visited first — it's the same triangle in reverse) to
+  // whichever insertion order the search happens to try first. That silently
+  // picked the wait-inducing order in exactly that case. Adding a wait
+  // component so small it can never outweigh a genuine distance difference
+  // (worth ~1 metre of "distance" per minute of waiting) breaks real ties in
+  // favour of not waiting, without changing what "shortest" optimizes for.
+  const WAIT_TIEBREAK_KM_PER_MIN = 0.001;
+  function routeDistanceCostWithWaitTiebreak(candidateRoute) {
+    const distance = routeDistanceCost(candidateRoute);
+    const arrivals = computeArrivals(candidateRoute);
+    const waitMin = arrivals.reduce((sum, a) => sum + (a.waitMin || 0), 0);
+    return distance + waitMin * WAIT_TIEBREAK_KM_PER_MIN;
+  }
+
+  const routeCost = strategy === "least_wait" ? routeElapsedCost : routeDistanceCostWithWaitTiebreak;
 
   while (remaining.length > 0) {
     let bestStopIdx = -1;
