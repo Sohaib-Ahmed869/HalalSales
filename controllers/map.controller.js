@@ -8,6 +8,19 @@ function tenantFromReq(req) {
   return req.query.tenant || "halal-food-sales";
 }
 
+// customer.coordinates is a pre-existing field (populated for 7,289 real
+// customers by an external sync, not declared in models/Customer.js — only
+// visible via .lean()/.toObject(), never via direct property access on a
+// hydrated Mongoose document). customer.geo is this feature's own field,
+// used for customers geocoded going forward via the Google API key in
+// customer.controller.js. Check coordinates first since that's where the
+// real, already-populated data is.
+function customerGeo(customer) {
+  if (customer?.coordinates?.lat != null && customer?.coordinates?.lng != null) return customer.coordinates;
+  if (customer?.geo?.lat != null && customer?.geo?.lng != null) return customer.geo;
+  return null;
+}
+
 async function fetchDocsInRange(type, startDate, endDate) {
   const range = { $gte: new Date(startDate), $lte: new Date(endDate) };
   const docs = { invoices: [], orders: [] };
@@ -34,14 +47,15 @@ exports.getDocuments = async (req, res) => {
     const { invoices, orders } = await fetchDocsInRange(type, startDate, endDate);
 
     const cardCodes = [...new Set([...invoices.map((i) => i.CardCode), ...orders.map((o) => o.CardCode)])];
-    const customers = await Customer.find({ CardCode: { $in: cardCodes } });
+    const customers = await Customer.find({ CardCode: { $in: cardCodes } }).lean();
     const customersByCode = new Map(customers.map((c) => [c.CardCode, c]));
 
     if (aggregate === "false") {
       const locations = [];
       invoices.forEach((doc) => {
         const c = customersByCode.get(doc.CardCode);
-        if (c?.geo?.lat && c?.geo?.lng) {
+        const geo = customerGeo(c);
+        if (geo) {
           locations.push({
             type: "invoice",
             docEntry: doc.DocEntry,
@@ -49,13 +63,14 @@ exports.getDocuments = async (req, res) => {
             cardCode: doc.CardCode,
             cardName: doc.CardName,
             amount: doc.DocTotal,
-            coordinates: { lat: c.geo.lat, lng: c.geo.lng },
+            coordinates: { lat: geo.lat, lng: geo.lng },
           });
         }
       });
       orders.forEach((doc) => {
         const c = customersByCode.get(doc.CardCode);
-        if (c?.geo?.lat && c?.geo?.lng) {
+        const geo = customerGeo(c);
+        if (geo) {
           locations.push({
             type: "order",
             docEntry: doc.DocEntry,
@@ -63,7 +78,7 @@ exports.getDocuments = async (req, res) => {
             cardCode: doc.CardCode,
             cardName: doc.CardName,
             amount: doc.DocTotal,
-            coordinates: { lat: c.geo.lat, lng: c.geo.lng },
+            coordinates: { lat: geo.lat, lng: geo.lng },
           });
         }
       });
@@ -75,11 +90,12 @@ exports.getDocuments = async (req, res) => {
     const ensureLocation = (cardCode) => {
       if (!byCustomer.has(cardCode)) {
         const c = customersByCode.get(cardCode);
+        const geo = customerGeo(c);
         byCustomer.set(cardCode, {
           id: cardCode,
           cardCode,
           cardName: c?.CardName,
-          coordinates: c?.geo?.lat && c?.geo?.lng ? { lat: c.geo.lat, lng: c.geo.lng } : null,
+          coordinates: geo ? { lat: geo.lat, lng: geo.lng } : null,
           isPotential: !c,
           invoiceCount: 0,
           orderCount: 0,
@@ -157,11 +173,17 @@ exports.getGeocodingStats = async (req, res) => {
   try {
     const [total, ok, pending, failed, manual] = await Promise.all([
       Customer.countDocuments({}),
-      Customer.countDocuments({ "geo.geocodeStatus": "ok" }),
+      // "ok" = has a usable geocode either way: the pre-existing
+      // customer.coordinates field (the real data for most customers) or
+      // this feature's own customer.geo field.
       Customer.countDocuments({
+        $or: [{ "coordinates.lat": { $exists: true, $ne: null } }, { "geo.geocodeStatus": "ok" }],
+      }),
+      Customer.countDocuments({
+        "coordinates.lat": { $exists: false },
         $or: [{ "geo.geocodeStatus": { $exists: false } }, { "geo.geocodeStatus": "pending" }],
       }),
-      Customer.countDocuments({ "geo.geocodeStatus": "failed" }),
+      Customer.countDocuments({ "coordinates.lat": { $exists: false }, "geo.geocodeStatus": "failed" }),
       Customer.countDocuments({ "geo.geocodeStatus": "manual" }),
     ]);
 
@@ -182,6 +204,10 @@ exports.batchGeocode = async (req, res) => {
     const candidates = await Customer.find({
       $and: [
         { $or: [{ "address.street": { $ne: null } }, { "address.zipCode": { $ne: null } }] },
+        // Skip customers that already have a usable geocode from either
+        // source — no point spending a Google API call re-geocoding
+        // someone the pre-existing coordinates field already covers.
+        { "coordinates.lat": { $exists: false } },
         { $or: [{ "geo.geocodeStatus": { $exists: false } }, { "geo.geocodeStatus": { $in: ["pending", "failed"] } }] },
       ],
     }).limit(limit);

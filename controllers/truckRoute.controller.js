@@ -2,7 +2,7 @@
 const TruckSchedule = require("../models/TruckSchedule");
 const TruckRoute = require("../models/TruckRoute");
 const Customer = require("../models/Customer");
-const Invoice = require("../models/Invoice");
+const DeliveryNote = require("../models/DeliveryNote");
 const Item = require("../models/item");
 const {
   sweepCluster,
@@ -205,54 +205,76 @@ exports.getSingleRoute = async (req, res) => {
   }
 };
 
-// ---------- Deliverable orders (Invoices with isDelivery=true) ----------
+// ---------- Deliverable orders (real SAP DeliveryNote documents) ----------
+//
+// Originally this queried Invoice.isDelivery === true, matching the SAP
+// document flow assumption in implementation.md (Order -> Delivery ->
+// Invoice). Checked against the real data: isDelivery is essentially never
+// true (0 across ~40k invoices/month except a one-off blip), while a real,
+// currently-synced DeliveryNote collection already exists (ported from
+// models/DeliveryNote.js) with correct, current data — that's SAP's actual
+// "this needs to physically leave the warehouse" document, so it's the
+// correct source, not a substitute for one.
 
-async function buildDeliverableOrder(invoice, customersByCode, tenant) {
-  const customer = customersByCode.get(invoice.CardCode);
+async function buildDeliverableOrder(deliveryNote, customersByCode, tenant) {
+  const customer = customersByCode.get(deliveryNote.CardCode);
 
   let totalWeight = 0;
-  const itemCodes = (invoice.DocumentLines || []).map((l) => l.ItemCode).filter(Boolean);
+  const itemCodes = (deliveryNote.DocumentLines || []).map((l) => l.ItemCode).filter(Boolean);
   if (itemCodes.length > 0) {
     const items = await Item.find({ ItemCode: { $in: itemCodes } });
     const weightByCode = new Map(items.map((it) => [it.ItemCode, it.SalesUnitWeight || 0]));
-    totalWeight = (invoice.DocumentLines || []).reduce((sum, line) => {
+    totalWeight = (deliveryNote.DocumentLines || []).reduce((sum, line) => {
       const w = weightByCode.get(line.ItemCode) || 0;
       return sum + w * (line.Quantity || 0);
     }, 0);
   }
 
-  const hasGeo =
-    customer &&
-    customer.geo &&
-    Number.isFinite(customer.geo.lat) &&
-    Number.isFinite(customer.geo.lng);
+  // customer.coordinates is a pre-existing field, populated for 7,289 real
+  // customers by an external sync (not declared in models/Customer.js, but
+  // Mongoose still surfaces it on read since it's already in the stored
+  // document) — the actual usable geocode data. customer.geo is this
+  // feature's own field for geocoding customers going forward (via the
+  // Google API key in customer.controller.js) and is empty for existing
+  // customers today; kept as a fallback so newly-geocoded customers work
+  // too, but coordinates is checked first since that's where the real data is.
+  const geoSource =
+    customer?.coordinates?.lat != null && customer?.coordinates?.lng != null
+      ? customer.coordinates
+      : customer?.geo?.lat != null && customer?.geo?.lng != null
+      ? customer.geo
+      : null;
+
+  // deliveryAddress (where trucks should actually go) takes precedence over
+  // the billing address when both exist on the customer record.
+  const address = customer ? customer.deliveryAddress || customer.address : undefined;
 
   return {
-    _id: invoice._id,
-    DocEntry: invoice.DocEntry,
-    DocNum: invoice.DocNum,
-    DocDate: invoice.DocDate,
-    CardCode: invoice.CardCode,
-    CardName: invoice.CardName,
-    DocTotal: invoice.DocTotal,
-    address: customer ? customer.address : undefined,
+    _id: deliveryNote._id,
+    DocEntry: deliveryNote.DocEntry,
+    DocNum: deliveryNote.DocNum,
+    DocDate: deliveryNote.DocDate,
+    CardCode: deliveryNote.CardCode,
+    CardName: deliveryNote.CardName,
+    DocTotal: deliveryNote.DocTotal,
+    address,
     totalWeight,
     weightUnit: "kg",
-    coordinates: hasGeo ? { lat: customer.geo.lat, lng: customer.geo.lng } : null,
+    coordinates: geoSource ? { lat: geoSource.lat, lng: geoSource.lng } : null,
     openingTime: customer ? customer.openingTime : undefined,
     closingTime: customer ? customer.closingTime : undefined,
-    geocodeStatus: customer && customer.geo ? customer.geo.geocodeStatus : "pending",
+    geocodeStatus: geoSource ? "ok" : customer?.geo?.geocodeStatus || "pending",
     fulfillmentMethod: customer ? customer.fulfillmentMethod : "delivery",
     // Derived from the customer's postal code via utils/regions.js — the
     // same department->region table the frontend uses, so a truck's region
     // and an order's region mean the same thing on both sides. null when
     // the address/postal code can't be classified (surfaced, never guessed).
-    region: customer ? regionForAddress(customer.address, tenant) : null,
+    region: customer ? regionForAddress(address, tenant) : null,
   };
 }
 
-// Every deliverable invoice for the date that isn't already assigned to a
-// TruckRoute. Excludes pickup customers (never routed at all).
+// Every deliverable DeliveryNote for the date that isn't already assigned to
+// a TruckRoute. Excludes pickup customers (never routed at all).
 exports.getAvailableOrders = async (req, res) => {
   try {
     const { date } = req.params;
@@ -268,8 +290,8 @@ exports.getAvailableOrders = async (req, res) => {
     const dayEnd = new Date(endDate ? new Date(endDate) : dayStart);
     dayEnd.setHours(23, 59, 59, 999);
 
-    const invoices = await Invoice.find({
-      isDelivery: true,
+    const deliveryNotes = await DeliveryNote.find({
+      Cancelled: { $ne: "Y" },
       DocDate: { $gte: dayStart, $lte: dayEnd },
     });
 
@@ -278,17 +300,17 @@ exports.getAvailableOrders = async (req, res) => {
       routes.flatMap((r) => r.orders.map((o) => o.order.DocEntry))
     );
 
-    const cardCodes = [...new Set(invoices.map((i) => i.CardCode))];
-    const customers = await Customer.find({ CardCode: { $in: cardCodes } });
+    const cardCodes = [...new Set(deliveryNotes.map((i) => i.CardCode))];
+    const customers = await Customer.find({ CardCode: { $in: cardCodes } }).lean();
     const customersByCode = new Map(customers.map((c) => [c.CardCode, c]));
 
     const candidates = [];
-    for (const invoice of invoices) {
-      if (assignedDocEntries.has(invoice.DocEntry)) continue;
-      const customer = customersByCode.get(invoice.CardCode);
+    for (const deliveryNote of deliveryNotes) {
+      if (assignedDocEntries.has(deliveryNote.DocEntry)) continue;
+      const customer = customersByCode.get(deliveryNote.CardCode);
       if (customer && customer.fulfillmentMethod === "pickup") continue; // self-collection, never routed
 
-      const order = await buildDeliverableOrder(invoice, customersByCode, tenant);
+      const order = await buildDeliverableOrder(deliveryNote, customersByCode, tenant);
 
       // Real region filter, derived from the customer's own postal code
       // (utils/regions.js) rather than left as a no-op — an order whose
@@ -333,12 +355,12 @@ exports.assignOrderToTruck = async (req, res) => {
       return res.status(400).json({ message: "Order already assigned to this truck" });
     }
 
-    const invoice = await Invoice.findOne({ DocEntry: orderDocEntry, isDelivery: true });
-    if (!invoice) return res.status(404).json({ message: "Deliverable order not found" });
+    const deliveryNote = await DeliveryNote.findOne({ DocEntry: orderDocEntry, Cancelled: { $ne: "Y" } });
+    if (!deliveryNote) return res.status(404).json({ message: "Deliverable order not found" });
 
-    const customer = await Customer.findOne({ CardCode: invoice.CardCode });
+    const customer = await Customer.findOne({ CardCode: deliveryNote.CardCode }).lean();
     const customersByCode = new Map(customer ? [[customer.CardCode, customer]] : []);
-    const built = await buildDeliverableOrder(invoice, customersByCode, route.tenant);
+    const built = await buildDeliverableOrder(deliveryNote, customersByCode, route.tenant);
 
     const projectedWeight = route.totalWeightKg + (built.totalWeight || 0);
     if (projectedWeight > route.maxWeightKg) {
@@ -567,8 +589,8 @@ exports.generateRoute = async (req, res) => {
     const dayEnd = new Date(dayStart);
     dayEnd.setHours(23, 59, 59, 999);
 
-    const invoices = await Invoice.find({
-      isDelivery: true,
+    const deliveryNotes = await DeliveryNote.find({
+      Cancelled: { $ne: "Y" },
       DocDate: { $gte: dayStart, $lte: dayEnd },
     });
 
@@ -580,19 +602,19 @@ exports.generateRoute = async (req, res) => {
       allRoutesToday.flatMap((r) => r.orders.map((o) => o.order.DocEntry))
     );
 
-    const cardCodes = [...new Set(invoices.map((i) => i.CardCode))];
-    const customers = await Customer.find({ CardCode: { $in: cardCodes } });
+    const cardCodes = [...new Set(deliveryNotes.map((i) => i.CardCode))];
+    const customers = await Customer.find({ CardCode: { $in: cardCodes } }).lean();
     const customersByCode = new Map(customers.map((c) => [c.CardCode, c]));
 
     let remainingCapacity = route.maxWeightKg - route.totalWeightKg;
     let ordersAdded = 0;
 
-    for (const invoice of invoices) {
-      if (assigned.has(invoice.DocEntry)) continue;
-      const customer = customersByCode.get(invoice.CardCode);
+    for (const deliveryNote of deliveryNotes) {
+      if (assigned.has(deliveryNote.DocEntry)) continue;
+      const customer = customersByCode.get(deliveryNote.CardCode);
       if (!customer || customer.fulfillmentMethod === "pickup") continue;
 
-      const built = await buildDeliverableOrder(invoice, customersByCode, route.tenant);
+      const built = await buildDeliverableOrder(deliveryNote, customersByCode, route.tenant);
       // Only pull in orders whose postal code actually falls in this truck's
       // region — a customer whose region can't be determined is skipped
       // here (never guessed into the wrong truck); it still shows up in
@@ -620,7 +642,7 @@ exports.generateRoute = async (req, res) => {
       });
 
       remainingCapacity -= built.totalWeight;
-      assigned.add(invoice.DocEntry);
+      assigned.add(deliveryNote.DocEntry);
       ordersAdded++;
     }
 
@@ -677,12 +699,12 @@ exports.autoFillAllTrucks = async (req, res) => {
       });
     }
 
-    const invoices = await Invoice.find({
-      isDelivery: true,
+    const deliveryNotes = await DeliveryNote.find({
+      Cancelled: { $ne: "Y" },
       DocDate: { $gte: dayStart, $lte: dayEnd },
     });
-    const cardCodes = [...new Set(invoices.map((i) => i.CardCode))];
-    const customers = await Customer.find({ CardCode: { $in: cardCodes } });
+    const cardCodes = [...new Set(deliveryNotes.map((i) => i.CardCode))];
+    const customers = await Customer.find({ CardCode: { $in: cardCodes } }).lean();
     const customersByCode = new Map(customers.map((c) => [c.CardCode, c]));
 
     const alreadyAssigned = new Set(routes.flatMap((r) => r.orders.map((o) => o.order.DocEntry)));
@@ -692,12 +714,12 @@ exports.autoFillAllTrucks = async (req, res) => {
     // borrowed from whichever route happened to be first in the list.
     const byRegion = new Map();
     const unassignable = [];
-    for (const invoice of invoices) {
-      if (alreadyAssigned.has(invoice.DocEntry)) continue;
-      const customer = customersByCode.get(invoice.CardCode);
+    for (const deliveryNote of deliveryNotes) {
+      if (alreadyAssigned.has(deliveryNote.DocEntry)) continue;
+      const customer = customersByCode.get(deliveryNote.CardCode);
       if (!customer || customer.fulfillmentMethod === "pickup") continue;
 
-      const built = await buildDeliverableOrder(invoice, customersByCode, tenant);
+      const built = await buildDeliverableOrder(deliveryNote, customersByCode, tenant);
       if (!built.coordinates) {
         unassignable.push({ docEntry: built.DocEntry, cardName: built.CardName, reason: "not geocoded" });
         continue;
