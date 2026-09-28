@@ -12,6 +12,7 @@ const {
   crossRouteImprove,
 } = require("../utils/routeOptimizer");
 const { getWarehouse, regionForAddress } = require("../utils/regions");
+const { geocodeCustomer } = require("../utils/geocodingService");
 
 const DAY_NAMES = [
   "Sunday",
@@ -216,8 +217,35 @@ exports.getSingleRoute = async (req, res) => {
 // "this needs to physically leave the warehouse" document, so it's the
 // correct source, not a substitute for one.
 
+// customer is a plain .lean() object here (from customersByCode), not a
+// Mongoose document — geocodeCustomer() needs a real document to .save(),
+// so this re-fetches one, geocodes it, then mutates the shared lean object
+// in place so every other reference to this customer within the same
+// request (and the customersByCode map itself) sees the new geo immediately
+// without a second geocoding call. Silently does nothing if the customer
+// already has a usable geocode or has no address to geocode from.
+async function ensureGeocoded(customer) {
+  if (!customer) return;
+  const hasGeo = customer.coordinates?.lat != null || customer.geo?.lat != null;
+  if (hasGeo) return;
+  const hasAddress = customer.address?.street || customer.address?.zipCode;
+  if (!hasAddress) return;
+
+  try {
+    const doc = await Customer.findOne({ CardCode: customer.CardCode });
+    if (!doc) return;
+    await geocodeCustomer(doc);
+    if (doc.geo?.geocodeStatus === "ok") {
+      customer.geo = { lat: doc.geo.lat, lng: doc.geo.lng, geocodeStatus: "ok" };
+    }
+  } catch (error) {
+    console.error(`On-the-fly geocode failed for ${customer.CardCode}:`, error.message);
+  }
+}
+
 async function buildDeliverableOrder(deliveryNote, customersByCode, tenant) {
   const customer = customersByCode.get(deliveryNote.CardCode);
+  await ensureGeocoded(customer);
 
   let totalWeight = 0;
   const itemCodes = (deliveryNote.DocumentLines || []).map((l) => l.ItemCode).filter(Boolean);
@@ -230,14 +258,15 @@ async function buildDeliverableOrder(deliveryNote, customersByCode, tenant) {
     }, 0);
   }
 
-  // customer.coordinates is a pre-existing field, populated for 7,289 real
+  // customer.coordinates is a pre-existing field, populated for real
   // customers by an external sync (not declared in models/Customer.js, but
   // Mongoose still surfaces it on read since it's already in the stored
   // document) — the actual usable geocode data. customer.geo is this
-  // feature's own field for geocoding customers going forward (via the
-  // Google API key in customer.controller.js) and is empty for existing
-  // customers today; kept as a fallback so newly-geocoded customers work
-  // too, but coordinates is checked first since that's where the real data is.
+  // feature's own field, filled by ensureGeocoded() above (or by
+  // customer.controller.js when an address is saved) via
+  // utils/geocodingService.js (Photon, free — Google is a second attempt
+  // only, that Cloud project's billing is disabled). coordinates is checked
+  // first since it's the larger, pre-existing dataset.
   const geoSource =
     customer?.coordinates?.lat != null && customer?.coordinates?.lng != null
       ? customer.coordinates
