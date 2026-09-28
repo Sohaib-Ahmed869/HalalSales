@@ -264,6 +264,85 @@ function pickSmallestFittingTruck(trucks, weightKg) {
   return sorted.find((t) => t.maxWeightKg >= weightKg) || null;
 }
 
+/**
+ * Fixes the specific gap sweep-clustering leaves behind: capacity cutoffs
+ * split a purely angle-sorted list, so a stop can land on truck A even
+ * though it sits right next to truck B's route — "least trucks per area" and
+ * "shortest/quickest route" are area-level (sweepCluster) and single-truck
+ * (sequenceRoute) properties respectively; neither one looks at whether a
+ * stop is actually cheaper on a *different* truck. This is the missing
+ * between-truck step: a bounded local search (classic VRP "inter-route
+ * relocation") that keeps moving one stop at a time from whichever truck it
+ * costs the most to whichever truck it would cost the least, as long as
+ * capacity and the stop's time window still hold, until no such move helps
+ * or `maxPasses` is reached.
+ *
+ * @param {Array} trucks - [{ id, capacityKg, stops: [{ id, coordinates, windowOpen, windowClose, weightKg, locked, ...anything else to carry through }] }]
+ * @param {Object} depot
+ * @param {number} speedKmh
+ * @param {number} maxPasses
+ * @returns {Array} same shape as input, each truck additionally carrying { sequence, totalDistanceKm, totalDurationMin }
+ */
+function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, maxPasses = 3) {
+  const working = trucks.map((t) => ({ ...t, stops: t.stops.map((s) => ({ ...s })) }));
+  const distanceOf = (stops) => sequenceRoute(stops, depot, 8 * 60, speedKmh).totalDistanceKm;
+  const EPSILON_KM = 0.05; // ignore savings too small to be worth an extra stop-swap
+
+  let movedAny = true;
+  let pass = 0;
+  while (movedAny && pass < maxPasses) {
+    movedAny = false;
+    pass++;
+
+    for (let i = 0; i < working.length; i++) {
+      const from = working[i];
+      for (const stop of [...from.stops]) {
+        if (stop.locked) continue;
+        // No "leave at least one stop" guard here on purpose: fully draining
+        // a near-empty truck into others (an empty route, needed by nobody
+        // today) is exactly the "least trucks per area" outcome, not a bug
+        // to avoid. An empty TruckRoute is a valid, informative result — it
+        // means that scheduled truck genuinely isn't needed today.
+
+        const withoutStop = from.stops.filter((s) => s.id !== stop.id);
+        const removalSavings = distanceOf(from.stops) - distanceOf(withoutStop);
+
+        let bestTo = null;
+        let bestInsertionCost = Infinity;
+
+        for (let j = 0; j < working.length; j++) {
+          if (j === i) continue;
+          const to = working[j];
+          const usedWeight = to.stops.reduce((s, o) => s + (o.weightKg || 0), 0);
+          if (usedWeight + (stop.weightKg || 0) > to.capacityKg) continue;
+
+          const withStop = [...to.stops, stop];
+          const insertionCost = distanceOf(withStop) - distanceOf(to.stops);
+          if (insertionCost >= bestInsertionCost) continue;
+
+          const seq = sequenceRoute(withStop, depot, 8 * 60, speedKmh).sequence;
+          const placed = seq.find((s) => s.id === stop.id);
+          if (!placed || placed.infeasible) continue; // don't move it somewhere it can't actually be delivered on time
+
+          bestInsertionCost = insertionCost;
+          bestTo = to;
+        }
+
+        if (bestTo && bestInsertionCost < removalSavings - EPSILON_KM) {
+          from.stops = withoutStop;
+          bestTo.stops = [...bestTo.stops, stop];
+          movedAny = true;
+        }
+      }
+    }
+  }
+
+  return working.map((t) => {
+    const { sequence, totalDistanceKm, totalDurationMin } = sequenceRoute(t.stops, depot, 8 * 60, speedKmh);
+    return { ...t, sequence, totalDistanceKm, totalDurationMin };
+  });
+}
+
 module.exports = {
   haversineKm,
   roadKm,
@@ -272,4 +351,5 @@ module.exports = {
   sweepCluster,
   sequenceRoute,
   pickSmallestFittingTruck,
+  crossRouteImprove,
 };

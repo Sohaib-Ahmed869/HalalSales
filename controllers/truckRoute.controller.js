@@ -9,6 +9,7 @@ const {
   sequenceRoute,
   parseTimeToMinutes,
   pickSmallestFittingTruck,
+  crossRouteImprove,
 } = require("../utils/routeOptimizer");
 const { getWarehouse, regionForAddress } = require("../utils/regions");
 
@@ -787,6 +788,52 @@ exports.autoFillAllTrucks = async (req, res) => {
         totalAdded += cluster.length;
         touchedRoutes.add(target.route);
       }
+
+      // Sweep-clustering above only decides which truck a NEW stop starts
+      // on — it splits a purely angle-sorted list by capacity, so a stop can
+      // land on truck A even though it's practically next door to truck B's
+      // route. Run the cross-route relocation pass across every truck in
+      // THIS region (not just ones that received a new stop this run, since
+      // a pre-existing stop can also turn out to be cheaper elsewhere once
+      // new stops shift the picture) so a stop only stays put if moving it
+      // wouldn't actually shorten the combined distance.
+      const genericTrucks = regionRoutes.map((route) => ({
+        id: route._id.toString(),
+        capacityKg: route.maxWeightKg,
+        stops: route.orders.map((o) => ({
+          id: String(o._id),
+          coordinates: o.coordinates,
+          windowOpen: parseTimeToMinutes(o.storeHours?.openingTime),
+          windowClose: parseTimeToMinutes(o.storeHours?.closingTime),
+          weightKg: o.orderWeightKg || 0,
+          locked: o.locked,
+          _raw: o,
+        })),
+      }));
+
+      const improved = crossRouteImprove(genericTrucks, depot);
+
+      improved.forEach((truckResult) => {
+        const route = regionRoutes.find((r) => r._id.toString() === truckResult.id);
+        if (!route) return;
+        if (route.orders.length === 0 && truckResult.sequence.length === 0) return; // genuinely untouched, nothing to save
+
+        // Drained to zero stops is a legitimate outcome (this truck wasn't
+        // needed once its stops moved to trucks already covering the same
+        // area), not skipped — otherwise the route would silently keep its
+        // stale pre-improvement stops.
+        route.orders = truckResult.sequence.map((s) => {
+          const raw = s._raw;
+          raw.sequenceNumber = s.seq;
+          raw.etaMin = s.etaMin;
+          raw.status = s.infeasible ? "infeasible" : raw.status;
+          return raw;
+        });
+        recalcTotals(route);
+        route.totalDistanceKm = truckResult.totalDistanceKm;
+        route.totalDurationMin = truckResult.totalDurationMin;
+        touchedRoutes.add(route);
+      });
     }
 
     // Sequence (cheapest insertion + 2-opt) every route that received new stops.
