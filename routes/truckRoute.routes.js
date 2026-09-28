@@ -6,6 +6,14 @@ const controller = require("../controllers/truckRoute.controller");
 
 router.use(auth);
 
+// This data changes on every Initialize/Generate/Optimize/Auto-Fill/manual
+// edit — never let a browser or intermediate proxy cache a GET response and
+// serve stale routes/stats after an action that just changed them.
+router.use((req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  next();
+});
+
 // Weekly templates
 router.get("/schedules", controller.getSchedules);
 router.post("/schedules", controller.createSchedule);
