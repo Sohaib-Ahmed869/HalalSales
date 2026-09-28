@@ -10,6 +10,7 @@ const {
   parseTimeToMinutes,
   pickSmallestFittingTruck,
 } = require("../utils/routeOptimizer");
+const { getWarehouse, regionForAddress } = require("../utils/regions");
 
 const DAY_NAMES = [
   "Sunday",
@@ -205,7 +206,7 @@ exports.getSingleRoute = async (req, res) => {
 
 // ---------- Deliverable orders (Invoices with isDelivery=true) ----------
 
-async function buildDeliverableOrder(invoice, customersByCode) {
+async function buildDeliverableOrder(invoice, customersByCode, tenant) {
   const customer = customersByCode.get(invoice.CardCode);
 
   let totalWeight = 0;
@@ -241,6 +242,11 @@ async function buildDeliverableOrder(invoice, customersByCode) {
     closingTime: customer ? customer.closingTime : undefined,
     geocodeStatus: customer && customer.geo ? customer.geo.geocodeStatus : "pending",
     fulfillmentMethod: customer ? customer.fulfillmentMethod : "delivery",
+    // Derived from the customer's postal code via utils/regions.js — the
+    // same department->region table the frontend uses, so a truck's region
+    // and an order's region mean the same thing on both sides. null when
+    // the address/postal code can't be classified (surfaced, never guessed).
+    region: customer ? regionForAddress(customer.address, tenant) : null,
   };
 }
 
@@ -277,13 +283,17 @@ exports.getAvailableOrders = async (req, res) => {
       const customer = customersByCode.get(invoice.CardCode);
       if (customer && customer.fulfillmentMethod === "pickup") continue; // self-collection, never routed
 
-      const order = await buildDeliverableOrder(invoice, customersByCode);
+      const order = await buildDeliverableOrder(invoice, customersByCode, tenant);
 
-      if (region || department) {
-        // region/department filtering happens client-side against zip codes
-        // today (see MapPage.jsx filterOrdersByDistance) — left permissive
-        // here so the frontend's existing distance/region filter keeps working
-        // unmodified.
+      // Real region filter, derived from the customer's own postal code
+      // (utils/regions.js) rather than left as a no-op — an order whose
+      // region can't be determined is excluded from a region-filtered
+      // query (never silently included in the wrong region's list) but
+      // still appears in the unfiltered list so it isn't lost entirely.
+      if (region && order.region !== region) continue;
+      if (department) {
+        const zip = order.address?.zipCode;
+        if (!zip || !String(zip).toUpperCase().startsWith(department.toUpperCase())) continue;
       }
 
       candidates.push(order);
@@ -323,7 +333,7 @@ exports.assignOrderToTruck = async (req, res) => {
 
     const customer = await Customer.findOne({ CardCode: invoice.CardCode });
     const customersByCode = new Map(customer ? [[customer.CardCode, customer]] : []);
-    const built = await buildDeliverableOrder(invoice, customersByCode);
+    const built = await buildDeliverableOrder(invoice, customersByCode, route.tenant);
 
     route.orders.push({
       order: {
@@ -478,9 +488,7 @@ exports.optimizeRoute = async (req, res) => {
 };
 
 function getDepot(tenant) {
-  // Mirrors SalesFrontend/src/pages/Dashboard/regions.js WAREHOUSE coordinates.
-  if (tenant === "ms-foods") return { lat: 51.5074, lng: -0.1278 };
-  return { lat: 48.8566, lng: 2.3522 }; // Paris — default (Halal Food Sales / PQF / Data-Tech)
+  return getWarehouse(tenant);
 }
 
 function toOptimizerStop(orderEntry) {
@@ -530,13 +538,13 @@ exports.generateRoute = async (req, res) => {
       if (assigned.has(invoice.DocEntry)) continue;
       const customer = customersByCode.get(invoice.CardCode);
       if (!customer || customer.fulfillmentMethod === "pickup") continue;
-      if (route.region && customer.address?.city !== undefined && route.region) {
-        // Region matching left permissive (SAP address text isn't structured
-        // by region name) — a dispatcher can always remove a wrongly-added
-        // stop; this never silently fails to fill a truck.
-      }
 
-      const built = await buildDeliverableOrder(invoice, customersByCode);
+      const built = await buildDeliverableOrder(invoice, customersByCode, route.tenant);
+      // Only pull in orders whose postal code actually falls in this truck's
+      // region — a customer whose region can't be determined is skipped
+      // here (never guessed into the wrong truck); it still shows up in
+      // "available orders" for manual assignment.
+      if (route.region && built.region !== route.region) continue;
       if (!built.totalWeight || built.totalWeight > remainingCapacity) continue;
       if (!built.coordinates) continue; // ungeocoded — surfaced separately, not auto-assigned
 
@@ -626,7 +634,9 @@ exports.autoFillAllTrucks = async (req, res) => {
 
     const alreadyAssigned = new Set(routes.flatMap((r) => r.orders.map((o) => o.order.DocEntry)));
 
-    // Group deliverable, geocoded, non-pickup orders by region.
+    // Group deliverable, geocoded, non-pickup orders by their REAL region —
+    // derived per-customer from their postal code (utils/regions.js), not
+    // borrowed from whichever route happened to be first in the list.
     const byRegion = new Map();
     const unassignable = [];
     for (const invoice of invoices) {
@@ -634,57 +644,112 @@ exports.autoFillAllTrucks = async (req, res) => {
       const customer = customersByCode.get(invoice.CardCode);
       if (!customer || customer.fulfillmentMethod === "pickup") continue;
 
-      const built = await buildDeliverableOrder(invoice, customersByCode);
+      const built = await buildDeliverableOrder(invoice, customersByCode, tenant);
       if (!built.coordinates) {
-        unassignable.push({ docEntry: built.DocEntry, reason: "not geocoded" });
+        unassignable.push({ docEntry: built.DocEntry, cardName: built.CardName, reason: "not geocoded" });
+        continue;
+      }
+      if (!built.region) {
+        unassignable.push({
+          docEntry: built.DocEntry,
+          cardName: built.CardName,
+          reason: "postal code doesn't map to a known region",
+        });
         continue;
       }
 
-      const routeForRegion = routes.find((r) => r.region);
-      const region = routeForRegion ? routeForRegion.region : "unassigned";
-      if (!byRegion.has(region)) byRegion.set(region, []);
-      byRegion.get(region).push(built);
+      if (!byRegion.has(built.region)) byRegion.set(built.region, []);
+      byRegion.get(built.region).push(built);
     }
 
     const depot = getDepot(tenant);
     let totalAdded = 0;
+    const touchedRoutes = new Set();
 
-    for (const route of routes) {
-      const pool = byRegion.get(route.region) || [];
-      if (pool.length === 0) continue;
-
-      let remainingCapacity = route.maxWeightKg - route.totalWeightKg;
-      const toAssign = [];
-      for (let i = 0; i < pool.length; i++) {
-        const candidate = pool[i];
-        if (!candidate.totalWeight || candidate.totalWeight > remainingCapacity) continue;
-        toAssign.push(candidate);
-        remainingCapacity -= candidate.totalWeight;
-        pool.splice(i, 1);
-        i--;
+    // Section 6.2-6.4: sweep-cluster each region's pool (fewest trucks per
+    // area), size each cluster onto the smallest truck that fits it (never
+    // waste a large truck's capacity on a half-empty area), then sequence.
+    for (const [region, pool] of byRegion.entries()) {
+      const regionRoutes = routes.filter((r) => r.region === region);
+      if (regionRoutes.length === 0) {
+        pool.forEach((o) =>
+          unassignable.push({ docEntry: o.DocEntry, cardName: o.CardName, reason: `no truck scheduled for region "${region}"` })
+        );
+        continue;
       }
 
-      toAssign.forEach((built) => {
-        route.orders.push({
-          order: {
-            _id: built._id,
-            DocEntry: built.DocEntry,
-            DocNum: built.DocNum,
-            CardCode: built.CardCode,
-            CardName: built.CardName,
-            DocTotal: built.DocTotal,
-            address: built.address,
-            totalWeight: built.totalWeight,
-            weightUnit: built.weightUnit,
-          },
-          sequenceNumber: route.orders.length + 1,
-          orderWeightKg: built.totalWeight,
-          coordinates: built.coordinates,
-          storeHours: { openingTime: built.openingTime, closingTime: built.closingTime },
-        });
-      });
-      totalAdded += toAssign.length;
+      const availableTrucks = regionRoutes
+        .map((route) => ({ route, remaining: route.maxWeightKg - route.totalWeightKg }))
+        .filter((t) => t.remaining > 0);
 
+      if (availableTrucks.length === 0) {
+        pool.forEach((o) =>
+          unassignable.push({ docEntry: o.DocEntry, cardName: o.CardName, reason: `all trucks in "${region}" are already at capacity` })
+        );
+        continue;
+      }
+
+      const largestRemaining = Math.max(...availableTrucks.map((t) => t.remaining));
+      const clusters = sweepCluster(
+        pool.map((o) => ({ ...o, weightKg: o.totalWeight })),
+        depot,
+        largestRemaining
+      );
+      // Bin-pack the biggest clusters first — otherwise a large cluster can
+      // be left with only small trucks remaining even though a big truck
+      // was available at the start.
+      clusters.sort((a, b) => {
+        const wa = a.reduce((s, o) => s + (o.weightKg || 0), 0);
+        const wb = b.reduce((s, o) => s + (o.weightKg || 0), 0);
+        return wb - wa;
+      });
+
+      for (const cluster of clusters) {
+        const clusterWeight = cluster.reduce((s, o) => s + (o.weightKg || 0), 0);
+        const candidates = availableTrucks
+          .filter((t) => t.remaining > 0)
+          .map((t) => ({ maxWeightKg: t.remaining, _ref: t }));
+        const fit = pickSmallestFittingTruck(candidates, clusterWeight);
+
+        if (!fit) {
+          cluster.forEach((o) =>
+            unassignable.push({
+              docEntry: o.DocEntry,
+              cardName: o.CardName,
+              reason: `region "${region}" under-resourced for this date (a ${clusterWeight}kg group exceeds every available truck's remaining capacity)`,
+            })
+          );
+          continue;
+        }
+
+        const target = fit._ref;
+        cluster.forEach((built) => {
+          target.route.orders.push({
+            order: {
+              _id: built._id,
+              DocEntry: built.DocEntry,
+              DocNum: built.DocNum,
+              CardCode: built.CardCode,
+              CardName: built.CardName,
+              DocTotal: built.DocTotal,
+              address: built.address,
+              totalWeight: built.totalWeight,
+              weightUnit: built.weightUnit,
+            },
+            sequenceNumber: target.route.orders.length + 1,
+            orderWeightKg: built.totalWeight,
+            coordinates: built.coordinates,
+            storeHours: { openingTime: built.openingTime, closingTime: built.closingTime },
+          });
+        });
+        target.remaining -= clusterWeight;
+        totalAdded += cluster.length;
+        touchedRoutes.add(target.route);
+      }
+    }
+
+    // Sequence (cheapest insertion + 2-opt) every route that received new stops.
+    for (const route of touchedRoutes) {
       recalcTotals(route);
 
       const { sequence, totalDistanceKm, totalDurationMin } = sequenceRoute(
@@ -697,6 +762,7 @@ exports.autoFillAllTrucks = async (req, res) => {
         if (optimized) {
           o.sequenceNumber = optimized.seq;
           o.etaMin = optimized.etaMin;
+          o.status = optimized.infeasible ? "infeasible" : o.status;
         }
       });
       route.orders.sort((a, b) => (a.sequenceNumber || 0) - (b.sequenceNumber || 0));
@@ -706,15 +772,8 @@ exports.autoFillAllTrucks = async (req, res) => {
       await route.save();
     }
 
-    // Anything left in byRegion pools has no truck for its region today.
-    for (const [region, pool] of byRegion.entries()) {
-      pool.forEach((o) =>
-        unassignable.push({ docEntry: o.DocEntry, reason: `no truck scheduled for region "${region}"` })
-      );
-    }
-
     res.json({
-      message: `Auto-filled ${totalAdded} order(s) across ${routes.length} truck(s)`,
+      message: `Auto-filled ${totalAdded} order(s) across ${touchedRoutes.size} truck(s)`,
       totalAdded,
       unassignable,
       routes,
