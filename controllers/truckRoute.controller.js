@@ -256,12 +256,16 @@ async function buildDeliverableOrder(invoice, customersByCode, tenant) {
 exports.getAvailableOrders = async (req, res) => {
   try {
     const { date } = req.params;
-    const { region, department } = req.query;
+    const { region, department, endDate } = req.query;
     const tenant = tenantFromReq(req);
 
     const dayStart = new Date(date);
     dayStart.setHours(0, 0, 0, 0);
-    const dayEnd = new Date(dayStart);
+    // Optional browse range — lets the UI show upcoming/past deliverable
+    // orders over several days (e.g. "what's coming this week") separately
+    // from the single operating date Initialize/Auto-Fill act on. Defaults
+    // to just `date` alone when endDate isn't given.
+    const dayEnd = new Date(endDate ? new Date(endDate) : dayStart);
     dayEnd.setHours(23, 59, 59, 999);
 
     const invoices = await Invoice.find({
