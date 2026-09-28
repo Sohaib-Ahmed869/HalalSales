@@ -351,9 +351,15 @@ exports.assignOrderToTruck = async (req, res) => {
       orderWeightKg: built.totalWeight,
       coordinates: built.coordinates,
       storeHours: { openingTime: built.openingTime, closingTime: built.closingTime },
+      // A caller that explicitly asked for a specific position meant it —
+      // lock that placement so the auto-resequence below doesn't move it.
+      // The normal path (no sequenceNumber given) leaves it unlocked so it
+      // gets slotted into the actually-cheapest position by the optimizer.
+      locked: Boolean(sequenceNumber),
     });
 
     recalcTotals(route);
+    resequenceRoute(route);
     await route.save();
 
     res.json({ message: "Order assigned", route });
@@ -371,6 +377,7 @@ exports.removeOrderFromTruck = async (req, res) => {
 
     route.orders = route.orders.filter((o) => o.order.DocEntry !== Number(docEntry));
     recalcTotals(route);
+    resequenceRoute(route);
     await route.save();
 
     res.json({ message: "Order removed", route });
@@ -474,43 +481,6 @@ exports.updateCapacity = async (req, res) => {
 
 // ---------- Optimize / Generate / Auto-fill ----------
 
-// Re-sequences a route's already-assigned orders (cheapest insertion + 2-opt).
-// Never touches which orders are assigned — only their order/ETA.
-exports.optimizeRoute = async (req, res) => {
-  try {
-    const route = await TruckRoute.findById(req.params.routeId);
-    if (!route) return res.status(404).json({ message: "Route not found" });
-
-    const depot = getDepot(route.tenant);
-    const locked = route.orders.filter((o) => o.locked);
-    const toSequence = route.orders
-      .filter((o) => !o.locked)
-      .map((o) => toOptimizerStop(o));
-
-    const { sequence, totalDistanceKm, totalDurationMin } = sequenceRoute(toSequence, depot);
-
-    const bySeqId = new Map(sequence.map((s) => [s.id, s]));
-    route.orders = [...locked, ...route.orders.filter((o) => !o.locked)].map((o) => {
-      const optimized = bySeqId.get(String(o._id));
-      if (optimized) {
-        o.sequenceNumber = optimized.seq;
-        o.etaMin = optimized.etaMin;
-        o.status = optimized.infeasible ? "infeasible" : o.status;
-      }
-      return o;
-    });
-    route.orders.sort((a, b) => (a.sequenceNumber || 0) - (b.sequenceNumber || 0));
-    route.totalDistanceKm = totalDistanceKm;
-    route.totalDurationMin = totalDurationMin;
-    await route.save();
-
-    res.json({ message: "Route optimized", route });
-  } catch (error) {
-    console.error("Optimize route error:", error);
-    res.status(500).json({ message: "Server error", error: error.message });
-  }
-};
-
 function getDepot(tenant) {
   return getWarehouse(tenant);
 }
@@ -524,6 +494,53 @@ function toOptimizerStop(orderEntry) {
     weightKg: orderEntry.orderWeightKg || 0,
   };
 }
+
+// Re-sequences a route's already-assigned, non-locked orders in place
+// (cheapest insertion + 2-opt) — mutates `route.orders`/`totalDistanceKm`/
+// `totalDurationMin` but does not save; callers save once, after whatever
+// else they changed. `locked` stops (manually reordered by a dispatcher)
+// keep their position and are excluded from re-sequencing.
+function resequenceRoute(route) {
+  const depot = getDepot(route.tenant);
+  const locked = route.orders.filter((o) => o.locked);
+  const toSequence = route.orders.filter((o) => !o.locked).map((o) => toOptimizerStop(o));
+
+  const { sequence, totalDistanceKm, totalDurationMin } = sequenceRoute(toSequence, depot);
+
+  const bySeqId = new Map(sequence.map((s) => [s.id, s]));
+  route.orders = [...locked, ...route.orders.filter((o) => !o.locked)].map((o) => {
+    const optimized = bySeqId.get(String(o._id));
+    if (optimized) {
+      o.sequenceNumber = optimized.seq;
+      o.etaMin = optimized.etaMin;
+      o.status = optimized.infeasible ? "infeasible" : o.status;
+    }
+    return o;
+  });
+  route.orders.sort((a, b) => (a.sequenceNumber || 0) - (b.sequenceNumber || 0));
+  route.totalDistanceKm = totalDistanceKm;
+  route.totalDurationMin = totalDurationMin;
+}
+
+// Re-sequences a route's already-assigned orders (cheapest insertion + 2-opt).
+// Never touches which orders are assigned — only their order/ETA. Also
+// triggered automatically by assign/remove now (see below) — this endpoint
+// stays for an explicit manual re-optimize (e.g. after several manual
+// reorders) and for the "Optimize" button's own loading state in the UI.
+exports.optimizeRoute = async (req, res) => {
+  try {
+    const route = await TruckRoute.findById(req.params.routeId);
+    if (!route) return res.status(404).json({ message: "Route not found" });
+
+    resequenceRoute(route);
+    await route.save();
+
+    res.json({ message: "Route optimized", route });
+  } catch (error) {
+    console.error("Optimize route error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
 
 // Adds available orders from the truck's own region to the truck until
 // capacity is reached, then sequences the result. This is the backend for
