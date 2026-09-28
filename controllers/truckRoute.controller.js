@@ -568,7 +568,17 @@ function resequenceRoute(route) {
   const locked = route.orders.filter((o) => o.locked);
   const toSequence = route.orders.filter((o) => !o.locked).map((o) => toOptimizerStop(o));
 
-  const { sequence, totalDistanceKm, totalDurationMin } = sequenceRoute(toSequence, depot);
+  // Uses whatever strategy was last chosen for this route (persisted on the
+  // document, default "shortest") — a manual assign/remove's automatic
+  // re-sequence should never silently revert a dispatcher's "least_wait"
+  // choice back to distance-only.
+  const { sequence, totalDistanceKm, totalDurationMin, totalWaitMin } = sequenceRoute(
+    toSequence,
+    depot,
+    8 * 60,
+    undefined,
+    route.strategy || "shortest"
+  );
 
   const bySeqId = new Map(sequence.map((s) => [s.id, s]));
   route.orders = [...locked, ...route.orders.filter((o) => !o.locked)].map((o) => {
@@ -583,6 +593,7 @@ function resequenceRoute(route) {
   route.orders.sort((a, b) => (a.sequenceNumber || 0) - (b.sequenceNumber || 0));
   route.totalDistanceKm = totalDistanceKm;
   route.totalDurationMin = totalDurationMin;
+  route.totalWaitMin = totalWaitMin;
 }
 
 // Re-sequences a route's already-assigned orders (cheapest insertion + 2-opt).
@@ -594,6 +605,10 @@ exports.optimizeRoute = async (req, res) => {
   try {
     const route = await TruckRoute.findById(req.params.routeId);
     if (!route) return res.status(404).json({ message: "Route not found" });
+
+    if (req.body.strategy && ["shortest", "least_wait"].includes(req.body.strategy)) {
+      route.strategy = req.body.strategy;
+    }
 
     resequenceRoute(route);
     await route.save();
@@ -612,6 +627,10 @@ exports.generateRoute = async (req, res) => {
   try {
     const route = await TruckRoute.findById(req.params.routeId);
     if (!route) return res.status(404).json({ message: "Route not found" });
+
+    if (req.body.strategy && ["shortest", "least_wait"].includes(req.body.strategy)) {
+      route.strategy = req.body.strategy;
+    }
 
     const dayStart = new Date(route.date);
     dayStart.setHours(0, 0, 0, 0);
@@ -677,23 +696,9 @@ exports.generateRoute = async (req, res) => {
 
     recalcTotals(route);
 
-    // Sequence what we just built.
-    const depot = getDepot(route.tenant);
-    const { sequence, totalDistanceKm, totalDurationMin } = sequenceRoute(
-      route.orders.map(toOptimizerStop),
-      depot
-    );
-    const bySeqId = new Map(sequence.map((s) => [s.id, s]));
-    route.orders.forEach((o) => {
-      const optimized = bySeqId.get(String(o._id));
-      if (optimized) {
-        o.sequenceNumber = optimized.seq;
-        o.etaMin = optimized.etaMin;
-      }
-    });
-    route.orders.sort((a, b) => (a.sequenceNumber || 0) - (b.sequenceNumber || 0));
-    route.totalDistanceKm = totalDistanceKm;
-    route.totalDurationMin = totalDurationMin;
+    // Sequence what we just built (respects route.strategy and locked stops
+    // — see resequenceRoute above).
+    resequenceRoute(route);
 
     await route.save();
 
@@ -715,6 +720,7 @@ exports.autoFillAllTrucks = async (req, res) => {
   try {
     const { date } = req.params;
     const tenant = tenantFromReq(req);
+    const strategy = ["shortest", "least_wait"].includes(req.body.strategy) ? req.body.strategy : "shortest";
 
     const dayStart = new Date(date);
     dayStart.setHours(0, 0, 0, 0);
@@ -727,6 +733,9 @@ exports.autoFillAllTrucks = async (req, res) => {
         message: "No trucks initialized for this date — run Initialize Date first",
       });
     }
+    routes.forEach((r) => {
+      r.strategy = strategy;
+    });
 
     const deliveryNotes = await DeliveryNote.find({
       Cancelled: { $ne: "Y" },
@@ -873,7 +882,7 @@ exports.autoFillAllTrucks = async (req, res) => {
         })),
       }));
 
-      const improved = crossRouteImprove(genericTrucks, depot);
+      const improved = crossRouteImprove(genericTrucks, depot, undefined, undefined, strategy);
 
       improved.forEach((truckResult) => {
         const route = regionRoutes.find((r) => r._id.toString() === truckResult.id);
@@ -898,27 +907,15 @@ exports.autoFillAllTrucks = async (req, res) => {
       });
     }
 
-    // Sequence (cheapest insertion + 2-opt) every route that received new stops.
+    // Final sequence pass (cheapest insertion + 2-opt, respecting
+    // route.strategy) for every route that received new stops.
+    // crossRouteImprove above already sequenced routes it moved stops
+    // between, but resequenceRoute is cheap and idempotent on an
+    // already-optimal order, so running it uniformly here is simpler and
+    // safer than tracking which routes still need it.
     for (const route of touchedRoutes) {
       recalcTotals(route);
-
-      const { sequence, totalDistanceKm, totalDurationMin } = sequenceRoute(
-        route.orders.map(toOptimizerStop),
-        depot
-      );
-      const bySeqId = new Map(sequence.map((s) => [s.id, s]));
-      route.orders.forEach((o) => {
-        const optimized = bySeqId.get(String(o._id));
-        if (optimized) {
-          o.sequenceNumber = optimized.seq;
-          o.etaMin = optimized.etaMin;
-          o.status = optimized.infeasible ? "infeasible" : o.status;
-        }
-      });
-      route.orders.sort((a, b) => (a.sequenceNumber || 0) - (b.sequenceNumber || 0));
-      route.totalDistanceKm = totalDistanceKm;
-      route.totalDurationMin = totalDurationMin;
-
+      resequenceRoute(route);
       await route.save();
     }
 

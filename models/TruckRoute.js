@@ -82,6 +82,18 @@ const TruckRouteSchema = new Schema({
   capacityUsedPercent: { type: Number, default: 0 },
   totalDistanceKm: { type: Number, default: 0 },
   totalDurationMin: { type: Number, default: 0 },
+  totalWaitMin: { type: Number, default: 0 },
+  // Which tradeoff this route's sequencing optimizes for — "shortest"
+  // (minimize total driving distance, default) or "least_wait" (minimize
+  // total elapsed time including idle waiting, even at the cost of more
+  // distance). Persisted so a manual assign/remove's automatic re-sequence
+  // keeps using whichever one was last chosen for this route, instead of
+  // silently reverting to the default.
+  strategy: {
+    type: String,
+    enum: ["shortest", "least_wait"],
+    default: "shortest",
+  },
   createdAt: {
     type: Date,
     default: Date.now,

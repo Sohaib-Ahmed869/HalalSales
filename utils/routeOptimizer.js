@@ -100,19 +100,29 @@ function sweepCluster(stops, depot, capacityKg) {
  * Sequences a set of stops for one truck using cheapest time-window-feasible
  * insertion, then improves the result with 2-opt swaps.
  *
+ * Two strategies, because they can genuinely disagree: the shortest-distance
+ * route sometimes means a truck sits idle waiting for a shop to open, while
+ * the route that avoids waiting sometimes drives more total distance to do
+ * it. Every comparison during construction and 2-opt uses whichever cost the
+ * chosen strategy cares about — not just a label applied after the fact.
+ *
  * @param {Array} stops - [{ id, coordinates, windowOpen, windowClose, ...any extra fields kept as-is }]
  * @param {Object} depot - { lat, lng }
  * @param {number} departureMin - minutes-from-midnight the truck leaves the depot
  * @param {number} speedKmh
- * @returns {Object} { sequence: [stop...with seq/etaMin/infeasible], totalDistanceKm, totalDurationMin }
+ * @param {"shortest"|"least_wait"} strategy - "shortest" (default) minimizes
+ *   total driving distance, tolerating idle wait time if that's the shorter
+ *   route. "least_wait" minimizes total elapsed time (driving + waiting
+ *   combined) instead, even when that means more distance.
+ * @returns {Object} { sequence: [stop...with seq/etaMin/infeasible], totalDistanceKm, totalDurationMin, totalWaitMin, strategy }
  */
-function sequenceRoute(stops, depot, departureMin = 8 * 60, speedKmh = DEFAULT_SPEED_KMH) {
+function sequenceRoute(stops, depot, departureMin = 8 * 60, speedKmh = DEFAULT_SPEED_KMH, strategy = "shortest") {
   const geocoded = stops.filter(
     (s) => s.coordinates && Number.isFinite(s.coordinates.lat) && Number.isFinite(s.coordinates.lng)
   );
 
   if (geocoded.length === 0) {
-    return { sequence: [], totalDistanceKm: 0, totalDurationMin: 0 };
+    return { sequence: [], totalDistanceKm: 0, totalDurationMin: 0, totalWaitMin: 0, strategy };
   }
 
   // --- Construction: cheapest time-window-feasible insertion ---
@@ -134,7 +144,8 @@ function sequenceRoute(stops, depot, departureMin = 8 * 60, speedKmh = DEFAULT_S
 
   // Computes arrival time (minutes-from-midnight) at each stop in a route,
   // given a fixed departure time and travel speed. Waiting is allowed if the
-  // truck arrives before windowOpen.
+  // truck arrives before windowOpen — waitMin records how long, so
+  // "least_wait" has something concrete to minimize.
   function computeArrivals(candidateRoute) {
     let clock = departureMin;
     const arrivals = [];
@@ -144,10 +155,12 @@ function sequenceRoute(stops, depot, departureMin = 8 * 60, speedKmh = DEFAULT_S
       const dist = roadKm(prev, cur);
       clock += durationMin(dist, speedKmh);
       const stop = candidateRoute[i];
+      let waitMin = 0;
       if (stop !== "DEPOT" && stop.windowOpen != null && clock < stop.windowOpen) {
+        waitMin = stop.windowOpen - clock;
         clock = stop.windowOpen; // wait for opening
       }
-      arrivals.push({ stop, arrival: clock, distFromPrev: dist });
+      arrivals.push({ stop, arrival: clock, distFromPrev: dist, waitMin });
     }
     return arrivals;
   }
@@ -159,13 +172,24 @@ function sequenceRoute(stops, depot, departureMin = 8 * 60, speedKmh = DEFAULT_S
     );
   }
 
-  function routeCost(candidateRoute) {
+  function routeDistanceCost(candidateRoute) {
     let total = 0;
     for (let i = 1; i < candidateRoute.length; i++) {
       total += roadKm(point(candidateRoute[i - 1]), point(candidateRoute[i]));
     }
     return total;
   }
+
+  // Total elapsed minutes from departure to the final return leg's arrival —
+  // driving time AND waiting time both count against this, so a route that
+  // avoids a long wait scores better here even if it drives more km.
+  function routeElapsedCost(candidateRoute) {
+    const arrivals = computeArrivals(candidateRoute);
+    if (arrivals.length === 0) return 0;
+    return arrivals[arrivals.length - 1].arrival - departureMin;
+  }
+
+  const routeCost = strategy === "least_wait" ? routeElapsedCost : routeDistanceCost;
 
   while (remaining.length > 0) {
     let bestStopIdx = -1;
@@ -236,9 +260,11 @@ function sequenceRoute(stops, depot, departureMin = 8 * 60, speedKmh = DEFAULT_S
   const sequence = [];
   let seq = 1;
   let totalDistanceKm = 0;
+  let totalWaitMin = 0;
   for (let i = 0; i < arrivals.length; i++) {
-    const { stop, arrival, distFromPrev } = arrivals[i];
+    const { stop, arrival, distFromPrev, waitMin } = arrivals[i];
     totalDistanceKm += distFromPrev;
+    totalWaitMin += waitMin || 0;
     if (stop === "DEPOT") continue;
     sequence.push({
       ...stop,
@@ -248,10 +274,17 @@ function sequenceRoute(stops, depot, departureMin = 8 * 60, speedKmh = DEFAULT_S
     });
   }
 
+  // totalDurationMin is the real elapsed time (driving + waiting) from
+  // departure to the last stop — not just distance/speed, which would
+  // understate it whenever the route includes any wait.
+  const totalElapsedMin = arrivals.length > 0 ? arrivals[arrivals.length - 1].arrival - departureMin : 0;
+
   return {
     sequence,
     totalDistanceKm: Math.round(totalDistanceKm * 10) / 10,
-    totalDurationMin: Math.round(durationMin(totalDistanceKm, speedKmh)),
+    totalDurationMin: Math.round(totalElapsedMin),
+    totalWaitMin: Math.round(totalWaitMin),
+    strategy,
   };
 }
 
@@ -281,12 +314,20 @@ function pickSmallestFittingTruck(trucks, weightKg) {
  * @param {Object} depot
  * @param {number} speedKmh
  * @param {number} maxPasses
- * @returns {Array} same shape as input, each truck additionally carrying { sequence, totalDistanceKm, totalDurationMin }
+ * @param {"shortest"|"least_wait"} strategy - same meaning as sequenceRoute's:
+ *   which metric a move has to improve before it's taken.
+ * @returns {Array} same shape as input, each truck additionally carrying { sequence, totalDistanceKm, totalDurationMin, totalWaitMin }
  */
-function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, maxPasses = 3) {
+function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, maxPasses = 3, strategy = "shortest") {
   const working = trucks.map((t) => ({ ...t, stops: t.stops.map((s) => ({ ...s })) }));
-  const distanceOf = (stops) => sequenceRoute(stops, depot, 8 * 60, speedKmh).totalDistanceKm;
-  const EPSILON_KM = 0.05; // ignore savings too small to be worth an extra stop-swap
+  // "shortest": compare total driving distance (km). "least_wait": compare
+  // total elapsed time (minutes, driving + waiting) instead — a move only
+  // happens if it improves whichever one the caller asked to optimize for.
+  const costOf = (stops) => {
+    const result = sequenceRoute(stops, depot, 8 * 60, speedKmh, strategy);
+    return strategy === "least_wait" ? result.totalDurationMin : result.totalDistanceKm;
+  };
+  const EPSILON = strategy === "least_wait" ? 1 : 0.05; // 1 min or 0.05 km — ignore savings too small to be worth an extra stop-swap
 
   let movedAny = true;
   let pass = 0;
@@ -305,7 +346,7 @@ function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, maxPasse
         // means that scheduled truck genuinely isn't needed today.
 
         const withoutStop = from.stops.filter((s) => s.id !== stop.id);
-        const removalSavings = distanceOf(from.stops) - distanceOf(withoutStop);
+        const removalSavings = costOf(from.stops) - costOf(withoutStop);
 
         let bestTo = null;
         let bestInsertionCost = Infinity;
@@ -317,10 +358,10 @@ function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, maxPasse
           if (usedWeight + (stop.weightKg || 0) > to.capacityKg) continue;
 
           const withStop = [...to.stops, stop];
-          const insertionCost = distanceOf(withStop) - distanceOf(to.stops);
+          const insertionCost = costOf(withStop) - costOf(to.stops);
           if (insertionCost >= bestInsertionCost) continue;
 
-          const seq = sequenceRoute(withStop, depot, 8 * 60, speedKmh).sequence;
+          const seq = sequenceRoute(withStop, depot, 8 * 60, speedKmh, strategy).sequence;
           const placed = seq.find((s) => s.id === stop.id);
           if (!placed || placed.infeasible) continue; // don't move it somewhere it can't actually be delivered on time
 
@@ -328,7 +369,7 @@ function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, maxPasse
           bestTo = to;
         }
 
-        if (bestTo && bestInsertionCost < removalSavings - EPSILON_KM) {
+        if (bestTo && bestInsertionCost < removalSavings - EPSILON) {
           from.stops = withoutStop;
           bestTo.stops = [...bestTo.stops, stop];
           movedAny = true;
@@ -338,8 +379,8 @@ function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, maxPasse
   }
 
   return working.map((t) => {
-    const { sequence, totalDistanceKm, totalDurationMin } = sequenceRoute(t.stops, depot, 8 * 60, speedKmh);
-    return { ...t, sequence, totalDistanceKm, totalDurationMin };
+    const { sequence, totalDistanceKm, totalDurationMin, totalWaitMin } = sequenceRoute(t.stops, depot, 8 * 60, speedKmh, strategy);
+    return { ...t, sequence, totalDistanceKm, totalDurationMin, totalWaitMin };
   });
 }
 
