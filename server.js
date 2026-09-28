@@ -5,7 +5,12 @@ const helmet = require("helmet");
 const morgan = require("morgan");
 const path = require('path');
 const fs = require('fs');
+const dns = require('dns');
 require("dotenv").config();
+
+// Node's default DNS resolver can fail SRV lookups (mongodb+srv://) on some
+// Windows/ISP/router DNS setups even though the OS resolver works fine.
+dns.setServers(['8.8.8.8', '1.1.1.1']);
 
 // Import routes
 const authRoutes = require("./routes/auth.routes");
@@ -23,6 +28,8 @@ const recommendationRoutes = require("./routes/recommendations.routes");
 const prestashopSyncService = require("./services/prestashopSyncService");
 const config = require("./services/config");
 const cartFetcherRoutes = require("./routes/cartFetcher.routes");
+const truckRouteRoutes = require("./routes/truckRoute.routes");
+const mapRoutes = require("./routes/map.routes");
 
 // Initialize express app
 const app = express();
@@ -92,6 +99,8 @@ app.use('/api/dashboard', dashboardRoutes);
 app.use("/api/customer-journey", customerJourneyRoutes);
 app.use("/api/recommendations", recommendationRoutes);
 app.use("/api/cart-fetcher", cartFetcherRoutes);
+app.use("/api/truck-routes", truckRouteRoutes);
+app.use("/api/map", mapRoutes);
 
 // Health check route
 app.get("/health", (req, res) => {
