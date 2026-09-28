@@ -25,6 +25,7 @@ router.post("/auto-fill-all/:date", controller.autoFillAllTrucks);
 
 router.post("/:routeId/assign-order", controller.assignOrderToTruck);
 router.delete("/:routeId/orders/:docEntry", controller.removeOrderFromTruck);
+router.patch("/:routeId/orders/:docEntry/status", controller.updateStopStatus);
 router.put("/:routeId/reorder", controller.reorderOrders);
 router.patch("/:routeId/status", controller.updateRouteStatus);
 router.patch("/:routeId/capacity", controller.updateCapacity);

@@ -430,6 +430,30 @@ exports.updateRouteStatus = async (req, res) => {
   }
 };
 
+// Updates a single stop's delivery status (pending/delivered/failed) — the
+// backend for the Stop Detail modal's "Mark delivered" action.
+exports.updateStopStatus = async (req, res) => {
+  try {
+    const { routeId, docEntry } = req.params;
+    const { status } = req.body;
+
+    const route = await TruckRoute.findById(routeId);
+    if (!route) return res.status(404).json({ message: "Route not found" });
+
+    const stop = route.orders.find((o) => o.order.DocEntry === Number(docEntry));
+    if (!stop) return res.status(404).json({ message: "Stop not found on this route" });
+
+    stop.status = status;
+    if (status === "delivered") stop.actualArrival = new Date();
+    await route.save();
+
+    res.json({ message: "Stop status updated", route });
+  } catch (error) {
+    console.error("Update stop status error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
 exports.updateCapacity = async (req, res) => {
   try {
     const { maxWeightKg } = req.body;
