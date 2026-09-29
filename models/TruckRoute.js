@@ -112,6 +112,15 @@ const TruckRouteSchema = new Schema({
     enum: ["road", "estimate"],
     default: "estimate",
   },
+  // Which routing engine produced the road matrix ("ors" = OpenRouteService
+  // truck profile, "osrm"); unset when distanceSource is "estimate".
+  roadProvider: { type: String },
+  // Set when TomTom traffic replaced the leg times/distances after sequencing
+  // (see utils/trafficEtaService.js): when it was fetched, the TomTom
+  // departAt used ("now" = live traffic) and the total delay vs free flow.
+  trafficAt: { type: Date },
+  trafficDepartAt: { type: String },
+  trafficDelayMin: { type: Number },
   createdAt: {
     type: Date,
     default: Date.now,

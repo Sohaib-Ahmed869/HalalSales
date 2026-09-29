@@ -16,6 +16,7 @@ const {
 const { getWarehouse, regionForAddress } = require("../utils/regions");
 const { geocodeCustomer } = require("../utils/geocodingService");
 const { getMatrix, getRouteGeometry } = require("../utils/roadDistanceService");
+const { getTrafficLegs } = require("../utils/trafficEtaService");
 
 const DAY_NAMES = [
   "Sunday",
@@ -553,6 +554,7 @@ exports.reorderOrders = async (req, res) => {
       matrix
     );
     route.distanceSource = matrix ? "road" : "estimate";
+    route.roadProvider = matrix ? matrix.provider : undefined;
     const byId = new Map(sequence.map((s) => [s.id, s]));
     route.orders.forEach((o) => {
       const evaluated = byId.get(String(o._id));
@@ -567,6 +569,7 @@ exports.reorderOrders = async (req, res) => {
     route.totalDistanceKm = totalDistanceKm;
     route.totalDurationMin = totalDurationMin;
     route.totalWaitMin = totalWaitMin;
+    await applyTrafficEtas(route);
 
     await route.save();
 
@@ -679,6 +682,54 @@ async function roadMatrixFor(depot, stops) {
 // else they changed. `locked` stops (manually reordered by a dispatcher)
 // keep their position and are excluded from re-sequencing.
 async function resequenceRoute(route) {
+  await sequenceRouteOrders(route);
+  await applyTrafficEtas(route);
+}
+
+// Once a route's order is final, replaces its leg times/distances with
+// TomTom's traffic-aware ones (one request per route) and re-runs the same
+// timeline (waits, service time, late flags) in that exact order. The order
+// itself never changes here. Without TOMTOM_API_KEY, or if TomTom fails, the
+// route keeps the ETAs it already has.
+async function applyTrafficEtas(route) {
+  route.trafficAt = undefined;
+  route.trafficDepartAt = undefined;
+  route.trafficDelayMin = undefined;
+  const depot = getDepot(route.tenant);
+  const stops = route.orders.map(toOptimizerStop);
+  const geocoded = stops.filter(
+    (s) => s.coordinates && Number.isFinite(s.coordinates.lat) && Number.isFinite(s.coordinates.lng)
+  );
+  if (geocoded.length === 0) return;
+
+  const legs = await getTrafficLegs(
+    [depot, ...geocoded.map((s) => s.coordinates), depot],
+    route.date,
+    departureMinOf(route)
+  );
+  if (!legs) return;
+
+  const fixed = evaluateFixedRoute(stops, depot, departureMinOf(route), undefined, legs);
+  const byId = new Map(fixed.sequence.map((s) => [s.id, s]));
+  route.orders.forEach((o) => {
+    const evaluated = byId.get(String(o._id));
+    if (evaluated) {
+      o.etaMin = evaluated.etaMin;
+      o.waitMin = evaluated.waitMin;
+      o.driveMin = evaluated.driveMin;
+      o.legKm = evaluated.legKm;
+      o.status = statusAfterSequencing(o, evaluated.infeasible);
+    }
+  });
+  route.totalDistanceKm = fixed.totalDistanceKm;
+  route.totalDurationMin = fixed.totalDurationMin;
+  route.totalWaitMin = fixed.totalWaitMin;
+  route.trafficAt = new Date();
+  route.trafficDepartAt = legs.departAt;
+  route.trafficDelayMin = legs.delayMin;
+}
+
+async function sequenceRouteOrders(route) {
   const depot = getDepot(route.tenant);
   const locked = route.orders.filter((o) => o.locked);
   const toSequence = route.orders.filter((o) => !o.locked).map((o) => toOptimizerStop(o));
@@ -697,6 +748,7 @@ async function resequenceRoute(route) {
     matrix
   );
   route.distanceSource = matrix ? "road" : "estimate";
+  route.roadProvider = matrix ? matrix.provider : undefined;
 
   // Nothing locked: the optimizer's own result already covers the whole route.
   if (locked.length === 0) {
