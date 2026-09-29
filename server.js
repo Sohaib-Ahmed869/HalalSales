@@ -30,6 +30,8 @@ const config = require("./services/config");
 const cartFetcherRoutes = require("./routes/cartFetcher.routes");
 const truckRouteRoutes = require("./routes/truckRoute.routes");
 const mapRoutes = require("./routes/map.routes");
+const trackingRoutes = require("./routes/tracking.routes");
+const trackingSocket = require("./services/trackingSocket");
 
 // Initialize express app
 const app = express();
@@ -101,6 +103,7 @@ app.use("/api/recommendations", recommendationRoutes);
 app.use("/api/cart-fetcher", cartFetcherRoutes);
 app.use("/api/truck-routes", truckRouteRoutes);
 app.use("/api/map", mapRoutes);
+app.use("/api/tracking", trackingRoutes);
 
 // Health check route
 app.get("/health", (req, res) => {
@@ -117,7 +120,9 @@ app.use((err, req, res, next) => {
 });
 
 // Start server
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const httpServer = require("http").createServer(app);
+trackingSocket.init(httpServer);
+httpServer.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 // Handle unhandled promise rejections
 process.on("unhandledRejection", (err) => {

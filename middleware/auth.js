@@ -35,6 +35,14 @@ const auth = async (req, res, next) => {
   }
 };
 
+// Same check as `auth`, for callers that have a token but no Express request
+// (socket.io handshake). Returns the user, or null if the token is missing/invalid.
+const verifyToken = async (token) => {
+  if (!token) return null;
+  const decoded = jwt.verify(String(token).replace("Bearer ", ""), JWT_SECRET);
+  return User.findOne({ _id: decoded.userId, deactivated: false });
+};
+
 // Check role middleware
 const checkRole = (roles) => {
   return (req, res, next) => {
@@ -155,6 +163,7 @@ const updateLastLogin = async (req, res, next) => {
 
 module.exports = {
   auth,
+  verifyToken,
   checkRole,
   canManageUser,
   canManageCustomer,
