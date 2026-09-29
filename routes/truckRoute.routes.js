@@ -24,6 +24,7 @@ router.delete("/schedules/:id", controller.deleteSchedule);
 router.post("/initialize-date", controller.initializeDate);
 router.get("/date/:date", controller.getRoutesByDate);
 router.get("/single/:routeId", controller.getSingleRoute);
+router.get("/geometry/:routeId", controller.getRouteGeometry);
 router.get("/available-orders/:date", controller.getAvailableOrders);
 router.get("/stats", controller.getStats);
 
@@ -35,6 +36,7 @@ router.post("/:routeId/assign-order", controller.assignOrderToTruck);
 router.delete("/:routeId/orders/:docEntry", controller.removeOrderFromTruck);
 router.patch("/:routeId/orders/:docEntry/status", controller.updateStopStatus);
 router.put("/:routeId/reorder", controller.reorderOrders);
+router.put("/:routeId/departure", controller.setDepartureTime);
 router.patch("/:routeId/status", controller.updateRouteStatus);
 router.patch("/:routeId/capacity", controller.updateCapacity);
 

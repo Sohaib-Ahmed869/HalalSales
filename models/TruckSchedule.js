@@ -36,6 +36,9 @@ const TruckScheduleSchema = new Schema({
         enum: ["small", "medium", "large", "xlarge", "custom"],
         default: "medium",
       },
+      // "HH:MM" the truck leaves the depot on days initialized from this
+      // template. Drives every stop's ETA.
+      departureTime: { type: String, default: "08:00" },
     },
   ],
   isActive: {

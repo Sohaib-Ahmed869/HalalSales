@@ -5,15 +5,17 @@ const Customer = require("../models/Customer");
 const DeliveryNote = require("../models/DeliveryNote");
 const Item = require("../models/item");
 const {
-  sweepCluster,
   sequenceRoute,
   parseTimeToMinutes,
-  pickSmallestFittingTruck,
-  crossRouteImprove,
+  parseTimeWindow,
   evaluateFixedRoute,
+  DEFAULT_DEPARTURE_MIN,
+  planRegionAssignment,
+  isBetterPlan,
 } = require("../utils/routeOptimizer");
 const { getWarehouse, regionForAddress } = require("../utils/regions");
 const { geocodeCustomer } = require("../utils/geocodingService");
+const { getMatrix, getRouteGeometry } = require("../utils/roadDistanceService");
 
 const DAY_NAMES = [
   "Sunday",
@@ -152,6 +154,7 @@ exports.initializeDate = async (req, res) => {
           truckName: truck.truckName || `Truck ${truck.truckNumber}`,
           truckType: truck.truckType,
           maxWeightKg: truck.maxWeightKg,
+          departureTime: truck.departureTime || "08:00",
           region: schedule.region,
           departments: schedule.departments,
           cities: schedule.cities,
@@ -207,6 +210,47 @@ exports.getSingleRoute = async (req, res) => {
   }
 };
 
+// Changes when this route's truck leaves the depot on this date and
+// recomputes every stop's ETA from it (locked stops keep their order).
+exports.setDepartureTime = async (req, res) => {
+  try {
+    const { departureTime } = req.body;
+    if (parseTimeToMinutes(departureTime) == null || parseTimeToMinutes(departureTime) >= 24 * 60) {
+      return res.status(400).json({ message: 'departureTime must be "HH:MM" (24h)' });
+    }
+    const route = await TruckRoute.findById(req.params.routeId);
+    if (!route) return res.status(404).json({ message: "Route not found" });
+    route.departureTime = departureTime;
+    await resequenceRoute(route);
+    await route.save();
+    res.json({ message: "Departure time updated", route });
+  } catch (error) {
+    console.error("Set departure time error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// Road-following polyline for one route (depot -> stops in sequence -> depot),
+// from OSRM. Returns { positions: [[lat,lng],...] | null } — null means the
+// routing engine was unavailable and the map should draw straight lines.
+exports.getRouteGeometry = async (req, res) => {
+  try {
+    const route = await TruckRoute.findById(req.params.routeId).lean();
+    if (!route) return res.status(404).json({ message: "Route not found" });
+    const depot = getDepot(route.tenant);
+    const stops = (route.orders || [])
+      .filter((o) => o.coordinates && Number.isFinite(o.coordinates.lat) && Number.isFinite(o.coordinates.lng))
+      .sort((a, b) => (a.sequenceNumber || 0) - (b.sequenceNumber || 0))
+      .map((o) => ({ lat: o.coordinates.lat, lng: o.coordinates.lng }));
+    if (stops.length === 0) return res.json({ positions: [] });
+    const positions = await getRouteGeometry([depot, ...stops, depot]);
+    res.json({ positions });
+  } catch (error) {
+    console.error("Route geometry error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
 // ---------- Deliverable orders (real SAP DeliveryNote documents) ----------
 //
 // Originally this queried Invoice.isDelivery === true, matching the SAP
@@ -257,6 +301,7 @@ async function buildDeliverableOrder(deliveryNote, customersByCode, tenant) {
       const w = weightByCode.get(line.ItemCode) || 0;
       return sum + w * (line.Quantity || 0);
     }, 0);
+    totalWeight = Math.round(totalWeight * 100) / 100; // avoid 57.099999999999994 style floats
   }
 
   // customer.coordinates is a pre-existing field, populated for real
@@ -392,6 +437,12 @@ exports.assignOrderToTruck = async (req, res) => {
     const customersByCode = new Map(customer ? [[customer.CardCode, customer]] : []);
     const built = await buildDeliverableOrder(deliveryNote, customersByCode, route.tenant);
 
+    if (!built.coordinates) {
+      return res.status(400).json({
+        message: `${built.CardName || "This customer"} can't be placed on a truck: the address hasn't been geocoded yet, so there's no location to route to.`,
+      });
+    }
+
     const projectedWeight = route.totalWeightKg + (built.totalWeight || 0);
     if (projectedWeight > route.maxWeightKg) {
       return res.status(400).json({
@@ -423,10 +474,18 @@ exports.assignOrderToTruck = async (req, res) => {
     });
 
     recalcTotals(route);
-    resequenceRoute(route);
+    await resequenceRoute(route);
     await route.save();
 
-    res.json({ message: "Order assigned", route });
+    // The order is on the truck either way, but tell the dispatcher when this
+    // truck can't actually reach the shop inside its opening hours.
+    const placed = route.orders.find((o) => o.order.DocEntry === built.DocEntry);
+    const warning =
+      placed && placed.status === "infeasible"
+        ? `Added, but this truck can't reach ${built.CardName || "the stop"} before it closes at ${built.closingTime || "closing time"} (ETA ${String(Math.floor(placed.etaMin / 60)).padStart(2, "0")}:${String(placed.etaMin % 60).padStart(2, "0")}). Consider a different truck or an earlier departure.`
+        : undefined;
+
+    res.json({ message: "Order assigned", warning, route });
   } catch (error) {
     console.error("Assign order error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
@@ -441,7 +500,7 @@ exports.removeOrderFromTruck = async (req, res) => {
 
     route.orders = route.orders.filter((o) => o.order.DocEntry !== Number(docEntry));
     recalcTotals(route);
-    resequenceRoute(route);
+    await resequenceRoute(route);
     await route.save();
 
     res.json({ message: "Order removed", route });
@@ -484,16 +543,25 @@ exports.reorderOrders = async (req, res) => {
     // (unlike resequenceRoute, which would ignore these stops entirely once
     // every one of them is locked).
     const depot = getDepot(route.tenant);
+    const fixedStops = route.orders.map(toOptimizerStop);
+    const matrix = await roadMatrixFor(depot, fixedStops);
     const { sequence, totalDistanceKm, totalDurationMin, totalWaitMin } = evaluateFixedRoute(
-      route.orders.map(toOptimizerStop),
-      depot
+      fixedStops,
+      depot,
+      departureMinOf(route),
+      undefined,
+      matrix
     );
+    route.distanceSource = matrix ? "road" : "estimate";
     const byId = new Map(sequence.map((s) => [s.id, s]));
     route.orders.forEach((o) => {
       const evaluated = byId.get(String(o._id));
       if (evaluated) {
         o.etaMin = evaluated.etaMin;
-        o.status = evaluated.infeasible ? "infeasible" : o.status;
+        o.waitMin = evaluated.waitMin;
+        o.driveMin = evaluated.driveMin;
+        o.legKm = evaluated.legKm;
+        o.status = statusAfterSequencing(o, evaluated.infeasible);
       }
     });
     route.totalDistanceKm = totalDistanceKm;
@@ -573,14 +641,36 @@ function getDepot(tenant) {
   return getWarehouse(tenant);
 }
 
+// A stop flagged "infeasible" (can't arrive before the shop closes) used to
+// keep that flag forever, even after a re-sequence or a later departure made
+// it feasible. Set it when infeasible, clear it when it no longer is, and
+// never touch delivered/failed stops' real status.
+function statusAfterSequencing(order, infeasible) {
+  if (infeasible) return order.status === "delivered" || order.status === "failed" ? order.status : "infeasible";
+  return order.status === "infeasible" ? "pending" : order.status;
+}
+
+// Minutes-from-midnight the route's truck leaves the depot; 08:00 if unset/invalid.
+function departureMinOf(route) {
+  const parsed = parseTimeToMinutes(route.departureTime);
+  return parsed == null ? DEFAULT_DEPARTURE_MIN : parsed;
+}
+
 function toOptimizerStop(orderEntry) {
   return {
     id: String(orderEntry._id),
     coordinates: orderEntry.coordinates,
-    windowOpen: parseTimeToMinutes(orderEntry.storeHours?.openingTime),
-    windowClose: parseTimeToMinutes(orderEntry.storeHours?.closingTime),
+    ...parseTimeWindow(orderEntry.storeHours?.openingTime, orderEntry.storeHours?.closingTime),
     weightKg: orderEntry.orderWeightKg || 0,
   };
+}
+
+// Real road distance/duration matrix for the depot plus the given stops
+// (OSRM, cached). Resolves to null if the routing engine is unavailable, in
+// which case the optimizer falls back to its haversine estimate.
+async function roadMatrixFor(depot, stops) {
+  const points = [depot, ...stops.map((s) => s.coordinates)];
+  return getMatrix(points);
 }
 
 // Re-sequences a route's already-assigned, non-locked orders in place
@@ -588,10 +678,11 @@ function toOptimizerStop(orderEntry) {
 // `totalDurationMin` but does not save; callers save once, after whatever
 // else they changed. `locked` stops (manually reordered by a dispatcher)
 // keep their position and are excluded from re-sequencing.
-function resequenceRoute(route) {
+async function resequenceRoute(route) {
   const depot = getDepot(route.tenant);
   const locked = route.orders.filter((o) => o.locked);
   const toSequence = route.orders.filter((o) => !o.locked).map((o) => toOptimizerStop(o));
+  const matrix = await roadMatrixFor(depot, route.orders.map(toOptimizerStop));
 
   // Uses whatever strategy was last chosen for this route (persisted on the
   // document, default "shortest") — a manual assign/remove's automatic
@@ -600,25 +691,78 @@ function resequenceRoute(route) {
   const { sequence, totalDistanceKm, totalDurationMin, totalWaitMin } = sequenceRoute(
     toSequence,
     depot,
-    8 * 60,
+    departureMinOf(route),
     undefined,
-    route.strategy || "shortest"
+    route.strategy || "shortest",
+    matrix
   );
+  route.distanceSource = matrix ? "road" : "estimate";
 
+  // Nothing locked: the optimizer's own result already covers the whole route.
+  if (locked.length === 0) {
+    const bySeqId = new Map(sequence.map((s) => [s.id, s]));
+    route.orders = route.orders.map((o) => {
+      const optimized = bySeqId.get(String(o._id));
+      if (optimized) {
+        o.sequenceNumber = optimized.seq;
+        o.etaMin = optimized.etaMin;
+        o.waitMin = optimized.waitMin;
+        o.driveMin = optimized.driveMin;
+        o.legKm = optimized.legKm;
+        o.status = statusAfterSequencing(o, optimized.infeasible);
+      }
+      return o;
+    });
+    route.orders.sort((a, b) => (a.sequenceNumber || 0) - (b.sequenceNumber || 0));
+    route.totalDistanceKm = totalDistanceKm;
+    route.totalDurationMin = totalDurationMin;
+    route.totalWaitMin = totalWaitMin;
+    return;
+  }
+
+  // Some (or all) stops are locked. Locked stops keep their slot; the
+  // optimizer's order fills the remaining slots (stops it couldn't place,
+  // e.g. no coordinates, go last in their previous relative order). Then the
+  // WHOLE route is evaluated in that exact order, so totals, ETAs and
+  // sequence numbers always describe every stop — sequencing only the
+  // unlocked ones used to leave totals at 0 (all locked) or partial, and
+  // sequence numbers colliding (some locked).
+  const total = route.orders.length;
+  const slots = new Array(total).fill(null);
+  [...locked]
+    .sort((a, b) => (a.sequenceNumber || 0) - (b.sequenceNumber || 0))
+    .forEach((o) => {
+      let pos = Math.min(Math.max((o.sequenceNumber || 1) - 1, 0), total - 1);
+      while (slots[pos] !== null && pos < total - 1) pos++;
+      while (slots[pos] !== null && pos > 0) pos--;
+      slots[pos] = o;
+    });
   const bySeqId = new Map(sequence.map((s) => [s.id, s]));
-  route.orders = [...locked, ...route.orders.filter((o) => !o.locked)].map((o) => {
-    const optimized = bySeqId.get(String(o._id));
-    if (optimized) {
-      o.sequenceNumber = optimized.seq;
-      o.etaMin = optimized.etaMin;
-      o.status = optimized.infeasible ? "infeasible" : o.status;
+  const unlocked = route.orders.filter((o) => !o.locked);
+  const placed = sequence.map((s) => unlocked.find((o) => String(o._id) === s.id)).filter(Boolean);
+  const unplaced = unlocked
+    .filter((o) => !bySeqId.has(String(o._id)))
+    .sort((a, b) => (a.sequenceNumber || 0) - (b.sequenceNumber || 0));
+  const fillQueue = [...placed, ...unplaced];
+  const ordered = slots.map((o) => o || fillQueue.shift());
+
+  const fixed = evaluateFixedRoute(ordered.map(toOptimizerStop), depot, departureMinOf(route), undefined, matrix);
+  const evalById = new Map(fixed.sequence.map((s) => [s.id, s]));
+  ordered.forEach((o, i) => {
+    o.sequenceNumber = i + 1;
+    const evaluated = evalById.get(String(o._id));
+    if (evaluated) {
+      o.etaMin = evaluated.etaMin;
+      o.waitMin = evaluated.waitMin;
+      o.driveMin = evaluated.driveMin;
+      o.legKm = evaluated.legKm;
+      o.status = statusAfterSequencing(o, evaluated.infeasible);
     }
-    return o;
   });
-  route.orders.sort((a, b) => (a.sequenceNumber || 0) - (b.sequenceNumber || 0));
-  route.totalDistanceKm = totalDistanceKm;
-  route.totalDurationMin = totalDurationMin;
-  route.totalWaitMin = totalWaitMin;
+  route.orders = ordered;
+  route.totalDistanceKm = fixed.totalDistanceKm;
+  route.totalDurationMin = fixed.totalDurationMin;
+  route.totalWaitMin = fixed.totalWaitMin;
 }
 
 // Re-sequences a route's already-assigned orders (cheapest insertion + 2-opt).
@@ -635,7 +779,7 @@ exports.optimizeRoute = async (req, res) => {
       route.strategy = req.body.strategy;
     }
 
-    resequenceRoute(route);
+    await resequenceRoute(route);
     await route.save();
 
     res.json({ message: "Route optimized", route });
@@ -723,7 +867,7 @@ exports.generateRoute = async (req, res) => {
 
     // Sequence what we just built (respects route.strategy and locked stops
     // — see resequenceRoute above).
-    resequenceRoute(route);
+    await resequenceRoute(route);
 
     await route.save();
 
@@ -741,6 +885,9 @@ exports.generateRoute = async (req, res) => {
 
 // Runs sweep-clustering + capacity sizing + sequencing across every truck
 // scheduled for the date at once (Section 6.2-6.4 of implementation.md).
+// Total time the cross-truck improvement step may use across all regions of one Auto-Fill request.
+const AUTOFILL_IMPROVE_TOTAL_MS = Number(process.env.AUTOFILL_IMPROVE_TOTAL_MS) > 0 ? Number(process.env.AUTOFILL_IMPROVE_TOTAL_MS) : 20000;
+
 exports.autoFillAllTrucks = async (req, res) => {
   try {
     const { date } = req.params;
@@ -810,6 +957,8 @@ exports.autoFillAllTrucks = async (req, res) => {
       byRegion.get(built.region).push(built);
     }
 
+    const autoFillStartedAt = Date.now();
+    const planningReport = [];
     const depot = getDepot(tenant);
     let totalAdded = 0;
     const touchedRoutes = new Set();
@@ -837,102 +986,124 @@ exports.autoFillAllTrucks = async (req, res) => {
         continue;
       }
 
-      const largestRemaining = Math.max(...availableTrucks.map((t) => t.remaining));
-      const clusters = sweepCluster(
-        pool.map((o) => ({ ...o, weightKg: o.totalWeight })),
-        depot,
-        largestRemaining
-      );
-      // Bin-pack the biggest clusters first — otherwise a large cluster can
-      // be left with only small trucks remaining even though a big truck
-      // was available at the start.
-      clusters.sort((a, b) => {
-        const wa = a.reduce((s, o) => s + (o.weightKg || 0), 0);
-        const wb = b.reduce((s, o) => s + (o.weightKg || 0), 0);
-        return wb - wa;
-      });
-
-      for (const cluster of clusters) {
-        const clusterWeight = cluster.reduce((s, o) => s + (o.weightKg || 0), 0);
-        const candidates = availableTrucks
-          .filter((t) => t.remaining > 0)
-          .map((t) => ({ maxWeightKg: t.remaining, _ref: t }));
-        const fit = pickSmallestFittingTruck(candidates, clusterWeight);
-
-        if (!fit) {
-          cluster.forEach((o) =>
-            unassignable.push({
-              docEntry: o.DocEntry,
-              cardName: o.CardName,
-              reason: `region "${region}" under-resourced for this date (a ${clusterWeight}kg group exceeds every available truck's remaining capacity)`,
-            })
-          );
-          continue;
-        }
-
-        const target = fit._ref;
-        cluster.forEach((built) => {
-          target.route.orders.push({
-            order: {
-              _id: built._id,
-              DocEntry: built.DocEntry,
-              DocNum: built.DocNum,
-              CardCode: built.CardCode,
-              CardName: built.CardName,
-              DocTotal: built.DocTotal,
-              address: built.address,
-              totalWeight: built.totalWeight,
-              weightUnit: built.weightUnit,
-            },
-            sequenceNumber: target.route.orders.length + 1,
-            orderWeightKg: built.totalWeight,
-            coordinates: built.coordinates,
-            storeHours: { openingTime: built.openingTime, closingTime: built.closingTime },
-          });
-        });
-        target.remaining -= clusterWeight;
-        totalAdded += cluster.length;
-        touchedRoutes.add(target.route);
-      }
-
-      // Sweep-clustering above only decides which truck a NEW stop starts
-      // on — it splits a purely angle-sorted list by capacity, so a stop can
-      // land on truck A even though it's practically next door to truck B's
-      // route. Run the cross-route relocation pass across every truck in
-      // THIS region (not just ones that received a new stop this run, since
-      // a pre-existing stop can also turn out to be cheaper elsewhere once
-      // new stops shift the picture) so a stop only stays put if moving it
-      // wouldn't actually shorten the combined distance.
-      const genericTrucks = regionRoutes.map((route) => ({
+      // The region's trucks as the optimizer sees them BEFORE any new order:
+      // existing stops only, plus how much room each truck has left.
+      const baseTrucks = regionRoutes.map((route) => ({
         id: route._id.toString(),
+        departureMin: departureMinOf(route),
         capacityKg: route.maxWeightKg,
+        remainingKg: route.maxWeightKg - route.totalWeightKg,
         stops: route.orders.map((o) => ({
           id: String(o._id),
           coordinates: o.coordinates,
-          windowOpen: parseTimeToMinutes(o.storeHours?.openingTime),
-          windowClose: parseTimeToMinutes(o.storeHours?.closingTime),
+          ...parseTimeWindow(o.storeHours?.openingTime, o.storeHours?.closingTime),
           weightKg: o.orderWeightKg || 0,
           locked: o.locked,
           _raw: o,
         })),
       }));
+      // The new orders, as optimizer stops. `_built` carries the full order
+      // through so the winning plan can create the TruckRoute entries.
+      const poolStops = pool.map((o) => ({
+        id: `new:${o.DocEntry}`,
+        coordinates: o.coordinates,
+        ...parseTimeWindow(o.openingTime, o.closingTime),
+        weightKg: o.totalWeight || 0,
+        _built: o,
+      }));
 
-      const improved = crossRouteImprove(genericTrucks, depot, undefined, undefined, strategy);
+      const matrix = await roadMatrixFor(depot, [...baseTrucks.flatMap((t) => t.stops), ...poolStops]);
 
-      improved.forEach((truckResult) => {
+      // Two ways of grouping the new orders into trucks: by angle around the
+      // depot (fills trucks tightly, but can split neighbours) and by
+      // proximity (keeps neighbours together, can leave a truck less full and
+      // ignores shop hours). Neither is always better, so plan both without
+      // touching anything and apply whichever is better for the chosen
+      // strategy. Ties keep the angle grouping (the previous behaviour). One
+      // shared time budget covers the whole request, split between the two.
+      const budgetMs = Math.max(500, AUTOFILL_IMPROVE_TOTAL_MS - (Date.now() - autoFillStartedAt));
+      const candidates = [];
+      for (const method of ["sweep", "proximity"]) {
+        candidates.push(
+          await planRegionAssignment({ poolStops, trucks: baseTrucks, depot, strategy, matrix, method, maxMs: budgetMs / 2 })
+        );
+      }
+      let chosen = candidates[0];
+      for (const candidate of candidates.slice(1)) {
+        if (isBetterPlan(candidate.summary, chosen.summary, strategy)) chosen = candidate;
+      }
+      candidates.forEach((c) => {
+        if (c.improved.timedOut) {
+          console.warn(`[autoFill] "${c.method}" plan hit its time budget in region "${region}" - valid, just not fully polished`);
+        }
+      });
+      planningReport.push({
+        region,
+        strategy,
+        chosen: chosen.method,
+        candidates: candidates.map((c) => ({
+          method: c.method,
+          km: Math.round(c.summary.km * 10) / 10,
+          elapsedMin: Math.round(c.summary.elapsedMin),
+          idleMin: Math.round(c.summary.idleMin),
+          lateStops: c.summary.late,
+          trucksUsed: c.summary.trucks,
+          unassignedKg: Math.round(c.summary.unassignedKg * 10) / 10,
+        })),
+      });
+
+      chosen.unassigned.forEach(({ stops: cluster, weightKg }) =>
+        cluster.forEach((s) =>
+          unassignable.push({
+            docEntry: s._built.DocEntry,
+            cardName: s._built.CardName,
+            reason: `region "${region}" under-resourced for this date (a ${weightKg}kg group exceeds every available truck's remaining capacity)`,
+          })
+        )
+      );
+
+      chosen.improved.forEach((truckResult) => {
         const route = regionRoutes.find((r) => r._id.toString() === truckResult.id);
         if (!route) return;
         if (route.orders.length === 0 && truckResult.sequence.length === 0) return; // genuinely untouched, nothing to save
 
         // Drained to zero stops is a legitimate outcome (this truck wasn't
         // needed once its stops moved to trucks already covering the same
-        // area), not skipped — otherwise the route would silently keep its
+        // area), not skipped - otherwise the route would silently keep its
         // stale pre-improvement stops.
         route.orders = truckResult.sequence.map((s) => {
-          const raw = s._raw;
-          raw.sequenceNumber = s.seq;
+          let raw = s._raw;
+          if (!raw) {
+            // A new order from this run: create its TruckRoute entry now.
+            const built = s._built;
+            raw = {
+              order: {
+                _id: built._id,
+                DocEntry: built.DocEntry,
+                DocNum: built.DocNum,
+                CardCode: built.CardCode,
+                CardName: built.CardName,
+                DocTotal: built.DocTotal,
+                address: built.address,
+                totalWeight: built.totalWeight,
+                weightUnit: built.weightUnit,
+              },
+              orderWeightKg: built.totalWeight,
+              coordinates: built.coordinates,
+              storeHours: { openingTime: built.openingTime, closingTime: built.closingTime },
+            };
+            totalAdded++;
+          }
+          // crossRouteImprove orders every stop freely, locked ones included
+          // (it only needs costs). A dispatcher's manual slot must survive, so
+          // a locked stop keeps its own sequenceNumber; resequenceRoute below
+          // recomputes ETAs and totals around it.
+          if (!raw.locked) raw.sequenceNumber = s.seq;
           raw.etaMin = s.etaMin;
-          raw.status = s.infeasible ? "infeasible" : raw.status;
+          raw.waitMin = s.waitMin;
+          raw.driveMin = s.driveMin;
+          raw.legKm = s.legKm;
+          raw.status = statusAfterSequencing(raw, s.infeasible);
           return raw;
         });
         recalcTotals(route);
@@ -950,7 +1121,19 @@ exports.autoFillAllTrucks = async (req, res) => {
     // safer than tracking which routes still need it.
     for (const route of touchedRoutes) {
       recalcTotals(route);
-      resequenceRoute(route);
+      await resequenceRoute(route);
+      await route.save();
+    }
+
+    // Routes that already had orders but received nothing new this run (all
+    // of the date's orders were assigned earlier) never enter touchedRoutes,
+    // so they used to keep whatever distance/duration/ETAs they were saved
+    // with — e.g. the old straight-line estimate — and re-running Auto-Fill
+    // looked like it did nothing. Re-sequence them too (locked stops keep
+    // their slot) so every route reflects the current strategy and road data.
+    for (const route of routes) {
+      if (touchedRoutes.has(route) || route.orders.length === 0) continue;
+      await resequenceRoute(route);
       await route.save();
     }
 
@@ -958,6 +1141,7 @@ exports.autoFillAllTrucks = async (req, res) => {
       message: `Auto-filled ${totalAdded} order(s) across ${touchedRoutes.size} truck(s)`,
       totalAdded,
       unassignable,
+      planning: planningReport,
       routes,
     });
   } catch (error) {

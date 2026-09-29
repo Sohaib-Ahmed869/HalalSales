@@ -35,6 +35,13 @@ const OrderEntrySchema = new Schema(
       closingTime: { type: String },
     },
     etaMin: { type: Number },
+    // Minutes the truck waits outside the shop for it to open; already
+    // included in etaMin of this stop and every later one.
+    waitMin: { type: Number, default: 0 },
+    // Leg from the previous stop (or the depot) as used for etaMin, so an ETA
+    // can be audited: etaMin = previous stop's etaMin + its service time + driveMin + waitMin.
+    driveMin: { type: Number },
+    legKm: { type: Number },
     plannedArrival: { type: Date },
     status: {
       type: String,
@@ -62,6 +69,9 @@ const TruckRouteSchema = new Schema({
     default: "medium",
   },
   maxWeightKg: { type: Number, required: true },
+  // "HH:MM" the truck leaves the depot on this date (copied from the weekly
+  // template at Initialize Date, editable per date). ETAs are measured from it.
+  departureTime: { type: String, default: "08:00" },
   region: { type: String, trim: true },
   departments: [{ type: String, trim: true }],
   cities: [{ type: String, trim: true }],
@@ -93,6 +103,14 @@ const TruckRouteSchema = new Schema({
     type: String,
     enum: ["shortest", "least_wait"],
     default: "shortest",
+  },
+  // Where totalDistanceKm/totalDurationMin/ETAs came from on the last
+  // sequencing: "road" = real OSRM road distances, "estimate" = haversine x
+  // 1.3 fallback (routing engine unreachable or disabled).
+  distanceSource: {
+    type: String,
+    enum: ["road", "estimate"],
+    default: "estimate",
   },
   createdAt: {
     type: Date,
