@@ -15,7 +15,7 @@ const {
 } = require("../utils/routeOptimizer");
 const { getWarehouse, regionForAddress } = require("../utils/regions");
 const { geocodeCustomer } = require("../utils/geocodingService");
-const { getMatrix, getRouteGeometry } = require("../utils/roadDistanceService");
+const { getMatrix, getRouteGeometry, saveRouteGeometry } = require("../utils/roadDistanceService");
 const { getTrafficLegs } = require("../utils/trafficEtaService");
 
 const DAY_NAMES = [
@@ -702,12 +702,12 @@ async function applyTrafficEtas(route) {
   );
   if (geocoded.length === 0) return;
 
-  const legs = await getTrafficLegs(
-    [depot, ...geocoded.map((s) => s.coordinates), depot],
-    route.date,
-    departureMinOf(route)
-  );
+  const waypoints = [depot, ...geocoded.map((s) => s.coordinates), depot];
+  const legs = await getTrafficLegs(waypoints, route.date, departureMinOf(route));
   if (!legs) return;
+  // Same waypoint order the geometry endpoint uses (route.orders is in
+  // sequence order here), so the map draws TomTom's line with no extra call.
+  await saveRouteGeometry(waypoints, legs.positions, "tomtom");
 
   const fixed = evaluateFixedRoute(stops, depot, departureMinOf(route), undefined, legs);
   const byId = new Map(fixed.sequence.map((s) => [s.id, s]));
@@ -1175,22 +1175,29 @@ exports.autoFillAllTrucks = async (req, res) => {
     // between, but resequenceRoute is cheap and idempotent on an
     // already-optimal order, so running it uniformly here is simpler and
     // safer than tracking which routes still need it.
-    for (const route of touchedRoutes) {
-      recalcTotals(route);
-      await resequenceRoute(route);
-      await route.save();
-    }
-
+    //
     // Routes that already had orders but received nothing new this run (all
     // of the date's orders were assigned earlier) never enter touchedRoutes,
     // so they used to keep whatever distance/duration/ETAs they were saved
     // with — e.g. the old straight-line estimate — and re-running Auto-Fill
     // looked like it did nothing. Re-sequence them too (locked stops keep
     // their slot) so every route reflects the current strategy and road data.
-    for (const route of routes) {
-      if (touchedRoutes.has(route) || route.orders.length === 0) continue;
-      await resequenceRoute(route);
-      await route.save();
+    //
+    // Each route is independent and may wait ~2 s on TomTom, so run a few at
+    // a time instead of one after another.
+    touchedRoutes.forEach((route) => recalcTotals(route));
+    const toFinish = [
+      ...touchedRoutes,
+      ...routes.filter((route) => !touchedRoutes.has(route) && route.orders.length > 0),
+    ];
+    const FINISH_CONCURRENCY = 4;
+    for (let i = 0; i < toFinish.length; i += FINISH_CONCURRENCY) {
+      await Promise.all(
+        toFinish.slice(i, i + FINISH_CONCURRENCY).map(async (route) => {
+          await resequenceRoute(route);
+          await route.save();
+        })
+      );
     }
 
     res.json({

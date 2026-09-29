@@ -32,6 +32,7 @@
 
 const axios = require("axios");
 const RoadDistanceCache = require("../models/RoadDistanceCache");
+const RouteGeometryCache = require("../models/RouteGeometryCache");
 const { pointKey, haversineKm } = require("./routeOptimizer");
 
 const ROAD_DISTANCE_FACTOR = 1.3; // same fallback factor as routeOptimizer
@@ -255,10 +256,38 @@ async function getMatrix(points) {
   return null;
 }
 
-// In-memory LRU-ish cache of route polylines, keyed by the ordered waypoint
-// list, so redrawing the same route (page refresh, filter change) is free.
+// Route polylines, keyed by the ordered waypoint list: in memory (LRU-ish)
+// and in Mongo (RouteGeometryCache), so redrawing the same route (page
+// refresh, filter change, server restart) needs no routing request at all.
 const geometryCache = new Map();
 const GEOMETRY_CACHE_MAX = 300;
+
+const geometryKey = (pts) => pts.map((p) => `${Number(p.lng).toFixed(5)},${Number(p.lat).toFixed(5)}`).join(";");
+
+function rememberGeometry(key, positions) {
+  geometryCache.set(key, positions);
+  if (geometryCache.size > GEOMETRY_CACHE_MAX) geometryCache.delete(geometryCache.keys().next().value);
+}
+
+/**
+ * Stores a polyline obtained elsewhere (TomTom returns one with the traffic
+ * ETAs), so the map uses it without another request. Never throws.
+ */
+async function saveRouteGeometry(points, positions, provider) {
+  try {
+    const pts = points.filter(isValidPoint);
+    if (pts.length < 2 || !Array.isArray(positions) || positions.length < 2) return;
+    const key = geometryKey(pts);
+    rememberGeometry(key, positions);
+    await RouteGeometryCache.updateOne(
+      { key },
+      { $set: { positions, provider, fetchedAt: new Date() } },
+      { upsert: true }
+    );
+  } catch (error) {
+    console.warn("[roadDistance] geometry cache write failed:", error.message);
+  }
+}
 
 async function fetchGeometry(cfg, pts) {
   if (cfg.name === "ors") {
@@ -289,17 +318,28 @@ async function fetchGeometry(cfg, pts) {
  * @returns {Promise<null|Array<[number,number]>>} [[lat,lng],...] or null if unavailable
  */
 async function getRouteGeometry(points) {
-  const chain = providers();
-  if (chain.length === 0) return null;
   const pts = points.filter(isValidPoint);
   if (pts.length < 2) return null;
-  const cacheKey = pts.map((p) => `${Number(p.lng).toFixed(5)},${Number(p.lat).toFixed(5)}`).join(";");
+  const cacheKey = geometryKey(pts);
   if (geometryCache.has(cacheKey)) return geometryCache.get(cacheKey);
+  try {
+    const saved = await RouteGeometryCache.findOne({ key: cacheKey }).select("positions -_id").lean();
+    if (saved?.positions?.length >= 2) {
+      rememberGeometry(cacheKey, saved.positions);
+      return saved.positions;
+    }
+  } catch (error) {
+    console.warn("[roadDistance] geometry cache read failed:", error.message);
+  }
+
+  // Drawing only: OSRM first (fast, no daily quota; measured 8 lines in
+  // 2.4 s vs 6.6-14.5 s on ORS, whose free plan allows 200 lines/day), ORS as
+  // the backup. With TomTom on, most lines are already saved above.
+  const chain = [osrmConfig(), orsConfig()].filter((p) => p.enabled);
   for (const cfg of chain) {
     try {
       const positions = await fetchGeometry(cfg, pts);
-      geometryCache.set(cacheKey, positions);
-      if (geometryCache.size > GEOMETRY_CACHE_MAX) geometryCache.delete(geometryCache.keys().next().value);
+      await saveRouteGeometry(pts, positions, cfg.name);
       return positions;
     } catch (error) {
       console.warn(`[roadDistance] ${cfg.name} route geometry unavailable:`, errorText(error));
@@ -309,4 +349,4 @@ async function getRouteGeometry(points) {
   return null;
 }
 
-module.exports = { getMatrix, getRouteGeometry };
+module.exports = { getMatrix, getRouteGeometry, saveRouteGeometry };

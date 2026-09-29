@@ -74,7 +74,7 @@ function departAtFor(routeDate, departureMin, now = new Date()) {
  * @param {Array<{lat:number,lng:number}>} points - depot, stops in visit order, depot
  * @param {Date|string} routeDate
  * @param {number} departureMin - minutes from midnight the truck leaves
- * @returns {Promise<null|{ index: Map<string,number>, distKm: number[][], durMin: number[][], delayMin: number, departAt: string }>}
+ * @returns {Promise<null|{ index: Map<string,number>, distKm: number[][], durMin: number[][], delayMin: number, departAt: string, positions: Array<[number,number]> }>}
  *   a sparse matrix holding only consecutive legs, in the shape routeOptimizer's makeLegs expects
  */
 async function getTrafficLegs(points, routeDate, departureMin) {
@@ -156,7 +156,17 @@ async function getTrafficLegs(points, routeDate, departureMin) {
         : Number(s.trafficDelayInSeconds) || 0;
     });
 
-    const value = { index, distKm, durMin, delayMin: Math.round(delaySec / 60), departAt };
+    // The road line TomTom drove, so the map can draw it without another request.
+    const positions = [];
+    legs.forEach((leg) =>
+      (leg.points || []).forEach((pt) => {
+        const last = positions[positions.length - 1];
+        const p = [Math.round(pt.latitude * 1e5) / 1e5, Math.round(pt.longitude * 1e5) / 1e5];
+        if (!last || last[0] !== p[0] || last[1] !== p[1]) positions.push(p);
+      })
+    );
+
+    const value = { index, distKm, durMin, delayMin: Math.round(delaySec / 60), departAt, positions };
     cache.set(requestKey, { at: Date.now(), value });
     if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
     return value;
