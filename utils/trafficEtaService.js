@@ -108,6 +108,7 @@ async function getTrafficLegs(points, routeDate, departureMin) {
       traffic: true,
       travelMode: cfg.travelMode,
       routeType: "fastest",
+      computeTravelTimeFor: "all", // adds noTrafficTravelTimeInSeconds, for the delay shown in the UI
       departAt,
       ...(cfg.travelMode === "truck" ? { vehicleCommercial: true } : {}),
     };
@@ -147,7 +148,12 @@ async function getTrafficLegs(points, routeDate, departureMin) {
       if (a === b || !Number.isFinite(s.lengthInMeters) || !Number.isFinite(s.travelTimeInSeconds)) return;
       distKm[a][b] = s.lengthInMeters / 1000;
       durMin[a][b] = s.travelTimeInSeconds / 60;
-      delaySec += Number(s.trafficDelayInSeconds) || 0;
+      // trafficDelayInSeconds only counts live incidents (0 for a future
+      // departure), so measure against free-flow time to include typical
+      // rush-hour slowdown too.
+      delaySec += Number.isFinite(s.noTrafficTravelTimeInSeconds)
+        ? Math.max(0, s.travelTimeInSeconds - s.noTrafficTravelTimeInSeconds)
+        : Number(s.trafficDelayInSeconds) || 0;
     });
 
     const value = { index, distKm, durMin, delayMin: Math.round(delaySec / 60), departAt };
