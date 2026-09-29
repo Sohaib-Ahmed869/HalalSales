@@ -662,6 +662,104 @@ async function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, ma
     }
   }
 
+  // --- Swaps (least_wait only) ---
+  // Moving one stop needs free capacity on the receiving truck, and a busy day
+  // leaves every truck at ~100%, so a stop that makes its truck sit idle (a
+  // shop opening at 11:00 on a truck that arrives at 08:45) can never move.
+  // A swap trades that stop for one on another truck, weight permitting, when
+  // that lowers the two trucks' combined elapsed time without making any stop
+  // late. Only stops that actually wait are worth swapping out, which keeps
+  // the search small.
+  const useSwaps = options.swaps === undefined ? strategy === "least_wait" : Boolean(options.swaps);
+  const weightOfStops = (stops) => stops.reduce((sum, o) => sum + (o.weightKg || 0), 0);
+  const lateOf = (result) => result.sequence.filter((x) => x.infeasible).length;
+  const elapsed = (result) => result.totalDurationMin;
+
+  // Looks for one improving swap between trucks X and Y; applies it and
+  // returns true, or returns false when none exists.
+  const trySwap = (X, Y) => {
+    const depX = X.departureMin ?? DEFAULT_DEPARTURE_MIN;
+    const depY = Y.departureMin ?? DEFAULT_DEPARTURE_MIN;
+    const seqX = orderOf(X);
+    const seqY = orderOf(Y);
+    const baseX = orderMetrics(seqX, depX);
+    const baseY = orderMetrics(seqY, depY);
+    const wX = weightOfStops(X.stops);
+    const wY = weightOfStops(Y.stops);
+    const slack = EPSILON * 4;
+
+    // Cheapest place for `stop` in `order`, or null if it would make a stop late.
+    const bestInsert = (order, stop, dep, lateAllowed) => {
+      let best = null;
+      for (let k = 0; k <= order.length; k++) {
+        const m = orderMetrics([...order.slice(0, k), stop, ...order.slice(k)], dep);
+        if (m.late > lateAllowed) continue;
+        if (!best || m.cost < best.cost) best = m;
+      }
+      return best;
+    };
+
+    for (const a of seqX) {
+      if (!(a.waitMin > 0) || a.locked) continue;
+      const aStop = X.stops.find((s) => s.id === a.id);
+      if (!aStop) continue;
+      const xWithoutA = seqX.filter((s) => s.id !== a.id);
+
+      let best = null;
+      for (const b of Y.stops) {
+        if (timeUp()) return false;
+        if (b.locked || !b.coordinates || !Number.isFinite(b.coordinates.lat)) continue;
+        if (wX - (a.weightKg || 0) + (b.weightKg || 0) > X.capacityKg) continue;
+        if (wY - (b.weightKg || 0) + (a.weightKg || 0) > Y.capacityKg) continue;
+        const inX = bestInsert(xWithoutA, b, depX, baseX.late);
+        if (!inX) continue;
+        const yWithoutB = seqY.filter((s) => s.id !== b.id);
+        const inY = bestInsert(yWithoutB, a, depY, baseY.late);
+        if (!inY) continue;
+        const delta = inX.cost - baseX.cost + (inY.cost - baseY.cost);
+        if (delta < slack && (!best || delta < best.delta)) best = { b, delta };
+      }
+      if (!best) continue;
+
+      // Cheap estimate says it may help: confirm with a full re-sequence.
+      const newX = [...X.stops.filter((s) => s.id !== a.id), best.b];
+      const newY = [...Y.stops.filter((s) => s.id !== best.b.id), aStop];
+      const rx = evalStops(newX, X.departureMin);
+      const ry = evalStops(newY, Y.departureMin);
+      const beforeX = evalStops(X.stops, X.departureMin);
+      const beforeY = evalStops(Y.stops, Y.departureMin);
+      const exactGain = elapsed(beforeX) + elapsed(beforeY) - (elapsed(rx) + elapsed(ry));
+      if (exactGain > EPSILON && lateOf(rx) + lateOf(ry) <= lateOf(beforeX) + lateOf(beforeY)) {
+        X.stops = newX;
+        Y.stops = newY;
+        return true;
+      }
+    }
+    return false;
+  };
+
+  if (useSwaps && !timedOut) {
+    for (let round = 0; round < maxPasses && !timedOut; round++) {
+      let swappedAny = false;
+      for (let i = 0; i < working.length && !timedOut; i++) {
+        for (let j = 0; j < working.length && !timedOut; j++) {
+          if (i === j) continue;
+          let guard = 0;
+          for (;;) {
+            if (timeUp()) {
+              timedOut = true;
+              break;
+            }
+            await maybeYield();
+            if (++guard > 50 || !trySwap(working[i], working[j])) break;
+            swappedAny = true;
+          }
+        }
+      }
+      if (!swappedAny) break;
+    }
+  }
+
   // Every truck gets one final full re-sequence of what it ended up with.
   const results = [];
   for (const t of working) {
@@ -713,6 +811,66 @@ function isBetterPlan(a, b, strategy = "shortest") {
 }
 
 /**
+ * Shop-hours-aware assignment of new stops to trucks ("timeline" grouping).
+ *
+ * The angle and proximity groupings only look at where stops are, so a stop
+ * that opens at 11:00 can land on a truck that would reach it at 08:45 and sit
+ * idle for two hours. This one builds all trucks' days forward in time
+ * together: each truck has a clock and a position (after its existing stops),
+ * and every step gives the (truck, stop) pair that costs the least extra time
+ * (drive + any wait for the shop to open) to the truck it suits. Early-opening
+ * stops therefore go first and late-opening ones are chained after enough
+ * earlier work to fill the gap. A stop that would arrive after closing is only
+ * taken when nothing else is placeable. Stops no truck has room for are
+ * returned as unassigned groups. Mutates `state` (each truck's stops/remaining).
+ *
+ * @param {Array} state - trucks: { departureMin, remaining, stops }
+ * @param {Array} pool - new stops (copies)
+ * @returns {Array<{stops, weightKg}>} stops that could not be placed
+ */
+function timelineAssign(state, pool, depot, matrix, strategy = "least_wait") {
+  const legs = makeLegs(matrix, DEFAULT_SPEED_KMH);
+  const cursors = state.map((t) => {
+    const dep = t.departureMin ?? DEFAULT_DEPARTURE_MIN;
+    if (t.stops.length === 0) return { clock: dep, pos: depot };
+    // Where an existing truck stands once its current stops are done.
+    const seq = sequenceRoute(t.stops, depot, dep, DEFAULT_SPEED_KMH, strategy, matrix).sequence;
+    if (seq.length === 0) return { clock: dep, pos: depot };
+    const last = seq[seq.length - 1];
+    return { clock: last.etaMin + serviceOf(last), pos: last.coordinates };
+  });
+
+  const remaining = [...pool];
+  while (remaining.length > 0) {
+    let best = null;
+    for (let ti = 0; ti < state.length; ti++) {
+      const t = state[ti];
+      if (t.remaining <= 0) continue;
+      for (let si = 0; si < remaining.length; si++) {
+        const s = remaining[si];
+        if ((s.weightKg || 0) > t.remaining) continue;
+        const arrive = cursors[ti].clock + legs.min(cursors[ti].pos, s.coordinates);
+        const start = s.windowOpen != null ? Math.max(arrive, s.windowOpen) : arrive;
+        const late = s.windowClose != null && start > s.windowClose;
+        const cost = start - cursors[ti].clock;
+        // On-time placements always beat late ones.
+        if (!best || late < best.late || (late === best.late && cost < best.cost)) {
+          best = { ti, si, start, cost, late };
+        }
+      }
+    }
+    if (!best) break; // nothing left fits any truck
+    const [stop] = remaining.splice(best.si, 1);
+    const t = state[best.ti];
+    t.stops.push(stop);
+    t.remaining -= stop.weightKg || 0;
+    cursors[best.ti] = { clock: best.start + serviceOf(stop), pos: stop.coordinates };
+  }
+
+  return remaining.map((s) => ({ stops: [s], weightKg: s.weightKg || 0 }));
+}
+
+/**
  * Plans one region's Auto-Fill without touching anything: groups the new
  * orders using `method`, gives each whole group to the smallest truck that
  * still has room, then runs the cross-truck improvement over every truck in
@@ -724,35 +882,44 @@ function isBetterPlan(a, b, strategy = "shortest") {
  * @param {Object} args.depot
  * @param {"shortest"|"least_wait"} args.strategy
  * @param {Object|null} args.matrix - road distance matrix covering depot + existing + new stops
- * @param {"sweep"|"proximity"} args.method - how the new orders are grouped
+ * @param {"sweep"|"proximity"|"timeline"} args.method - how the new orders are grouped ("timeline" = shop-hours aware, used for least_wait)
  * @param {number} args.maxMs - time budget for the improvement step
  * @returns {Promise<{method, improved, unassigned, summary}>}
  */
 async function planRegionAssignment({ poolStops, trucks, depot, strategy, matrix, method, maxMs }) {
-  const groupFn = method === "proximity" ? proximityCluster : sweepCluster;
   const state = trucks.map((t) => ({ ...t, stops: t.stops.map((s) => ({ ...s })), remaining: t.remainingKg }));
   const open = state.filter((t) => t.remaining > 0);
-  const largest = open.length > 0 ? Math.max(...open.map((t) => t.remaining)) : 0;
-
-  const clusters = groupFn(poolStops.map((s) => ({ ...s })), depot, largest);
-  // Biggest groups first - otherwise a large group can be left with only
-  // small trucks even though a big truck was free at the start.
   const weightOf = (cl) => cl.reduce((sum, o) => sum + (o.weightKg || 0), 0);
-  clusters.sort((a, b) => weightOf(b) - weightOf(a));
 
   const unassigned = [];
   let unassignedKg = 0;
-  for (const cluster of clusters) {
-    const w = weightOf(cluster);
-    const candidates = open.filter((t) => t.remaining > 0).map((t) => ({ maxWeightKg: t.remaining, _ref: t }));
-    const fit = pickSmallestFittingTruck(candidates, w);
-    if (!fit) {
-      unassigned.push({ stops: cluster, weightKg: w });
-      unassignedKg += w;
-      continue;
+
+  if (method === "timeline") {
+    // Shop-hours-aware assignment: builds every truck's day forward in time.
+    for (const group of timelineAssign(state, poolStops.map((s) => ({ ...s })), depot, matrix, strategy)) {
+      unassigned.push(group);
+      unassignedKg += group.weightKg;
     }
-    fit._ref.stops.push(...cluster);
-    fit._ref.remaining -= w;
+  } else {
+    const groupFn = method === "proximity" ? proximityCluster : sweepCluster;
+    const largest = open.length > 0 ? Math.max(...open.map((t) => t.remaining)) : 0;
+    const clusters = groupFn(poolStops.map((s) => ({ ...s })), depot, largest);
+    // Biggest groups first - otherwise a large group can be left with only
+    // small trucks even though a big truck was free at the start.
+    clusters.sort((a, b) => weightOf(b) - weightOf(a));
+
+    for (const cluster of clusters) {
+      const w = weightOf(cluster);
+      const candidates = open.filter((t) => t.remaining > 0).map((t) => ({ maxWeightKg: t.remaining, _ref: t }));
+      const fit = pickSmallestFittingTruck(candidates, w);
+      if (!fit) {
+        unassigned.push({ stops: cluster, weightKg: w });
+        unassignedKg += w;
+        continue;
+      }
+      fit._ref.stops.push(...cluster);
+      fit._ref.remaining -= w;
+    }
   }
 
   const improved = await crossRouteImprove(
@@ -851,6 +1018,7 @@ module.exports = {
   parseTimeWindow,
   sweepCluster,
   proximityCluster,
+  timelineAssign,
   planRegionAssignment,
   summarizePlan,
   isBetterPlan,

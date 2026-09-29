@@ -1022,10 +1022,14 @@ exports.autoFillAllTrucks = async (req, res) => {
       // strategy. Ties keep the angle grouping (the previous behaviour). One
       // shared time budget covers the whole request, split between the two.
       const budgetMs = Math.max(500, AUTOFILL_IMPROVE_TOTAL_MS - (Date.now() - autoFillStartedAt));
+      // "Least wait" gets a third candidate that plans around shop opening
+      // hours ("timeline") and, in the improvement step, swaps stops between
+      // full trucks. "Shortest" keeps exactly the two plans it always had.
+      const methods = strategy === "least_wait" ? ["sweep", "proximity", "timeline"] : ["sweep", "proximity"];
       const candidates = [];
-      for (const method of ["sweep", "proximity"]) {
+      for (const method of methods) {
         candidates.push(
-          await planRegionAssignment({ poolStops, trucks: baseTrucks, depot, strategy, matrix, method, maxMs: budgetMs / 2 })
+          await planRegionAssignment({ poolStops, trucks: baseTrucks, depot, strategy, matrix, method, maxMs: budgetMs / methods.length })
         );
       }
       let chosen = candidates[0];
