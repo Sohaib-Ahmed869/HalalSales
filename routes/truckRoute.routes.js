@@ -1,49 +1,43 @@
 // routes/truckRoute.routes.js
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const {
-    getTruckSchedules,
-    createOrUpdateSchedule,
-    deleteSchedule,
-    getRoutesByDate,
-    initializeTrucksForDate,
-    getAvailableOrders,
-    getRouteStatistics,
-    assignOrderToTruck,
-    removeOrderFromTruck,
-    reorderOrders,
-    updateRouteStatus,
-    debugRoutes,
-    optimizeRoute,
-    generateTruckRoute,
-    autoFillAllTrucks,
-    getSingleRoute,
-    updateTruckCapacity
-} = require('../controllers/truckRoute.controller');
+const { auth } = require("../middleware/auth");
+const controller = require("../controllers/truckRoute.controller");
 
-router.get("/debug", debugRoutes);
-// Truck Schedules (Templates) - Define weekly delivery schedules
-router.get('/schedules', getTruckSchedules);
-router.post('/schedules', createOrUpdateSchedule);
-router.delete('/schedules/:id', deleteSchedule);
+router.use(auth);
 
-// Truck Routes (Actual Deliveries) - Manage daily truck routes
-router.get('/date/:date', getRoutesByDate);
-router.post('/initialize-date', initializeTrucksForDate);
-router.get('/available-orders/:date', getAvailableOrders);
-router.get('/stats', getRouteStatistics);
+// This data changes on every Initialize/Generate/Optimize/Auto-Fill/manual
+// edit — never let a browser or intermediate proxy cache a GET response and
+// serve stale routes/stats after an action that just changed them.
+router.use((req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  next();
+});
 
-// Order Assignment - Assign orders to trucks
-router.post('/:routeId/assign-order', assignOrderToTruck);
-router.delete('/:routeId/orders/:orderDocEntry', removeOrderFromTruck);
-router.put('/:routeId/reorder', reorderOrders);
-router.patch('/:routeId/capacity', updateTruckCapacity);
-// Route Management - Update route status
-router.patch('/:routeId/status', updateRouteStatus);
-router.post('/:routeId/optimize', optimizeRoute);
-router.post('/:routeId/generate', generateTruckRoute);
-// Auto-fill all trucks for a date
-router.post("/auto-fill-all/:date", autoFillAllTrucks);
-router.get("/single/:routeId", getSingleRoute);
+// Weekly templates
+router.get("/schedules", controller.getSchedules);
+router.post("/schedules", controller.createSchedule);
+router.put("/schedules/:id", controller.updateSchedule);
+router.delete("/schedules/:id", controller.deleteSchedule);
+
+// Per-date routes
+router.post("/initialize-date", controller.initializeDate);
+router.get("/date/:date", controller.getRoutesByDate);
+router.get("/single/:routeId", controller.getSingleRoute);
+router.get("/geometry/:routeId", controller.getRouteGeometry);
+router.get("/available-orders/:date", controller.getAvailableOrders);
+router.get("/stats", controller.getStats);
+
+router.post("/:routeId/generate", controller.generateRoute);
+router.post("/:routeId/optimize", controller.optimizeRoute);
+router.post("/auto-fill-all/:date", controller.autoFillAllTrucks);
+
+router.post("/:routeId/assign-order", controller.assignOrderToTruck);
+router.delete("/:routeId/orders/:docEntry", controller.removeOrderFromTruck);
+router.patch("/:routeId/orders/:docEntry/status", controller.updateStopStatus);
+router.put("/:routeId/reorder", controller.reorderOrders);
+router.put("/:routeId/departure", controller.setDepartureTime);
+router.patch("/:routeId/status", controller.updateRouteStatus);
+router.patch("/:routeId/capacity", controller.updateCapacity);
 
 module.exports = router;

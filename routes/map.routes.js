@@ -1,42 +1,24 @@
 // routes/map.routes.js
 const express = require("express");
 const router = express.Router();
-const mapController = require("../controllers/map.controller");
+const { auth } = require("../middleware/auth");
+const controller = require("../controllers/map.controller");
+const tiles = require("../controllers/mapTiles.controller");
 
+// Map tile images: public URL checked with a short-lived "tiles" token
+// (an <img> request can't send the Authorization header).
+router.get("/tiles/:z/:x/:y", tiles.getTile);
 
-// Get documents by date range for map display
-// GET /api/map/documents?startDate=2024-01-01&endDate=2024-12-31&type=all|invoice|order|quotation
-router.get("/documents", mapController.getDocumentsByDateRange);
+router.use(auth);
 
-// Get documents for a specific customer
-// GET /api/map/customer/:cardCode?type=all|invoice|order|quotation&startDate=X&endDate=Y
-router.get("/customer/:cardCode", mapController.getCustomerDocumentsForMap);
+router.get("/tiles/config", tiles.getTileConfig);
+router.get("/tiles/attribution", tiles.getAttribution);
 
-// Search customers for map selection (autocomplete)
-// GET /api/map/search-customers?search=term
-router.get("/search-customers", mapController.searchCustomersForMap);
-
-router.post("/geocoding/fix-empty-coordinates", mapController.fixEmptyCoordinates);
-// Get customers geocoded outside France
-router.get("/geocoding/outside-france", mapController.getCustomersOutsideFrance);
-
-// Verify/fix single customer location
-router.post("/customer/:cardCode/verify-location", mapController.verifyAndFixCustomerLocation);
-
-// Batch fix all customers outside France using Google
-router.post("/geocoding/fix-outside-france", mapController.fixCustomersOutsideFrance);
-
-router.get("/geocoding/review-outside", mapController.getCustomersForManualReview);
-
-// Bulk update coordinates after your review
-router.post("/geocoding/bulk-update", mapController.bulkUpdateCoordinates);
-
-// Accept Google suggestion for single customer
-router.post("/customer/:cardCode/accept-google", mapController.acceptGoogleSuggestion);
-// Geocoding management routes (admin only)
-router.get("/geocoding/stats", mapController.getGeocodingStats);
-router.post("/geocoding/batch", mapController.batchGeocodeCustomers);
-router.put("/customer/:cardCode/coordinates", mapController.setCustomerCoordinates);
-
+router.get("/documents", controller.getDocuments);
+router.get("/customer/:cardCode", controller.getCustomerDocuments);
+router.get("/search-customers", controller.searchCustomers);
+router.get("/geocoding/stats", controller.getGeocodingStats);
+router.post("/geocoding/batch", controller.batchGeocode);
+router.put("/customer/:cardCode/coordinates", controller.setCustomerCoordinates);
 
 module.exports = router;

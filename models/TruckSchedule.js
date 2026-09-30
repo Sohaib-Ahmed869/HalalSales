@@ -1,52 +1,68 @@
 const mongoose = require("mongoose");
+const Schema = mongoose.Schema;
 
-const truckScheduleSchema = new mongoose.Schema({
-    dayOfWeek: {
+// Weekly template: which trucks normally cover which region/departments/cities
+// on which day of the week. "Initialize Date" reads the active template(s) for
+// a given date's weekday to create that date's TruckRoute documents.
+// Trucks are embedded here (not a separate collection) to match the existing
+// TruckSchedules.jsx form, which builds/edits trucks inline per schedule.
+const TruckScheduleSchema = new Schema({
+  dayOfWeek: {
+    type: String,
+    enum: [
+      "Monday",
+      "Tuesday",
+      "Wednesday",
+      "Thursday",
+      "Friday",
+      "Saturday",
+      "Sunday",
+    ],
+    required: true,
+  },
+  region: {
+    type: String,
+    trim: true,
+  },
+  departments: [{ type: String, trim: true }],
+  cities: [{ type: String, trim: true }],
+  trucks: [
+    {
+      truckNumber: { type: Number, required: true },
+      truckName: { type: String, trim: true },
+      maxWeightKg: { type: Number, required: true },
+      truckType: {
         type: String,
-        required: true,
-        enum: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+        enum: ["small", "medium", "large", "xlarge", "custom"],
+        default: "medium",
+      },
+      // "HH:MM" the truck leaves the depot on days initialized from this
+      // template. Drives every stop's ETA.
+      departureTime: { type: String, default: "08:00" },
     },
-    region: String,
-    departments: [String],
-    cities: [String],
-    numberOfTrucks: {
-        type: Number,
-        required: true,
-        min: 1,
-    },
-    // REPLACE maxWeightKg with trucks array
-    trucks: [{
-        truckNumber: {
-            type: Number,
-            required: true,
-        },
-        truckName: String,
-        maxWeightKg: {
-            type: Number,
-            default: 1000,
-            min: 100,
-        },
-        // Optional: Add truck type/model
-        truckType: {
-            type: String,
-            enum: ["small", "medium", "large", "xlarge", "custom"],
-            default: "medium",
-        },
-    }],
-    isActive: {
-        type: Boolean,
-        default: true,
-    },
-    createdAt: {
-        type: Date,
-        default: Date.now,
-    },
-    updatedAt: {
-        type: Date,
-        default: Date.now,
-    },
+  ],
+  isActive: {
+    type: Boolean,
+    default: true,
+  },
+  tenant: {
+    type: String,
+    enum: ["halal-food-sales", "pqf", "data-tech", "ms-foods"],
+    default: "halal-food-sales",
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now,
+  },
 });
 
-truckScheduleSchema.index({ dayOfWeek: 1, region: 1 });
+TruckScheduleSchema.pre("save", function (next) {
+  this.updatedAt = Date.now();
+  next();
+});
 
-module.exports = mongoose.model("TruckSchedule", truckScheduleSchema);
+module.exports = mongoose.model("TruckSchedule", TruckScheduleSchema);

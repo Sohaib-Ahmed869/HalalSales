@@ -9,7 +9,7 @@ const fs = require("fs");
 const http = require("http");              // ← ADD THIS
 require("dotenv").config();
 
-const { initSocket } = require("./socket");
+const { initSocket, getIO } = require("./socket");
 // Import routes
 const authRoutes = require("./routes/auth.routes");
 const customerRoutes = require("./routes/customer.routes");
@@ -59,6 +59,8 @@ const emailLogRoutes = require('./routes/emailLogRoutes');
 const parserPaymentsRoutes = require('./routes/reconciliationModule/parserPayments.routes');
 const pdaRoutes = require('./routes/pdaRoutes');
 const mapRoutes = require("./routes/map.routes");
+const trackingRoutes = require("./routes/tracking.routes");
+const trackingSocket = require("./services/trackingSocket");
 const aiSummaryRoutes = require("./routes/aiSummary.routes");
 const areaAnalysisRoutes = require("./routes/areaAnalysis.routes");
 const reportingRoutes = require('./routes/reportingRoutes')
@@ -247,6 +249,7 @@ app.use("/api/financial-statements", require('./routes/financialStatements.route
 app.use("/api/reconciliation/parser-payments", parserPaymentsRoutes);
 app.use('/api/pda', pdaRoutes);
 app.use("/api/map", mapRoutes);
+app.use("/api/tracking", trackingRoutes);
 app.use("/api/duplicates", require("./routes/duplicates.routes"));
 app.use("/api/ai-summary", aiSummaryRoutes);
 app.use("/api/area-analysis", areaAnalysisRoutes);
@@ -277,6 +280,7 @@ app.use((err, req, res, next) => {
 });
 
 initSocket(httpServer);
+trackingSocket.init(getIO());
 // After your server starts
 httpServer.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);

@@ -244,6 +244,30 @@ const CustomerSchema = new Schema({
       max: 1,
     },
   },
+  // Logistics geocode (utils/geocodingService.js). The map prefers
+  // coordinates above and falls back to this.
+  geo: {
+    lat: { type: Number },
+    lng: { type: Number },
+    geocodedAt: { type: Date },
+    geocodeStatus: {
+      type: String,
+      enum: ["pending", "ok", "failed", "manual"],
+      default: "pending",
+    },
+    // Which provider produced lat/lng and how sure it was; "low" = only
+    // town / postcode-area level or unverified.
+    source: { type: String, enum: ["photon", "ban", "postcodes.io", "google"] },
+    confidence: { type: String, enum: ["high", "low"] },
+    // addressKey() of the address this pin was geocoded from, so a stale pin
+    // is never reused.
+    addressKey: { type: String },
+  },
+  fulfillmentMethod: {
+    type: String,
+    enum: ["delivery", "pickup"],
+    default: "delivery",
+  },
   // Mirror of the BP account balance in SAP (BusinessPartners.CurrentAccountBalance).
   // Negative means the customer is in credit (prepaid). Maintained by
   // services/sapCustomerBalanceSync.service.js - do not derive it from the local

@@ -170,9 +170,36 @@ const updateLastLogin = async (req, res, next) => {
   }
 };
 
+// Same check as `auth`, for callers that have a token but no Express request
+// (socket.io handshake). Returns the user, or null if the token is missing/invalid.
+const verifyToken = async (token) => {
+  if (!token) return null;
+  const decoded = jwt.verify(String(token).replace("Bearer ", ""), JWT_SECRET);
+  return User.findOne({ _id: decoded.userId, deactivated: false });
+};
+
+// Short-lived token limited to one purpose (e.g. "tiles": map tile image URLs,
+// which can't carry an Authorization header), so the user's login token never
+// appears in a URL.
+const signScopedToken = (user, scope, expiresIn = "12h") =>
+  jwt.sign({ userId: String(user._id), scope }, JWT_SECRET, { expiresIn });
+
+// Returns the decoded payload, or null if invalid, expired or another scope.
+const verifyScopedToken = (token, scope) => {
+  try {
+    const decoded = jwt.verify(String(token || ""), JWT_SECRET);
+    return decoded.scope === scope ? decoded : null;
+  } catch {
+    return null;
+  }
+};
+
 module.exports = {
   auth,
   authAllowQueryToken,
+  verifyToken,
+  signScopedToken,
+  verifyScopedToken,
   checkRole,
   canManageUser,
   canManageCustomer,
