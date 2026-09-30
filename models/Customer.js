@@ -67,6 +67,10 @@ const CustomerSchema = new Schema({
       enum: ["pending", "ok", "failed", "manual"],
       default: "pending",
     },
+    // Which provider produced lat/lng (utils/geocodingService.js) and how
+    // sure it was; "low" = only town / postcode-area level or unverified.
+    source: { type: String, enum: ["photon", "ban", "postcodes.io", "google"] },
+    confidence: { type: String, enum: ["high", "low"] },
   },
   openingTime: {
     type: String, // "HH:MM"
