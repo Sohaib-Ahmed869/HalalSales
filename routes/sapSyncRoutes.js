@@ -14,4 +14,10 @@ router.post("/sync-all", sapSyncController.syncAllCustomersWithSAP);
 // Sync a single customer
 router.post("/sync-customer/:customerId", sapSyncController.syncSingleCustomer);
 
+// Pull outstanding balances down from SAP (?dryRun=true to preview)
+router.post("/sync-balances", sapSyncController.syncCustomerBalances);
+
+// Refresh one customer's balance from SAP
+router.post("/sync-balance/:cardCode", sapSyncController.syncCustomerBalance);
+
 module.exports = router;

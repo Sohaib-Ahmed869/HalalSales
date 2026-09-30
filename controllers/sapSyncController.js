@@ -6,6 +6,10 @@ const {
     createCustomerInSAPWithUniqueCode,
     checkCustomerExistsInSAP,
 } = require("../utils/sapB1CustomerIntegration");
+const {
+    syncAllCustomerBalancesFromSAP,
+    syncCustomerBalanceFromSAP,
+} = require("../services/sapCustomerBalanceSync.service");
 
 // Sync all customers with SAP and assign proper CardCodes
 exports.syncAllCustomersWithSAP = async (req, res) => {
@@ -222,6 +226,54 @@ exports.getSyncStatus = async (req, res) => {
         return res.status(500).json({
             success: false,
             message: "Failed to get sync status",
+            error: error.message,
+        });
+    }
+};
+// Pull every customer's account balance down from SAP so the outstanding-balance
+// figures in the app match the BP Master Data screen. Also runs nightly - see
+// services/sapCustomerBalanceSync.service.js.
+exports.syncCustomerBalances = async (req, res) => {
+    try {
+        const dryRun = req.query.dryRun === "true" || req.body?.dryRun === true;
+        const stats = await syncAllCustomerBalancesFromSAP({ dryRun });
+
+        return res.status(200).json({
+            success: true,
+            message: dryRun
+                ? `Dry run: ${stats.balancesChanged} customer balances are out of sync with SAP`
+                : `Updated ${stats.customersUpdated} customer balances from SAP`,
+            data: stats,
+        });
+    } catch (error) {
+        console.error("Error syncing customer balances:", error.message);
+        return res.status(500).json({
+            success: false,
+            message: "Failed to sync customer balances from SAP",
+            error: error.message,
+        });
+    }
+};
+
+// Refresh a single customer's balance on demand.
+exports.syncCustomerBalance = async (req, res) => {
+    try {
+        const { cardCode } = req.params;
+        const balance = await syncCustomerBalanceFromSAP(cardCode);
+
+        return res.status(200).json({
+            success: true,
+            message: `Balance for ${cardCode} refreshed from SAP`,
+            data: { CardCode: cardCode, outstandingBalance: balance },
+        });
+    } catch (error) {
+        console.error(
+            `Error syncing balance for ${req.params.cardCode}:`,
+            error.message
+        );
+        return res.status(500).json({
+            success: false,
+            message: "Failed to sync customer balance from SAP",
             error: error.message,
         });
     }

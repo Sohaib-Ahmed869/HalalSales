@@ -9,6 +9,27 @@ const CallData = require("../models/CallData");
 const Deal = require("../models/Deal");
 const mongoose = require("mongoose");
 
+// Per-invoice balance for use inside a $group $sum.
+//
+// Only invoices SAP still reports as open carry a balance. A closed invoice was
+// settled - by a payment, a credit note or a reconciliation - so it contributes
+// nothing, regardless of what the local mirror's PaidToDate says. Summing
+// (DocTotal - PaidToDate) over every invoice used to inflate customer balances
+// by orders of magnitude, because closed invoices keep whatever PaidToDate they
+// were imported with (usually 0).
+const OPEN_INVOICE_BALANCE_EXPR = {
+  $cond: [
+    { $in: ["$DocumentStatus", ["bost_Open", "O"]] },
+    {
+      $max: [
+        0,
+        { $subtract: ["$DocTotal", { $ifNull: ["$PaidToDate", 0] }] },
+      ],
+    },
+    0,
+  ],
+};
+
 const calculatePaymentTotal = (payment) => {
   return (
     (payment.CashSum || 0) +
@@ -490,7 +511,15 @@ exports.getCustomerJourney = async (req, res) => {
       return sum + actualPaidAmount;
     }, 0);
 
-    const outstandingBalanceFromLinks = invoices.reduce((sum, inv) => {
+    // Only invoices still open carry a balance. Closed invoices were settled in
+    // SAP (by a payment, a credit note or a reconciliation) and must not be
+    // counted, even when the local mirror never caught up on their PaidToDate.
+    const isOpenInvoice = (inv) =>
+      ["bost_Open", "O"].includes(inv.DocumentStatus);
+
+    const openInvoiceBalance = invoices.reduce((sum, inv) => {
+      if (!isOpenInvoice(inv)) return sum;
+
       const paymentLinksForInvoice = paymentLinks.filter(
         (link) => link.invoiceNumber === inv.DocNum
       );
@@ -502,8 +531,25 @@ exports.getCustomerJourney = async (req, res) => {
         inv.PaidToDate || 0,
         totalPaymentsFromLinks
       );
-      return sum + (inv.DocTotal - actualPaidAmount);
+      // An overpaid invoice must not push the total negative - customer-level
+      // credit is tracked separately on Customer.outstandingBalance.
+      return sum + Math.max(0, (inv.DocTotal || 0) - actualPaidAmount);
     }, 0);
+
+    // SAP's netted BP account balance, kept fresh by the nightly balance sync.
+    // Preferred over the locally derived figure whenever it is available and the
+    // caller is looking at the customer's whole history (a date-filtered view
+    // can only be answered from the local invoices).
+    const isDateFiltered = Boolean(startDate || endDate);
+    const sapAccountBalance =
+      typeof customer.outstandingBalance === "number"
+        ? customer.outstandingBalance
+        : null;
+
+    const outstandingBalance =
+      !isDateFiltered && sapAccountBalance !== null
+        ? sapAccountBalance
+        : openInvoiceBalance;
 
     const metrics = {
       totalInvoices: invoices.length,
@@ -517,7 +563,15 @@ exports.getCustomerJourney = async (req, res) => {
         0
       ), // Keep gross for reference
       totalPaidAmount: totalPaidAmountFromLinks,
-      outstandingBalance: outstandingBalanceFromLinks,
+      outstandingBalance,
+      // Kept alongside so the UI can show where the figure came from.
+      openInvoiceBalance,
+      sapAccountBalance,
+      outstandingBalanceSource:
+        outstandingBalance === sapAccountBalance && !isDateFiltered
+          ? "sap"
+          : "open_invoices",
+      sapBalanceSyncedAt: customer.sapBalanceSyncedAt || null,
       averagePaymentTime: calculateAveragePaymentTime(invoices, paymentLinks),
       paymentMethods: analyzePaymentMethods(payments),
       relationshipDuration:
@@ -964,6 +1018,7 @@ exports.getCustomerJourneySummary = async (req, res) => {
         invoiceCount: { $sum: 1 },
         totalSpent: { $sum: "$DocTotal" },
         totalPaid: { $sum: "$PaidToDate" },
+        openBalance: { $sum: OPEN_INVOICE_BALANCE_EXPR },
         // Removed the large invoices array
       },
     });
@@ -984,7 +1039,7 @@ exports.getCustomerJourneySummary = async (req, res) => {
     // Add derived fields
     pipeline.push({
       $addFields: {
-        outstandingBalance: { $subtract: ["$totalSpent", "$totalPaid"] },
+        outstandingBalance: "$openBalance",
         daysSinceFirstInvoice: {
           $divide: [
             { $subtract: [new Date(), "$firstInvoice"] },
@@ -1351,12 +1406,13 @@ exports.getCustomerJourneyAnalytics = async (req, res) => {
           invoiceCount: { $sum: 1 },
           totalSpent: { $sum: "$DocTotal" },
           totalPaid: { $sum: "$PaidToDate" },
+          openBalance: { $sum: OPEN_INVOICE_BALANCE_EXPR },
         },
       },
       // Add calculated fields
       {
         $addFields: {
-          outstandingBalance: { $subtract: ["$totalSpent", "$totalPaid"] },
+          outstandingBalance: "$openBalance",
           daysSinceLastInvoice: {
             $divide: [
               { $subtract: [new Date(), "$lastInvoice"] },
@@ -1696,6 +1752,7 @@ exports.getInvoicesBySegment = async (req, res) => {
           invoiceCount: { $sum: 1 },
           totalSpent: { $sum: "$DocTotal" },
           totalPaid: { $sum: "$PaidToDate" },
+          openBalance: { $sum: OPEN_INVOICE_BALANCE_EXPR },
           firstInvoice: { $min: "$DocDate" },
           lastInvoice: { $max: "$DocDate" },
         },
@@ -1703,7 +1760,7 @@ exports.getInvoicesBySegment = async (req, res) => {
       // Add calculated fields
       {
         $addFields: {
-          outstandingBalance: { $subtract: ["$totalSpent", "$totalPaid"] },
+          outstandingBalance: "$openBalance",
           averageOrderValue: { $divide: ["$totalSpent", "$invoiceCount"] },
         },
       }

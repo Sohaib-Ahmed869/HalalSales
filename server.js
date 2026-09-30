@@ -90,6 +90,7 @@ const ringoverExportRoutes = require('./routes/ringoverExport.routes');
 const { startDailyCron } = require('./services/ringoverDailyExportCron');
 const invoiceEmailSettingsRoutes = require('./routes/invoiceEmailSettings.routes');
 const { initInvoiceEmailCron } = require('./services/dailyInvoiceEmailCron');
+const { startCustomerBalanceSyncCron } = require('./services/sapCustomerBalanceSync.service');
 // Initialize express app
 const app = express();
 
@@ -297,6 +298,14 @@ httpServer.listen(PORT, () => {
     .catch((error) =>
       console.error("❌ Error starting daily invoice email cron:", error)
     );
+
+  // Pull customer account balances down from SAP nightly, after the invoice import
+  try {
+    startCustomerBalanceSyncCron();
+    console.log("💰 Customer balance sync cron started");
+  } catch (error) {
+    console.error("❌ Error starting customer balance sync cron:", error);
+  }
 });
 // Handle unhandled promise rejections
 process.on("unhandledRejection", (err) => {

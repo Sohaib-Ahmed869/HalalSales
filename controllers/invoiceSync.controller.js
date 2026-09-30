@@ -814,6 +814,10 @@ exports.syncInvoiceStatusesFromSAP = async (req, res) => {
                                 UpdateDate: new Date(),
                                 LocalStatus: "Synced",
                                 paymentStatus: "Fully Paid",
+                                // PaidToDate is what every balance calculation in the app
+                                // reads. Leaving it behind on a closed invoice makes the
+                                // invoice look permanently unpaid.
+                                PaidToDate: invoice.DocTotal,
                                 "paymentTracking.remainingBalance": 0,
                                 "paymentTracking.totalPaidAmount": invoice.DocTotal,
                                 U_Notes: (invoice.U_Notes || "") + ` [Auto-closed via invoice status sync on ${new Date().toISOString()}]`,
@@ -1063,19 +1067,27 @@ async function updateCustomerInvoiceTotals(cardCode) {
         if (invoiceTotals.length > 0) {
             const totals = invoiceTotals[0];
 
+            // NOTE: outstandingBalance is deliberately not written here. It mirrors
+            // SAP's BusinessPartners.CurrentAccountBalance (which nets credit notes,
+            // down payments and journal entries, and goes negative for prepaid
+            // customers) and is maintained by
+            // services/sapCustomerBalanceSync.service.js. Deriving it from the local
+            // open-invoice mirror produced figures that drifted from SAP by
+            // thousands of euros.
             await Customer.findOneAndUpdate(
                 { CardCode: cardCode },
                 {
                     totalInvoiceAmount: totals.totalInvoiceAmount,
                     totalInvoicePaid: totals.totalPaid,
-                    outstandingBalance: totals.openInvoiceAmount,
+                    openInvoiceAmount: totals.openInvoiceAmount,
+                    openInvoiceCount: totals.openInvoices,
                 }
             );
 
             console.log(`✅ Updated totals for customer ${cardCode}:`);
             console.log(`   Total Invoices: ${totals.totalInvoiceAmount}`);
             console.log(`   Total Paid: ${totals.totalPaid}`);
-            console.log(`   Outstanding: ${totals.openInvoiceAmount}`);
+            console.log(`   Open invoice amount: ${totals.openInvoiceAmount}`);
         }
     } catch (error) {
         console.error(`Error updating totals for customer ${cardCode}:`, error);

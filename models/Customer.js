@@ -244,9 +244,17 @@ const CustomerSchema = new Schema({
       max: 1,
     },
   },
+  // Mirror of the BP account balance in SAP (BusinessPartners.CurrentAccountBalance).
+  // Negative means the customer is in credit (prepaid). Maintained by
+  // services/sapCustomerBalanceSync.service.js - do not derive it from the local
+  // invoice mirror, which lags SAP and can never go negative.
   outstandingBalance: {
     type: Number,
     default: 0,
+  },
+  sapBalanceSyncedAt: {
+    type: Date,
+    default: null,
   },
   outstandingBalanceUsed: {
     type: Number,
@@ -346,6 +354,19 @@ const CustomerSchema = new Schema({
   },
 
   totalInvoicePaid: {
+    type: Number,
+    default: 0,
+  },
+
+  // Derived from the local invoice mirror (invoices still flagged open). Useful
+  // for ageing/collections views; not the same thing as outstandingBalance,
+  // which is SAP's netted account balance.
+  openInvoiceAmount: {
+    type: Number,
+    default: 0,
+  },
+
+  openInvoiceCount: {
     type: Number,
     default: 0,
   },
