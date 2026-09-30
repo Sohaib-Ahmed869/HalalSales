@@ -14,6 +14,9 @@ const RoadDistanceCacheSchema = new mongoose.Schema(
     // so haversine x factor was stored instead (re-checked after the TTL).
     source: { type: String, enum: ["road", "estimate"], default: "road" },
     fetchedAt: { type: Date, default: Date.now },
+    // Set for providers whose terms limit caching (Google: 30 days); the
+    // document is deleted at this time.
+    expiresAt: { type: Date },
   },
   { versionKey: false }
 );
@@ -21,5 +24,6 @@ const RoadDistanceCacheSchema = new mongoose.Schema(
 RoadDistanceCacheSchema.index({ from: 1, to: 1 }, { unique: true });
 // Road networks change slowly; refresh cached legs after 90 days.
 RoadDistanceCacheSchema.index({ fetchedAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 90 });
+RoadDistanceCacheSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 module.exports = mongoose.model("RoadDistanceCache", RoadDistanceCacheSchema);

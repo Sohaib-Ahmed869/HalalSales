@@ -5,14 +5,22 @@
 // failure so callers fall back to the haversine estimate in routeOptimizer.js
 // instead of breaking route planning.
 //
-// Providers, tried in this order:
-//   1. OpenRouteService (hosted API, truck profile "driving-hgv") - only when
+// Providers, tried in this order (each only if enabled):
+//   1. Google Routes API computeRouteMatrix - when GOOGLE_MAPS_API_KEY is set
+//      (see utils/googleMapsClient.js). Car roads, no traffic (traffic is
+//      applied afterwards per route by trafficEtaService). Billed per
+//      origin x destination pair, so legs are cached (GOOGLE_CACHE_DAYS).
+//   2. OpenRouteService (hosted API, truck profile "driving-hgv") - only when
 //      ORS_API_KEY is set. Free plan: daily request limits, no server needed.
-//   2. OSRM (public demo server by default - testing only).
-// If ORS fails (quota, outage, unroutable point) the whole matrix is fetched
-// from OSRM instead, so one request never mixes car and truck durations.
+//   3. OSRM (public demo server by default - testing only).
+// If one fails (quota, outage, unroutable point) the whole matrix is fetched
+// from the next instead, so one request never mixes providers.
 //
 // Env:
+//   GOOGLE_CACHE_DAYS     days a Google leg / line is kept, default 30
+//                         (Google's terms limit caching)
+//   GOOGLE_BLOCK_SIZE     max points per side of one Google request, default 25
+//                         (Google's limit is 625 pairs per request)
 //   ORS_API_KEY           enables OpenRouteService (free key from openrouteservice.org)
 //   ORS_URL               default https://api.openrouteservice.org
 //   ORS_PROFILE           default "driving-hgv" (truck); "driving-car" also works
@@ -20,18 +28,19 @@
 //                         (hosted limit is 3,500 origin x destination pairs)
 //   ORS_DURATION_FACTOR   multiplier on ORS durations, default 1
 //   ORS_ENABLED           set to "false" to skip ORS even with a key
-//   OSRM_URL              base URL, default https://router.project-osrm.org
-//                         (public demo server: testing only - self-host for
-//                         production, see Logistics docs)
+//   OSRM_URL              base URL; setting it enables OSRM. Without it OSRM is
+//                         off unless OSRM_ENABLED=true (then it uses the public
+//                         demo server https://router.project-osrm.org: testing only)
 //   OSRM_PROFILE          default "driving"
 //   OSRM_TIMEOUT_MS       default 15000 (also used for ORS)
 //   OSRM_DURATION_FACTOR  multiplier on OSRM durations, default 1 (raise it,
 //                         e.g. 1.2, to reflect slower loaded trucks)
-//   OSRM_ENABLED          set to "false" to skip OSRM
+//   OSRM_ENABLED          "true" = on (demo server if no OSRM_URL), "false" = off
 //   OSRM_BLOCK_SIZE       max points per side of one /table request, default 40
 
 const axios = require("axios");
 const RoadDistanceCache = require("../models/RoadDistanceCache");
+const google = require("./googleMapsClient");
 const RouteGeometryCache = require("../models/RouteGeometryCache");
 const { pointKey, haversineKm } = require("./routeOptimizer");
 
@@ -47,7 +56,10 @@ function osrmConfig() {
     url: (process.env.OSRM_URL || "https://router.project-osrm.org").replace(/\/+$/, ""),
     profile: process.env.OSRM_PROFILE || "driving",
     durationFactor: Number(process.env.OSRM_DURATION_FACTOR) || 1,
-    enabled: process.env.OSRM_ENABLED !== "false",
+    // Off unless configured: the default URL is the public demo server
+    // (testing only), so a server with no OSRM settings never uses it.
+    enabled:
+      process.env.OSRM_ENABLED === "true" || (Boolean(process.env.OSRM_URL) && process.env.OSRM_ENABLED !== "false"),
     block: Math.max(2, Number(process.env.OSRM_BLOCK_SIZE) || 40),
     // OSRM entries were cached before providers existed; keep their plain
     // "lat,lng" keys so the existing cache stays valid.
@@ -70,8 +82,19 @@ function orsConfig() {
   };
 }
 
+function googleConfig() {
+  return {
+    name: "google",
+    enabled: google.config().routesEnabled,
+    durationFactor: 1,
+    block: Math.max(2, Math.min(25, Number(process.env.GOOGLE_BLOCK_SIZE) || 25)),
+    cachePrefix: "google|",
+    cacheDays: Number(process.env.GOOGLE_CACHE_DAYS) || 30,
+  };
+}
+
 function providers() {
-  return [orsConfig(), osrmConfig()].filter((p) => p.enabled);
+  return [googleConfig(), orsConfig(), osrmConfig()].filter((p) => p.enabled);
 }
 
 function isValidPoint(p) {
@@ -86,6 +109,7 @@ function parseKey(key) {
 // One matrix block: rows = sources, cols = destinations.
 // Returns { distances[][] (metres), durations[][] (seconds) }.
 async function fetchBlock(cfg, srcPts, dstPts) {
+  if (cfg.name === "google") return google.computeRouteMatrix(srcPts, dstPts);
   if (cfg.name === "ors") {
     const locations = [...srcPts, ...dstPts].map((p) => [p.lng, p.lat]);
     const { data } = await axios.post(
@@ -118,6 +142,9 @@ async function fetchBlock(cfg, srcPts, dstPts) {
 }
 
 function errorText(error) {
+  if (error.response?.config?.url?.includes("googleapis") || Array.isArray(error.response?.data)) {
+    return google.errorText(error);
+  }
   const body = error.response?.data;
   const detail = body?.error?.message || body?.error || body?.message;
   return `${error.message}${detail ? ` (${typeof detail === "string" ? detail : JSON.stringify(detail)})` : ""}`;
@@ -194,7 +221,15 @@ async function matrixFrom(cfg, keys, index) {
           upserts.push({
             updateOne: {
               filter: { from: cacheKey(keys[i]), to: cacheKey(keys[j]) },
-              update: { $set: { distanceKm: km, durationMin: min, source, fetchedAt: new Date() } },
+              update: {
+                $set: {
+                  distanceKm: km,
+                  durationMin: min,
+                  source,
+                  fetchedAt: new Date(),
+                  ...(cfg.cacheDays ? { expiresAt: new Date(Date.now() + cfg.cacheDays * 86400000) } : {}),
+                },
+              },
               upsert: true,
             },
           });
@@ -289,7 +324,28 @@ async function saveRouteGeometry(points, positions, provider) {
   }
 }
 
+// Google line in chunks of <= 12 waypoints (10 intermediates keeps each
+// request on the cheaper Essentials price), joined end to end.
+const GOOGLE_LINE_CHUNK = 12;
+async function fetchGoogleGeometry(pts) {
+  const positions = [];
+  for (let start = 0; start < pts.length - 1; start += GOOGLE_LINE_CHUNK - 1) {
+    const chunk = pts.slice(start, start + GOOGLE_LINE_CHUNK);
+    if (chunk.length < 2) break;
+    const { legs } = await google.computeRoute(chunk);
+    legs.forEach((leg) =>
+      leg.positions.forEach((p) => {
+        const last = positions[positions.length - 1];
+        if (!last || last[0] !== p[0] || last[1] !== p[1]) positions.push(p);
+      })
+    );
+  }
+  if (positions.length < 2) throw new Error("Google returned no line");
+  return positions;
+}
+
 async function fetchGeometry(cfg, pts) {
+  if (cfg.name === "google") return fetchGoogleGeometry(pts);
   if (cfg.name === "ors") {
     if (pts.length > ORS_MAX_ROUTE_WAYPOINTS) throw new Error(`more than ${ORS_MAX_ROUTE_WAYPOINTS} waypoints`);
     const { data } = await axios.post(
@@ -332,10 +388,11 @@ async function getRouteGeometry(points) {
     console.warn("[roadDistance] geometry cache read failed:", error.message);
   }
 
-  // Drawing only: OSRM first (fast, no daily quota; measured 8 lines in
-  // 2.4 s vs 6.6-14.5 s on ORS, whose free plan allows 200 lines/day), ORS as
-  // the backup. With TomTom on, most lines are already saved above.
-  const chain = [osrmConfig(), orsConfig()].filter((p) => p.enabled);
+  // Drawing only: Google when configured, else OSRM (fast, no daily quota;
+  // measured 8 lines in 2.4 s vs 6.6-14.5 s on ORS, whose free plan allows
+  // 200 lines/day), ORS as the last backup. With traffic ETAs on (Google or
+  // TomTom), most lines are already saved above.
+  const chain = [googleConfig(), osrmConfig(), orsConfig()].filter((p) => p.enabled);
   for (const cfg of chain) {
     try {
       const positions = await fetchGeometry(cfg, pts);

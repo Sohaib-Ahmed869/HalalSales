@@ -2,7 +2,7 @@
 const Invoice = require("../models/Invoice");
 const SalesOrder = require("../models/SalesOrder");
 const Customer = require("../models/Customer");
-const { geocodeCustomer } = require("../utils/geocodingService");
+const { geocodeCustomer, deliveryPoint } = require("../utils/geocodingService");
 
 function tenantFromReq(req) {
   return req.query.tenant || "halal-food-sales";
@@ -15,7 +15,12 @@ function tenantFromReq(req) {
 // used for customers geocoded going forward via the Google API key in
 // customer.controller.js. Check coordinates first since that's where the
 // real, already-populated data is.
+// Prefers the pin for the delivery address (deliveryPoint); until that is
+// geocoded, falls back to whatever pin exists so the reference map keeps
+// showing the customer.
 function customerGeo(customer) {
+  const point = deliveryPoint(customer);
+  if (point.coords) return point.coords;
   if (customer?.coordinates?.lat != null && customer?.coordinates?.lng != null) return customer.coordinates;
   if (customer?.geo?.lat != null && customer?.geo?.lng != null) return customer.geo;
   return null;

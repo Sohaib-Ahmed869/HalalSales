@@ -3,23 +3,23 @@
 // Turns a Customer's address into lat/lng for the Sales Map Report / Truck
 // Schedules routing feature.
 //
-// Order of providers (all free, no API key except Google):
-//   1. Photon (https://photon.komoot.io) — the provider that populated
-//      customer.coordinates for the existing customers. Its answer is used
-//      directly only when it is "high confidence": a house/street-level
+// Order of providers:
+//   1. Google Geocoding API (utils/googleMapsClient.js) when
+//      GOOGLE_MAPS_API_KEY is set. Used directly unless Google itself says the
+//      match is only approximate / partial.
+//   2. Backup: Photon (https://photon.komoot.io, free) — the provider that
+//      populated customer.coordinates for the existing customers. Its answer
+//      is used directly only when it is "high confidence": a house/street-level
 //      match, in the customer's country, with the customer's postal code.
-//   2. Missing or low-confidence Photon answer -> a national service:
+//   3. Missing or low-confidence Photon answer -> a free national service:
 //        France: BAN / Géoplateforme (French government address database,
 //                https://data.geopf.fr/geocodage), filtered to the customer's
 //                postal code, accepted at score >= GEOCODE_BAN_MIN_SCORE.
 //        UK:     postcodes.io (Ordnance Survey / ONS postcode centroids —
 //                postcode level, ~15 addresses per postcode).
-//   3. Google Geocoding, only if GOOGLE_MAPS_API_KEY is set and billing is on
-//      (that project currently has billing disabled -> REQUEST_DENIED, so it
-//      is silently skipped).
 //   4. Nothing better found -> the best low-confidence answer we did get
-//      (BAN town-level > outward-code centroid > Photon), so a customer who
-//      used to be placed is never left unplaced by this change.
+//      (Google approximate > BAN town-level > outward-code centroid > Photon),
+//      so a customer who used to be placed is never left unplaced.
 // geo.source / geo.confidence record which provider won and how sure it was.
 //
 // Never throws in a way that breaks the caller's request/response flow —
@@ -27,9 +27,9 @@
 // address or an unreachable API never blocks customer create/update.
 
 const axios = require("axios");
+const google = require("./googleMapsClient");
 
 const PHOTON_URL = "https://photon.komoot.io/api/";
-const GOOGLE_URL = "https://maps.googleapis.com/maps/api/geocode/json";
 const BAN_URL = process.env.GEOCODE_BAN_URL || "https://data.geopf.fr/geocodage/search";
 const POSTCODES_URL = (process.env.GEOCODE_POSTCODES_URL || "https://api.postcodes.io").replace(/\/+$/, "");
 const BAN_MIN_SCORE = Number(process.env.GEOCODE_BAN_MIN_SCORE) || 0.6;
@@ -153,17 +153,11 @@ async function geocodeWithPostcodesIo(address) {
   return null;
 }
 
-async function geocodeWithGoogle(addressString) {
-  const apiKey = process.env.GOOGLE_MAPS_API_KEY;
-  if (!apiKey) return null;
-  const response = await axios.get(GOOGLE_URL, {
-    params: { address: addressString, key: apiKey },
-    timeout: TIMEOUT_MS,
-  });
-  if (response.data?.status !== "OK") return null;
-  const result = response.data?.results?.[0];
-  if (!result) return null;
-  return { lat: result.geometry.location.lat, lng: result.geometry.location.lng };
+async function geocodeWithGoogle(addressString, country) {
+  if (!google.config().geocodingEnabled) return null;
+  const r = await google.geocode(addressString, { region: country === "GB" ? "uk" : country === "FR" ? "fr" : undefined });
+  if (!r) return null;
+  return { lat: r.lat, lng: r.lng, confident: r.locationType !== "APPROXIMATE" && !r.partialMatch };
 }
 
 async function tryProvider(name, cardCode, fn) {
@@ -180,6 +174,9 @@ async function geocodeAddress(address, cardCode = "") {
   const addressString = buildAddressString(address);
   if (!addressString) return null;
   const country = detectCountry(address);
+
+  const googleHit = await tryProvider("Google", cardCode, () => geocodeWithGoogle(addressString, country));
+  if (googleHit?.confident) return { lat: googleHit.lat, lng: googleHit.lng, source: "google", confidence: "high" };
 
   const photon = await tryProvider("Photon", cardCode, () => geocodeWithPhoton(addressString));
   if (photonIsConfident(photon, address, country)) {
@@ -198,21 +195,82 @@ async function geocodeAddress(address, cardCode = "") {
     return { lat: national.lat, lng: national.lng, source: national.source, confidence: "high" };
   }
 
-  const google = await tryProvider("Google", cardCode, () => geocodeWithGoogle(addressString));
-  if (google) return { lat: google.lat, lng: google.lng, source: "google", confidence: "high" };
-
-  // Low-confidence fallbacks: the national answer is at least inside the
-  // customer's postal code / town, so it beats an unverified Photon hit.
+  // Low-confidence fallbacks: Google's approximate match, then the national
+  // answer (at least inside the customer's postal code / town), both of
+  // which beat an unverified Photon hit.
+  if (googleHit) return { lat: googleHit.lat, lng: googleHit.lng, source: "google", confidence: "low" };
   if (national) return { lat: national.lat, lng: national.lng, source: national.source, confidence: "low" };
   if (photon) return { lat: photon.lat, lng: photon.lng, source: "photon", confidence: "low" };
   return null;
 }
 
-// Geocodes a single Customer document in place and saves it. Sets
-// geo.geocodeStatus to "ok" or "failed" (never leaves it stuck on "pending"
-// after a real attempt, so the "needs geocoding" admin queue reflects reality).
+// --- Which address a customer is delivered to, and which pin belongs to it ---
+//
+// Customers can have a separate `deliveryAddress` (synced, not declared in
+// the Mongoose schema, like `coordinates`: read it via .lean()/.toObject()).
+// Trucks go there, so the pin must be geocoded from it, not from the billing
+// `address`. The pre-existing `coordinates` (external sync) were geocoded from
+// the billing address (their displayName shows which), so they are only used
+// when they match the delivery address.
+
+const plain = (customer) => (customer && typeof customer.toObject === "function" ? customer.toObject() : customer || {});
+
+const hasAddress = (a) => Boolean(a && (String(a.street || "").trim() || String(a.zipCode || "").trim()));
+
+// Normalised "street|zip|city" for comparing addresses (case, accents,
+// punctuation and spacing ignored).
+function addressKey(address) {
+  if (!hasAddress(address)) return "";
+  const norm = (v) =>
+    String(v || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  return [address.street, address.zipCode, address.city].map(norm).join("|");
+}
+
+// The address trucks deliver to: deliveryAddress when it has one, else address.
+function deliveryAddressOf(customer) {
+  const c = plain(customer);
+  return hasAddress(c.deliveryAddress) ? c.deliveryAddress : c.address;
+}
+
+/**
+ * The customer's delivery address and a pin that really belongs to it.
+ * @returns {{ address: object|undefined, coords: {lat:number,lng:number}|null }}
+ *   coords null = the delivery address still needs geocoding
+ */
+function deliveryPoint(customer) {
+  const c = plain(customer);
+  const address = deliveryAddressOf(c);
+  const key = addressKey(address);
+  const isBilling = !hasAddress(c.deliveryAddress) || key === addressKey(c.address);
+  const ok = (p) => p && Number.isFinite(p.lat) && Number.isFinite(p.lng);
+
+  // this feature's own geocode: valid if made from this address (older ones
+  // have no addressKey and were made from the billing address)
+  // a pin a dispatcher placed by hand always wins
+  if (ok(c.geo) && c.geo.geocodeStatus === "manual") return { address, coords: { lat: c.geo.lat, lng: c.geo.lng } };
+  if (ok(c.geo) && (c.geo.addressKey ? c.geo.addressKey === key : isBilling)) {
+    return { address, coords: { lat: c.geo.lat, lng: c.geo.lng } };
+  }
+  // external-sync coordinates: made from the billing address
+  if (ok(c.coordinates) && isBilling) {
+    return { address, coords: { lat: c.coordinates.lat, lng: c.coordinates.lng } };
+  }
+  return { address, coords: null };
+}
+
+// Geocodes a single Customer document's delivery address (see
+// deliveryAddressOf) in place and saves it. Sets geo.geocodeStatus to "ok" or
+// "failed" (never leaves it stuck on "pending" after a real attempt, so the
+// "needs geocoding" admin queue reflects reality). geo.addressKey records
+// which address the pin is for.
 async function geocodeCustomer(customer) {
-  const addressString = buildAddressString(customer.address);
+  const address = deliveryAddressOf(customer);
+  const addressString = buildAddressString(address);
 
   if (!addressString) {
     customer.geo = { geocodeStatus: "failed" };
@@ -220,7 +278,7 @@ async function geocodeCustomer(customer) {
     return customer;
   }
 
-  const coords = await geocodeAddress(customer.address, customer.CardCode);
+  const coords = await geocodeAddress(address, customer.CardCode);
 
   if (!coords) {
     customer.geo = { geocodedAt: new Date(), geocodeStatus: "failed" };
@@ -235,9 +293,18 @@ async function geocodeCustomer(customer) {
     geocodeStatus: "ok",
     source: coords.source,
     confidence: coords.confidence,
+    addressKey: addressKey(address),
   };
   await customer.save();
   return customer;
 }
 
-module.exports = { geocodeCustomer, geocodeAddress, buildAddressString, detectCountry };
+module.exports = {
+  geocodeCustomer,
+  geocodeAddress,
+  buildAddressString,
+  detectCountry,
+  addressKey,
+  deliveryAddressOf,
+  deliveryPoint,
+};

@@ -5,7 +5,9 @@
 const crypto = require("crypto");
 const TruckDevice = require("../models/TruckDevice");
 const TruckPosition = require("../models/TruckPosition");
-const { emitPosition } = require("../services/trackingSocket");
+const { emitPosition, emitStopUpdate, emitEtaUpdate } = require("../services/trackingSocket");
+const { processFix } = require("../utils/autoDelivery");
+const { maybeUpdateLiveEtas } = require("../utils/liveEta");
 
 const TENANTS = ["halal-food-sales", "pqf", "data-tech", "ms-foods"];
 
@@ -127,6 +129,27 @@ exports.ingest = async (req, res) => {
         ...device.lastPosition.toObject(),
         lastSeenAt: device.lastSeenAt,
       });
+
+      // Geofence: mark the truck's stops delivered once it has stayed at
+      // them. Only fixes that move the truck forward in time count (a late,
+      // out-of-order fix would otherwise put it back at an old stop); fixes
+      // buffered while offline still arrive in order. A failure here must
+      // never make the phone retry the fix.
+      let stopChanged = false;
+      try {
+        const changed = await processFix(device, fix);
+        stopChanged = changed.length > 0;
+        changed.forEach((c) => emitStopUpdate(device.tenant, { truckNumber: device.truckNumber, ...c }));
+      } catch (error) {
+        console.error("auto-delivery error:", error.message);
+      }
+
+      // Live ETAs for the remaining stops: every few minutes, and right away
+      // after an arrival/delivery. Not awaited, so the phone gets its reply at once.
+      maybeUpdateLiveEtas(device, fix, {
+        force: stopChanged,
+        onUpdated: (r) => emitEtaUpdate(device.tenant, { truckNumber: device.truckNumber, ...r }),
+      });
     }
 
     res.status(200).send("OK");
@@ -158,7 +181,14 @@ exports.listDevices = async (req, res) => {
     const devices = await TruckDevice.find({ tenant: tenantFromReq(req), isActive: true })
       .sort({ truckNumber: 1 })
       .lean();
-    res.json({ ingestUrl: ingestUrl(req), devices: devices.map(publicDevice) });
+    res.json({
+      ingestUrl: ingestUrl(req),
+      // true = TRACKING_PUBLIC_URL is set (e.g. a tunnel while testing) and the
+      // portal must show it; otherwise the portal uses the backend address it
+      // is already talking to, which is right behind any proxy.
+      ingestUrlConfigured: Boolean(process.env.TRACKING_PUBLIC_URL),
+      devices: devices.map(publicDevice),
+    });
   } catch (error) {
     res.status(500).json({ message: "Failed to load devices", error: error.message });
   }

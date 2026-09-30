@@ -39,4 +39,15 @@ function emitPosition(tenant, payload) {
   if (io) io.to(`tracking:${tenant}`).emit("truck:position", payload);
 }
 
-module.exports = { init, emitPosition };
+// A stop's GPS arrival / delivery changed (utils/autoDelivery.js), so open
+// Logistics pages reload their routes.
+function emitStopUpdate(tenant, payload) {
+  if (io) io.to(`tracking:${tenant}`).emit("truck:stop", payload);
+}
+
+// A truck's live ETAs were recomputed (utils/liveEta.js).
+function emitEtaUpdate(tenant, payload) {
+  if (io) io.to(`tracking:${tenant}`).emit("truck:eta", payload);
+}
+
+module.exports = { init, emitPosition, emitStopUpdate, emitEtaUpdate };

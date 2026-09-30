@@ -43,6 +43,17 @@ const OrderEntrySchema = new Schema(
     driveMin: { type: Number },
     legKm: { type: Number },
     plannedArrival: { type: Date },
+    // Set from the truck's GPS (utils/autoDelivery.js): arrivedAt = first fix
+    // within the delivery radius (cleared on a drive-by), deliveredAt = when
+    // the stop was marked delivered, deliveredBy = "gps" | "manual".
+    arrivedAt: { type: Date },
+    deliveredAt: { type: Date },
+    deliveredBy: { type: String, enum: ["gps", "manual"] },
+    // Live estimate from the truck's GPS (utils/liveEta.js); the planned
+    // etaMin/waitMin above are never changed by it. Same clock as etaMin.
+    liveEtaMin: { type: Number },
+    liveWaitMin: { type: Number },
+    liveLate: { type: Boolean },
     status: {
       type: String,
       enum: ["pending", "delivered", "failed", "infeasible"],
@@ -121,6 +132,12 @@ const TruckRouteSchema = new Schema({
   trafficAt: { type: Date },
   trafficDepartAt: { type: String },
   trafficDelayMin: { type: Number },
+  trafficProvider: { type: String }, // "google" | "tomtom"
+  // When the stops' live ETAs were last recomputed from GPS, how ("google" =
+  // live traffic, "estimate") and from where (utils/liveEta.js).
+  liveEtaAt: { type: Date },
+  liveEtaProvider: { type: String },
+  liveEtaFrom: { lat: Number, lng: Number },
   createdAt: {
     type: Date,
     default: Date.now,

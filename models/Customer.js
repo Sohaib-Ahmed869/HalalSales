@@ -71,6 +71,9 @@ const CustomerSchema = new Schema({
     // sure it was; "low" = only town / postcode-area level or unverified.
     source: { type: String, enum: ["photon", "ban", "postcodes.io", "google"] },
     confidence: { type: String, enum: ["high", "low"] },
+    // addressKey() of the address this pin was geocoded from (the delivery
+    // address when the customer has one), so a stale pin is never reused.
+    addressKey: { type: String },
   },
   openingTime: {
     type: String, // "HH:MM"

@@ -14,7 +14,7 @@ const {
   isBetterPlan,
 } = require("../utils/routeOptimizer");
 const { getWarehouse, regionForAddress } = require("../utils/regions");
-const { geocodeCustomer } = require("../utils/geocodingService");
+const { geocodeCustomer, deliveryPoint } = require("../utils/geocodingService");
 const { getMatrix, getRouteGeometry, saveRouteGeometry } = require("../utils/roadDistanceService");
 const { getTrafficLegs } = require("../utils/trafficEtaService");
 
@@ -272,9 +272,11 @@ exports.getRouteGeometry = async (req, res) => {
 // already has a usable geocode or has no address to geocode from.
 async function ensureGeocoded(customer) {
   if (!customer) return;
-  const hasGeo = customer.coordinates?.lat != null || customer.geo?.lat != null;
-  if (hasGeo) return;
-  const hasAddress = customer.address?.street || customer.address?.zipCode;
+  // A pin for the address trucks actually deliver to (deliveryAddress when
+  // set): billing-address coordinates don't count for a different address.
+  const { address, coords } = deliveryPoint(customer);
+  if (coords) return;
+  const hasAddress = address?.street || address?.zipCode;
   if (!hasAddress) return;
 
   try {
@@ -282,7 +284,7 @@ async function ensureGeocoded(customer) {
     if (!doc) return;
     await geocodeCustomer(doc);
     if (doc.geo?.geocodeStatus === "ok") {
-      customer.geo = { lat: doc.geo.lat, lng: doc.geo.lng, geocodeStatus: "ok" };
+      customer.geo = { lat: doc.geo.lat, lng: doc.geo.lng, geocodeStatus: "ok", addressKey: doc.geo.addressKey };
     }
   } catch (error) {
     console.error(`On-the-fly geocode failed for ${customer.CardCode}:`, error.message);
@@ -314,16 +316,13 @@ async function buildDeliverableOrder(deliveryNote, customersByCode, tenant) {
   // utils/geocodingService.js (Photon, free — Google is a second attempt
   // only, that Cloud project's billing is disabled). coordinates is checked
   // first since it's the larger, pre-existing dataset.
-  const geoSource =
-    customer?.coordinates?.lat != null && customer?.coordinates?.lng != null
-      ? customer.coordinates
-      : customer?.geo?.lat != null && customer?.geo?.lng != null
-      ? customer.geo
-      : null;
-
   // deliveryAddress (where trucks should actually go) takes precedence over
-  // the billing address when both exist on the customer record.
-  const address = customer ? customer.deliveryAddress || customer.address : undefined;
+  // the billing address, and the pin must belong to that same address
+  // (utils/geocodingService.js deliveryPoint): billing-address coordinates are
+  // never used for a customer delivered elsewhere.
+  const point = customer ? deliveryPoint(customer) : { address: undefined, coords: null };
+  const geoSource = point.coords;
+  const address = point.address;
 
   return {
     _id: deliveryNote._id,
@@ -610,7 +609,10 @@ exports.updateStopStatus = async (req, res) => {
     if (!stop) return res.status(404).json({ message: "Stop not found on this route" });
 
     stop.status = status;
-    if (status === "delivered") stop.actualArrival = new Date();
+    if (status === "delivered") {
+      stop.deliveredAt = new Date();
+      stop.deliveredBy = "manual";
+    }
     await route.save();
 
     res.json({ message: "Stop status updated", route });
@@ -684,6 +686,20 @@ async function roadMatrixFor(depot, stops) {
 async function resequenceRoute(route) {
   await sequenceRouteOrders(route);
   await applyTrafficEtas(route);
+  clearLiveEtas(route);
+}
+
+// A re-planned route's old live ETAs no longer match its order; the next GPS
+// fix recomputes them (utils/liveEta.js).
+function clearLiveEtas(route) {
+  route.liveEtaAt = undefined;
+  route.liveEtaProvider = undefined;
+  route.liveEtaFrom = undefined;
+  route.orders.forEach((o) => {
+    o.liveEtaMin = undefined;
+    o.liveWaitMin = undefined;
+    o.liveLate = undefined;
+  });
 }
 
 // Once a route's order is final, replaces its leg times/distances with
@@ -695,6 +711,7 @@ async function applyTrafficEtas(route) {
   route.trafficAt = undefined;
   route.trafficDepartAt = undefined;
   route.trafficDelayMin = undefined;
+  route.trafficProvider = undefined;
   const depot = getDepot(route.tenant);
   const stops = route.orders.map(toOptimizerStop);
   const geocoded = stops.filter(
@@ -703,11 +720,11 @@ async function applyTrafficEtas(route) {
   if (geocoded.length === 0) return;
 
   const waypoints = [depot, ...geocoded.map((s) => s.coordinates), depot];
-  const legs = await getTrafficLegs(waypoints, route.date, departureMinOf(route));
+  const legs = await getTrafficLegs(waypoints, route.date, departureMinOf(route), depot.timeZone);
   if (!legs) return;
   // Same waypoint order the geometry endpoint uses (route.orders is in
   // sequence order here), so the map draws TomTom's line with no extra call.
-  await saveRouteGeometry(waypoints, legs.positions, "tomtom");
+  await saveRouteGeometry(waypoints, legs.positions, legs.provider);
 
   const fixed = evaluateFixedRoute(stops, depot, departureMinOf(route), undefined, legs);
   const byId = new Map(fixed.sequence.map((s) => [s.id, s]));
@@ -727,6 +744,7 @@ async function applyTrafficEtas(route) {
   route.trafficAt = new Date();
   route.trafficDepartAt = legs.departAt;
   route.trafficDelayMin = legs.delayMin;
+  route.trafficProvider = legs.provider;
 }
 
 async function sequenceRouteOrders(route) {

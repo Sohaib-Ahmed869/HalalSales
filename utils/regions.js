@@ -10,8 +10,10 @@
 // Departments trimmed to {name, region} (frontend's `bounds`/`center`/`cities`
 // aren't needed for region lookup) — keep this in sync if regions.js changes.
 
-const FRANCE_WAREHOUSE = { lat: 48.922385, lng: 2.395789 };
-const UK_WAREHOUSE = { lat: 51.5074, lng: -0.1278 };
+// timeZone: the depot's local clock, which the naive "HH:MM" departure times
+// mean (used to turn them into exact timestamps for Google traffic ETAs).
+const FRANCE_WAREHOUSE = { lat: 48.922385, lng: 2.395789, timeZone: "Europe/Paris" };
+const UK_WAREHOUSE = { lat: 51.5074, lng: -0.1278, timeZone: "Europe/London" };
 
 const FRANCE_DEPARTMENTS = {
   "01": "Auvergne-Rhône-Alpes", "03": "Auvergne-Rhône-Alpes", "07": "Auvergne-Rhône-Alpes",

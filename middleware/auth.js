@@ -161,9 +161,27 @@ const updateLastLogin = async (req, res, next) => {
   }
 };
 
+// Short-lived token limited to one purpose (e.g. "tiles": map tile image URLs,
+// which can't carry an Authorization header), so the user's login token never
+// appears in a URL.
+const signScopedToken = (user, scope, expiresIn = "12h") =>
+  jwt.sign({ userId: String(user._id), scope }, JWT_SECRET, { expiresIn });
+
+// Returns the decoded payload, or null if invalid, expired or another scope.
+const verifyScopedToken = (token, scope) => {
+  try {
+    const decoded = jwt.verify(String(token || ""), JWT_SECRET);
+    return decoded.scope === scope ? decoded : null;
+  } catch {
+    return null;
+  }
+};
+
 module.exports = {
   auth,
   verifyToken,
+  signScopedToken,
+  verifyScopedToken,
   checkRole,
   canManageUser,
   canManageCustomer,

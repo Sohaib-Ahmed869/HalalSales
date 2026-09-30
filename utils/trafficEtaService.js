@@ -1,9 +1,17 @@
 // utils/trafficEtaService.js
 //
-// Traffic-aware drive times for an already-sequenced route, from TomTom's
-// Calculate Route API (one request per truck route: depot -> stops -> depot).
-// The stop ORDER still comes from the optimizer (OpenRouteService/OSRM
-// matrix); TomTom only replaces each leg's km/minutes so ETAs reflect traffic.
+// Traffic-aware drive times for an already-sequenced route (depot -> stops ->
+// depot). Provider: Google Routes API computeRoutes (TRAFFIC_AWARE, one
+// request per 25 stops) when GOOGLE_MAPS_API_KEY is set, otherwise TomTom's
+// Calculate Route API (one request per route) when TOMTOM_API_KEY is set.
+// The stop ORDER still comes from the optimizer (the planning matrix); this
+// only replaces each leg's km/minutes so ETAs reflect traffic.
+//
+// Google env: GOOGLE_TRAFFIC_ENABLED ("false" = skip Google here),
+// GOOGLE_TRAFFIC_DAILY_LIMIT (requests per server day, default 600).
+// The rest of this header describes TomTom; Google behaves the same way
+// (typical traffic for a later departure, live for "now", legs timed as one
+// continuous drive) but has no truck mode.
 //
 // Traffic model: for a route planned for later (e.g. tomorrow) TomTom uses
 // typical traffic for that departure time; for a departure that is now or
@@ -28,8 +36,12 @@
 
 const axios = require("axios");
 const { pointKey } = require("./routeOptimizer");
+const google = require("./googleMapsClient");
 
 const MAX_WAYPOINTS = 150;
+const GOOGLE_MAX_POINTS = 27; // origin + 25 intermediates + destination
+
+const googleEnabled = () => google.config().routesEnabled && process.env.GOOGLE_TRAFFIC_ENABLED !== "false";
 
 const config = () => ({
   key: process.env.TOMTOM_API_KEY || "",
@@ -77,9 +89,10 @@ function departAtFor(routeDate, departureMin, now = new Date()) {
  * @returns {Promise<null|{ index: Map<string,number>, distKm: number[][], durMin: number[][], delayMin: number, departAt: string, positions: Array<[number,number]> }>}
  *   a sparse matrix holding only consecutive legs, in the shape routeOptimizer's makeLegs expects
  */
-async function getTrafficLegs(points, routeDate, departureMin) {
+async function getTrafficLegs(points, routeDate, departureMin, timeZone) {
   const cfg = config();
-  if (!cfg.enabled) return null;
+  const provider = googleEnabled() ? "google" : cfg.enabled ? "tomtom" : null;
+  if (!provider) return null;
   if (points.length < 2 || points.length > MAX_WAYPOINTS) return null;
   if (!points.every((p) => p && Number.isFinite(p.lat) && Number.isFinite(p.lng))) return null;
 
@@ -87,41 +100,29 @@ async function getTrafficLegs(points, routeDate, departureMin) {
   if (!departAt) return null;
 
   const path = points.map((p) => `${Number(p.lat).toFixed(5)},${Number(p.lng).toFixed(5)}`).join(":");
-  const requestKey = `${path}|${departAt}`;
+  const requestKey = `${provider}|${path}|${departAt}`;
   const hit = cache.get(requestKey);
   if (hit && Date.now() - hit.at < cfg.cacheMs) return hit.value;
 
+  const requests = provider === "google" ? Math.ceil((points.length - 1) / (GOOGLE_MAX_POINTS - 1)) : 1;
+  const dailyLimit = provider === "google" ? Number(process.env.GOOGLE_TRAFFIC_DAILY_LIMIT) || 600 : cfg.dailyLimit;
   const today = localDay(new Date());
   if (usage.day !== today) {
     usage.day = today;
     usage.count = 0;
   }
-  if (usage.count >= cfg.dailyLimit) {
-    console.warn(`[trafficEta] daily limit of ${cfg.dailyLimit} TomTom requests reached, keeping non-traffic ETAs`);
+  if (usage.count + requests > dailyLimit) {
+    console.warn(`[trafficEta] daily limit of ${dailyLimit} ${provider} requests reached, keeping non-traffic ETAs`);
     return null;
   }
-  usage.count++;
+  usage.count += requests;
 
   try {
-    const params = {
-      key: cfg.key,
-      traffic: true,
-      travelMode: cfg.travelMode,
-      routeType: "fastest",
-      computeTravelTimeFor: "all", // adds noTrafficTravelTimeInSeconds, for the delay shown in the UI
-      departAt,
-      ...(cfg.travelMode === "truck" ? { vehicleCommercial: true } : {}),
-    };
-    Object.entries(cfg.vehicle).forEach(([k, v]) => {
-      if (v) params[k] = v;
-    });
-    const { data } = await axios.get(`${cfg.url}/routing/1/calculateRoute/${path}/json`, {
-      params,
-      timeout: cfg.timeout,
-    });
-    const legs = data?.routes?.[0]?.legs;
-    if (!Array.isArray(legs) || legs.length !== points.length - 1) {
-      throw new Error(`expected ${points.length - 1} legs, got ${Array.isArray(legs) ? legs.length : "none"}`);
+    // Each leg: { meters, seconds, freeFlowSeconds, positions: [[lat, lng], ...] }
+    const rawLegs =
+      provider === "google" ? await googleLegs(points, departAt, timeZone) : await tomtomLegs(cfg, path, departAt);
+    if (rawLegs.length !== points.length - 1) {
+      throw new Error(`expected ${points.length - 1} legs, got ${rawLegs.length}`);
     }
 
     const keys = [];
@@ -141,41 +142,134 @@ async function getTrafficLegs(points, routeDate, departureMin) {
       durMin[i][i] = 0;
     }
     let delaySec = 0;
-    legs.forEach((leg, i) => {
-      const s = leg.summary || {};
+    rawLegs.forEach((leg, i) => {
       const a = index.get(pointKey(points[i]));
       const b = index.get(pointKey(points[i + 1]));
-      if (a === b || !Number.isFinite(s.lengthInMeters) || !Number.isFinite(s.travelTimeInSeconds)) return;
-      distKm[a][b] = s.lengthInMeters / 1000;
-      durMin[a][b] = s.travelTimeInSeconds / 60;
-      // trafficDelayInSeconds only counts live incidents (0 for a future
-      // departure), so measure against free-flow time to include typical
-      // rush-hour slowdown too.
-      delaySec += Number.isFinite(s.noTrafficTravelTimeInSeconds)
-        ? Math.max(0, s.travelTimeInSeconds - s.noTrafficTravelTimeInSeconds)
-        : Number(s.trafficDelayInSeconds) || 0;
+      if (a === b || !Number.isFinite(leg.meters) || !Number.isFinite(leg.seconds)) return;
+      distKm[a][b] = leg.meters / 1000;
+      durMin[a][b] = leg.seconds / 60;
+      if (Number.isFinite(leg.freeFlowSeconds)) delaySec += Math.max(0, leg.seconds - leg.freeFlowSeconds);
     });
 
-    // The road line TomTom drove, so the map can draw it without another request.
+    // The road line that was driven, so the map can draw it without another request.
     const positions = [];
-    legs.forEach((leg) =>
-      (leg.points || []).forEach((pt) => {
+    rawLegs.forEach((leg) =>
+      leg.positions.forEach((pt) => {
         const last = positions[positions.length - 1];
-        const p = [Math.round(pt.latitude * 1e5) / 1e5, Math.round(pt.longitude * 1e5) / 1e5];
+        const p = [Math.round(pt[0] * 1e5) / 1e5, Math.round(pt[1] * 1e5) / 1e5];
         if (!last || last[0] !== p[0] || last[1] !== p[1]) positions.push(p);
       })
     );
 
-    const value = { index, distKm, durMin, delayMin: Math.round(delaySec / 60), departAt, positions };
+    const value = { index, distKm, durMin, delayMin: Math.round(delaySec / 60), departAt, positions, provider };
     cache.set(requestKey, { at: Date.now(), value });
     if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
     return value;
   } catch (error) {
     const body = error.response?.data;
-    const detail = body?.error?.description || body?.detailedError?.message || body?.errorText;
-    console.warn("[trafficEta] TomTom unavailable, keeping non-traffic ETAs:", error.message, detail || "");
+    const detail =
+      provider === "google"
+        ? google.errorText(error)
+        : `${error.message} ${body?.error?.description || body?.detailedError?.message || body?.errorText || ""}`;
+    console.warn(`[trafficEta] ${provider} unavailable, keeping non-traffic ETAs:`, detail);
     return null;
   }
 }
 
-module.exports = { getTrafficLegs, departAtFor };
+// Milliseconds between UTC and `timeZone`'s wall clock at instant `ms`.
+function zoneOffsetMs(ms, timeZone) {
+  const parts = {};
+  new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  })
+    .formatToParts(new Date(ms))
+    .forEach((p) => (parts[p.type] = Number(p.value)));
+  return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second) - ms;
+}
+
+// "YYYY-MM-DDTHH:MM:00" on the depot's clock -> epoch ms. TomTom reads the
+// naive string as the depot's local time itself; Google needs an exact
+// instant. Without a time zone, falls back to the server clock.
+function wallClockToMs(departAt, timeZone) {
+  const [d, t] = departAt.split("T");
+  const [y, mo, da] = d.split("-").map(Number);
+  const [h, mi] = t.split(":").map(Number);
+  if (!timeZone) return new Date(y, mo - 1, da, h, mi).getTime();
+  const asUtc = Date.UTC(y, mo - 1, da, h, mi);
+  const first = asUtc - zoneOffsetMs(asUtc, timeZone);
+  return asUtc - zoneOffsetMs(first, timeZone); // second pass settles DST edges
+}
+
+// Google: chunks of <= 27 points; each later chunk departs when the previous
+// one arrives (same "one continuous drive" approximation as TomTom).
+async function googleLegs(points, departAt, timeZone) {
+  const departMs = departAt === "now" ? null : wallClockToMs(departAt, timeZone);
+  const legs = [];
+  let elapsedSec = 0;
+  for (let start = 0; start < points.length - 1; start += GOOGLE_MAX_POINTS - 1) {
+    const chunk = points.slice(start, start + GOOGLE_MAX_POINTS);
+    // "now": the first chunk omits departureTime (= now). Google rejects a
+    // departure in the past, so never send one earlier than a minute ahead.
+    let departureTime;
+    if (departMs != null || start > 0) {
+      const at = (departMs == null ? Date.now() : departMs) + elapsedSec * 1000;
+      departureTime = new Date(Math.max(at, Date.now() + 60000)).toISOString();
+    }
+    const { legs: got } = await google.computeRoute(chunk, { trafficAware: true, departureTime });
+    got.forEach((leg) => {
+      legs.push({
+        meters: leg.distanceMeters,
+        seconds: leg.durationSec,
+        freeFlowSeconds: leg.staticDurationSec,
+        positions: leg.positions,
+      });
+      elapsedSec += leg.durationSec;
+    });
+  }
+  return legs;
+}
+
+async function tomtomLegs(cfg, path, departAt) {
+  const params = {
+    key: cfg.key,
+    traffic: true,
+    travelMode: cfg.travelMode,
+    routeType: "fastest",
+    computeTravelTimeFor: "all", // adds noTrafficTravelTimeInSeconds, for the delay shown in the UI
+    departAt,
+    ...(cfg.travelMode === "truck" ? { vehicleCommercial: true } : {}),
+  };
+  Object.entries(cfg.vehicle).forEach(([k, v]) => {
+    if (v) params[k] = v;
+  });
+  const { data } = await axios.get(`${cfg.url}/routing/1/calculateRoute/${path}/json`, {
+    params,
+    timeout: cfg.timeout,
+  });
+  const legs = data?.routes?.[0]?.legs;
+  if (!Array.isArray(legs)) throw new Error("TomTom returned no legs");
+  return legs.map((leg) => {
+    const s = leg.summary || {};
+    // trafficDelayInSeconds only counts live incidents (0 for a future
+    // departure), so measure against free-flow time to include typical
+    // rush-hour slowdown too.
+    const freeFlowSeconds = Number.isFinite(s.noTrafficTravelTimeInSeconds)
+      ? s.noTrafficTravelTimeInSeconds
+      : s.travelTimeInSeconds - (Number(s.trafficDelayInSeconds) || 0);
+    return {
+      meters: s.lengthInMeters,
+      seconds: s.travelTimeInSeconds,
+      freeFlowSeconds,
+      positions: (leg.points || []).map((pt) => [pt.latitude, pt.longitude]),
+    };
+  });
+}
+
+module.exports = { getTrafficLegs, departAtFor, wallClockToMs };

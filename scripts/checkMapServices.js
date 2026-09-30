@@ -51,12 +51,63 @@ function frontendMapKey() {
   return null;
 }
 
+async function checkGoogle() {
+  const google = require("../utils/googleMapsClient");
+  const cfg = google.config();
+  if (!cfg.key) return report("Google Maps", "SKIP", "no GOOGLE_MAPS_API_KEY -> ORS / OSRM / TomTom / Photon are used");
+  const run = (name, fn) =>
+    check(name, async () => {
+      try {
+        return await fn();
+      } catch (error) {
+        return { status: "FAIL", detail: google.errorText(error).slice(0, 220) };
+      }
+    });
+
+  if (!cfg.geocodingEnabled) report("Google Geocoding", "SKIP", "GOOGLE_GEOCODING_ENABLED=false");
+  else
+    await run("Google Geocoding", async () => {
+      const r = await google.geocode("12 rue de Rivoli, 75004 Paris, France", { region: "fr" });
+      if (!r) return { status: "FAIL", detail: "no result" };
+      return { detail: `${r.lat.toFixed(5)}, ${r.lng.toFixed(5)} (${r.locationType})` };
+    });
+
+  if (!cfg.routesEnabled) return report("Google Routes", "SKIP", "GOOGLE_ROUTES_ENABLED=false");
+  await run("Google Routes matrix", async () => {
+    const m = await google.computeRouteMatrix([PARIS_DEPOT], [PARIS_STOP]);
+    const km = m.distances[0][0] / 1000;
+    return { detail: `${km.toFixed(2)} km, ${(m.durations[0][0] / 60).toFixed(1)} min (planning, no traffic)` };
+  });
+  await run("Google Routes traffic", async () => {
+    const { legs } = await google.computeRoute([PARIS_DEPOT, PARIS_STOP], { trafficAware: true });
+    const l = legs[0];
+    const delay = Number.isFinite(l.staticDurationSec) ? Math.max(0, Math.round((l.durationSec - l.staticDurationSec) / 60)) : 0;
+    return { detail: `${(l.distanceMeters / 1000).toFixed(2)} km, ${(l.durationSec / 60).toFixed(1)} min now, traffic +${delay} min, line ${l.positions.length} pts` };
+  });
+
+  if (!cfg.tilesEnabled) return report("Google Map Tiles", "SKIP", "GOOGLE_TILES_ENABLED=false");
+  await run("Google Map Tiles", async () => {
+    const { data } = await axios.post(
+      `${cfg.tilesUrl}/v1/createSession`,
+      { mapType: "roadmap", language: "en-GB", region: "FR" },
+      { params: { key: cfg.key }, timeout: TIMEOUT }
+    );
+    if (!data?.session) return { status: "FAIL", detail: "no session" };
+    const tile = await axios.get(`${cfg.tilesUrl}/v1/2dtiles/12/2074/1409`, {
+      params: { session: data.session, key: cfg.key },
+      responseType: "arraybuffer",
+      timeout: TIMEOUT,
+    });
+    return { detail: `session ok, ${tile.data.byteLength} byte ${tile.headers["content-type"]} tile` };
+  });
+}
+
 async function checkOrs() {
   const url = (process.env.ORS_URL || "https://api.openrouteservice.org").replace(/\/+$/, "");
   const profile = process.env.ORS_PROFILE || "driving-hgv";
   if (process.env.ORS_ENABLED === "false") return report("ORS matrix", "SKIP", "ORS_ENABLED=false");
   if (!process.env.ORS_API_KEY) {
-    return report("ORS matrix", "SKIP", "no ORS_API_KEY -> backend does not use ORS (planning uses OSRM)");
+    return report("ORS matrix", "SKIP", "no ORS_API_KEY -> ORS not used");
   }
   await check("ORS matrix (planning)", async () => {
     const res = await axios.post(
@@ -78,7 +129,9 @@ async function checkOrs() {
 }
 
 async function checkOsrm() {
-  if (process.env.OSRM_ENABLED === "false") return report("OSRM matrix (backup)", "SKIP", "OSRM_ENABLED=false");
+  const osrmOn =
+    process.env.OSRM_ENABLED === "true" || (Boolean(process.env.OSRM_URL) && process.env.OSRM_ENABLED !== "false");
+  if (!osrmOn) return report("OSRM matrix (backup)", "SKIP", "off (no OSRM_URL, or OSRM_ENABLED=false)");
   const url = (process.env.OSRM_URL || "https://router.project-osrm.org").replace(/\/+$/, "");
   const profile = process.env.OSRM_PROFILE || "driving";
   await check("OSRM matrix (backup)", async () => {
@@ -96,7 +149,7 @@ async function checkOsrm() {
 
 async function checkTomTomRouting() {
   if (process.env.TOMTOM_ENABLED === "false") return report("TomTom traffic ETAs", "SKIP", "TOMTOM_ENABLED=false");
-  if (!process.env.TOMTOM_API_KEY) return report("TomTom traffic ETAs", "SKIP", "no TOMTOM_API_KEY -> no traffic ETAs");
+  if (!process.env.TOMTOM_API_KEY) return report("TomTom traffic ETAs", "SKIP", "no TOMTOM_API_KEY -> TomTom not used");
   const url = (process.env.TOMTOM_URL || "https://api.tomtom.com").replace(/\/+$/, "");
   await check("TomTom traffic ETAs", async () => {
     const pts = [PARIS_DEPOT, PARIS_STOP].map((p) => `${p.lat},${p.lng}`).join(":");
@@ -163,21 +216,7 @@ async function checkGeocoding() {
     return { detail: `SW1A 2AA -> ${r.latitude}, ${r.longitude}` };
   });
 
-  if (!process.env.GOOGLE_MAPS_API_KEY) {
-    report("Google geocoding", "SKIP", "no GOOGLE_MAPS_API_KEY");
-  } else {
-    await check("Google geocoding", async () => {
-      const res = await axios.get("https://maps.googleapis.com/maps/api/geocode/json", {
-        params: { address: "12 rue de Rivoli, 75004 Paris", key: process.env.GOOGLE_MAPS_API_KEY },
-        timeout: TIMEOUT,
-      });
-      const st = res.data?.status;
-      if (st === "OK") return { detail: "working (billing enabled)" };
-      return { status: "SKIP", detail: `${st}: not usable, the other geocoders are used instead` };
-    });
-  }
-
-  // The real pipeline end to end (Photon -> BAN / postcodes.io -> Google).
+  // The real pipeline end to end (Google -> Photon -> BAN / postcodes.io).
   const { geocodeAddress } = require("../utils/geocodingService");
   for (const [name, address] of [
     ["Geocoder pipeline FR", { street: "12 rue de Rivoli", zipCode: "75004", city: "Paris", country: "France" }],
@@ -245,6 +284,7 @@ async function checkDatabase() {
 
 (async () => {
   console.log("Logistics map services check\n");
+  await checkGoogle();
   await checkOrs();
   await checkOsrm();
   await checkTomTomRouting();
