@@ -22,6 +22,9 @@ const OrderEntrySchema = new Schema(
       address: { type: Schema.Types.Mixed },
       totalWeight: { type: Number },
       weightUnit: { type: String },
+      // "order" = sales order moved from Bulk Order Conversion (the normal
+      // source); "deliveryNote" only with LOGISTICS_ORDER_SOURCE=delivery-notes.
+      docType: { type: String },
     },
     sequenceNumber: { type: Number },
     assignedAt: { type: Date, default: Date.now },
@@ -33,7 +36,12 @@ const OrderEntrySchema = new Schema(
     storeHours: {
       openingTime: { type: String },
       closingTime: { type: String },
+      // The customer's preferred delivery window, when they gave one.
+      preferredFrom: { type: String },
+      preferredTo: { type: String },
     },
+    // Planned arrival is outside the preferred window (but the shop is open).
+    preferredMissed: { type: Boolean },
     etaMin: { type: Number },
     // Minutes the truck waits outside the shop for it to open; already
     // included in etaMin of this stop and every later one.
@@ -43,10 +51,12 @@ const OrderEntrySchema = new Schema(
     driveMin: { type: Number },
     legKm: { type: Number },
     plannedArrival: { type: Date },
-    // Set from the truck's GPS (utils/autoDelivery.js): arrivedAt = first fix
-    // within the delivery radius (cleared on a drive-by), deliveredAt = when
-    // the stop was marked delivered, deliveredBy = "gps" | "manual".
+    // Set from the truck's GPS (utils/stopVisits.js): arrivedAt = first fix
+    // within the stop radius (cleared on a drive-by), departedAt = first fix
+    // outside it again. GPS never marks a stop delivered; deliveredAt /
+    // deliveredBy are only written by the manual status endpoint.
     arrivedAt: { type: Date },
+    departedAt: { type: Date },
     deliveredAt: { type: Date },
     deliveredBy: { type: String, enum: ["gps", "manual"] },
     // Live estimate from the truck's GPS (utils/liveEta.js); the planned
@@ -83,6 +93,9 @@ const TruckRouteSchema = new Schema({
   // "HH:MM" the truck leaves the depot on this date (copied from the weekly
   // template at Initialize Date, editable per date). ETAs are measured from it.
   departureTime: { type: String, default: "08:00" },
+  // Minutes allowed at each stop (unloading, paperwork). Unset = the
+  // STOP_SERVICE_MIN default (15).
+  serviceMin: { type: Number },
   region: { type: String, trim: true },
   departments: [{ type: String, trim: true }],
   cities: [{ type: String, trim: true }],

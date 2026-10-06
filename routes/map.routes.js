@@ -17,6 +17,8 @@ router.get("/tiles/attribution", tiles.getAttribution);
 router.get("/documents", controller.getDocuments);
 router.get("/customer/:cardCode", controller.getCustomerDocuments);
 router.get("/search-customers", controller.searchCustomers);
+router.get("/nearby", controller.getNearby);
+router.get("/overview", controller.getOverview);
 router.get("/geocoding/stats", controller.getGeocodingStats);
 router.post("/geocoding/batch", controller.batchGeocode);
 router.put("/customer/:cardCode/coordinates", controller.setCustomerCoordinates);

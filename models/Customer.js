@@ -81,6 +81,14 @@ const CustomerSchema = new Schema({
   closingTime: {
     type: String, // "HH:MM"
   },
+  // Optional window the customer prefers to be delivered in ("HH:MM"). When
+  // set, auto-routing aims for it instead of the whole opening hours.
+  preferredDeliveryFrom: {
+    type: String,
+  },
+  preferredDeliveryTo: {
+    type: String,
+  },
   fulfillmentMethod: {
     type: String,
     enum: ["delivery", "pickup"],

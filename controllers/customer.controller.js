@@ -166,6 +166,8 @@ exports.createCustomer = async (req, res) => {
       address,
       openingTime,
       closingTime,
+      preferredDeliveryFrom,
+      preferredDeliveryTo,
       marketingStatus,
     } = req.body;
 
@@ -207,6 +209,8 @@ exports.createCustomer = async (req, res) => {
       address,
       openingTime,
       closingTime,
+      preferredDeliveryFrom,
+      preferredDeliveryTo,
       marketingStatus,
     });
 
@@ -247,6 +251,8 @@ exports.updateCustomer = async (req, res) => {
       address,
       openingTime,
       closingTime,
+      preferredDeliveryFrom,
+      preferredDeliveryTo,
       marketingStatus,
     } = req.body;
 
@@ -268,6 +274,8 @@ exports.updateCustomer = async (req, res) => {
     if (company !== undefined) updateData.company = company;
     if (openingTime !== undefined) updateData.openingTime = openingTime;
     if (closingTime !== undefined) updateData.closingTime = closingTime;
+    if (preferredDeliveryFrom !== undefined) updateData.preferredDeliveryFrom = preferredDeliveryFrom;
+    if (preferredDeliveryTo !== undefined) updateData.preferredDeliveryTo = preferredDeliveryTo;
     if (marketingStatus !== undefined) updateData.marketingStatus = marketingStatus;
 
     // Address changed? Merge onto existing address and flag for re-geocode.

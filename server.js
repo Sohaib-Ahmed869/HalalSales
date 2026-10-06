@@ -32,6 +32,8 @@ const truckRouteRoutes = require("./routes/truckRoute.routes");
 const mapRoutes = require("./routes/map.routes");
 const trackingRoutes = require("./routes/tracking.routes");
 const trackingSocket = require("./services/trackingSocket");
+const geotabSync = require("./services/geotabSync");
+const adherenceService = require("./services/adherenceService");
 
 // Initialize express app
 const app = express();
@@ -81,6 +83,9 @@ mongoose
     //   prestashopSyncService.scheduleSync(config.prestashop.syncInterval);
     // }
     console.log("✅ Connected to MongoDB");
+    // Live truck GPS from MyGeotab, and the evening planned-vs-actual report.
+    geotabSync.start();
+    adherenceService.startCron();
   })
   .catch((err) => {
     console.error("❌ MongoDB connection error:", err);

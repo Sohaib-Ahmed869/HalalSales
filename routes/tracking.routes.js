@@ -4,11 +4,6 @@ const router = express.Router();
 const { auth, checkRole } = require("../middleware/auth");
 const controller = require("../controllers/tracking.controller");
 
-// Traccar Client can't send a Bearer token: the device id is its credential.
-// Registered before router.use(auth). Accepts GET (classic) and POST (newer).
-router.get("/osmand", controller.ingest);
-router.post("/osmand", controller.ingest);
-
 router.use(auth);
 router.use((req, res, next) => {
   res.set("Cache-Control", "no-store");
@@ -17,7 +12,10 @@ router.use((req, res, next) => {
 
 router.get("/devices", controller.listDevices);
 router.get("/trail/:truckNumber", controller.getTrail);
-router.post("/devices", checkRole(["admin", "sales_manager"]), controller.createDevice);
+router.get("/geotab/vehicles", controller.listGeotabVehicles);
+router.get("/fleet", controller.getFleet);
+router.get("/adherence", controller.getAdherence);
+router.post("/devices", checkRole(["admin", "sales_manager"]), controller.assignDevice);
 router.delete("/devices/:id", checkRole(["admin", "sales_manager"]), controller.deleteDevice);
 
 module.exports = router;

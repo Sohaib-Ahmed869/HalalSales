@@ -1,6 +1,6 @@
 // Live truck positions pushed to the Logistics map over socket.io.
-// Only logged-in portal users may connect (same JWT as the REST API); the
-// Traccar Client phones never touch the socket, they POST to the ingest route.
+// Only logged-in portal users may connect (same JWT as the REST API). The
+// positions come from MyGeotab (services/geotabSync.js).
 const { Server } = require("socket.io");
 const { verifyToken } = require("../middleware/auth");
 
@@ -39,7 +39,7 @@ function emitPosition(tenant, payload) {
   if (io) io.to(`tracking:${tenant}`).emit("truck:position", payload);
 }
 
-// A stop's GPS arrival / delivery changed (utils/autoDelivery.js), so open
+// The truck reached or left a stop (utils/stopVisits.js), so open
 // Logistics pages reload their routes.
 function emitStopUpdate(tenant, payload) {
   if (io) io.to(`tracking:${tenant}`).emit("truck:stop", payload);

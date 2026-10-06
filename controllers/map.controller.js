@@ -2,7 +2,10 @@
 const Invoice = require("../models/Invoice");
 const SalesOrder = require("../models/SalesOrder");
 const Customer = require("../models/Customer");
-const { geocodeCustomer, deliveryPoint } = require("../utils/geocodingService");
+const Quotation = require("../models/Quotation");
+const { ScrapedRestaurant, ScrapedRestaurantGeo } = require("../models/ScrapedRestaurant");
+const { geocodeCustomer, geocodeAddress, deliveryPoint, deliveryAddressOf } = require("../utils/geocodingService");
+const { haversineKm } = require("../utils/routeOptimizer");
 
 function tenantFromReq(req) {
   return req.query.tenant || "halal-food-sales";
@@ -162,12 +165,28 @@ exports.searchCustomers = async (req, res) => {
       return res.json({ customers: [] });
     }
 
-    const regex = new RegExp(search.trim(), "i");
+    const regex = new RegExp(search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    // .lean(): the synced `coordinates` / `deliveryAddress` fields aren't in the schema.
     const customers = await Customer.find({
       $or: [{ CardName: regex }, { CardCode: regex }],
-    }).limit(20);
+    })
+      .limit(20)
+      .lean();
 
-    res.json({ customers });
+    const rows = customers.map((c) => {
+      const address = deliveryAddressOf(c);
+      return {
+        _id: c._id,
+        CardCode: c.CardCode,
+        CardName: c.CardName,
+        address,
+        hasLocation: Boolean(customerGeo(c)),
+        // An address is enough: its pin is worked out when the customer is picked.
+        hasAddress: Boolean(address && (String(address.street || "").trim() || String(address.zipCode || "").trim())),
+      };
+    });
+    const rank = (r) => (r.hasLocation ? 0 : r.hasAddress ? 1 : 2);
+    res.json({ customers: rows.sort((a, b) => rank(a) - rank(b)) });
   } catch (error) {
     console.error("Search customers error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
@@ -264,6 +283,311 @@ exports.setCustomerCoordinates = async (req, res) => {
     res.json({ message: "Coordinates set", customer });
   } catch (error) {
     console.error("Set customer coordinates error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// ---------- Sales map: who is around a customer ----------
+
+const NEARBY_MAX_CUSTOMERS = 400;
+const NEARBY_MAX_POTENTIALS = 400;
+// New scraped addresses located per request (each is one geocoding lookup);
+// the rest are reported as `potentialsPending` and done on the next requests.
+const GEOCODE_PER_REQUEST = () => Number(process.env.SALES_MAP_GEOCODE_PER_REQUEST) || 25;
+
+const normName = (v) =>
+  String(v || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+
+const usable = (v) => (v && v !== "N/A" ? String(v).trim() : "");
+
+// Pins for scraped restaurants: stored ones, plus up to `budget` new lookups.
+async function locateRestaurants(restaurants, budget) {
+  const known = await ScrapedRestaurantGeo.find({ restaurantId: { $in: restaurants.map((r) => r._id) } }).lean();
+  const geoById = new Map(known.map((g) => [String(g.restaurantId), g]));
+  const todo = restaurants.filter((r) => !geoById.has(String(r._id))).slice(0, budget);
+
+  for (let i = 0; i < todo.length; i += 5) {
+    await Promise.all(
+      todo.slice(i, i + 5).map(async (r) => {
+        const street = usable(r.contact_info?.address) || usable(r.name);
+        let hit = null;
+        try {
+          hit = await geocodeAddress({ street, zipCode: r.postal_code, country: "France" }, `scraped:${r._id}`);
+        } catch (error) {
+          hit = null;
+        }
+        const doc = hit
+          ? { restaurantId: r._id, lat: hit.lat, lng: hit.lng, status: "ok", source: hit.source, confidence: hit.confidence, geocodedAt: new Date() }
+          : { restaurantId: r._id, status: "failed", geocodedAt: new Date() };
+        await ScrapedRestaurantGeo.updateOne({ restaurantId: r._id }, { $set: doc }, { upsert: true });
+        geoById.set(String(r._id), doc);
+      })
+    );
+  }
+  return geoById;
+}
+
+// GET /api/map/nearby?cardCode=C123&radiusKm=5[&potential=false]
+// The customer, the existing customers around them and the potential
+// customers (scraped restaurants) around them, each with its distance.
+exports.getNearby = async (req, res) => {
+  try {
+    const { cardCode } = req.query;
+    const radiusKm = Math.min(Math.max(Number(req.query.radiusKm) || 5, 0.5), 50);
+    if (!cardCode) return res.status(400).json({ message: "cardCode is required" });
+
+    let centerCustomer = await Customer.findOne({ CardCode: cardCode }).lean();
+    if (!centerCustomer) return res.status(404).json({ message: "Customer not found" });
+    let centerGeo = customerGeo(centerCustomer);
+    if (!centerGeo) {
+      // Not on the map yet: locate the address now, like Logistics does when
+      // one of the customer's orders is planned.
+      const address = deliveryAddressOf(centerCustomer);
+      if (!address || !(String(address.street || "").trim() || String(address.zipCode || "").trim())) {
+        return res.status(400).json({ message: `${centerCustomer.CardName} has no address on file, so it can't be placed on the map. Add the address on the Customers page.` });
+      }
+      const doc = await Customer.findOne({ CardCode: cardCode });
+      await geocodeCustomer(doc);
+      centerCustomer = await Customer.findOne({ CardCode: cardCode }).lean();
+      centerGeo = customerGeo(centerCustomer);
+      if (!centerGeo) {
+        return res.status(400).json({ message: `The address of ${centerCustomer.CardName} could not be found on the map. Check it on the Customers page.` });
+      }
+    }
+    const center = { lat: centerGeo.lat, lng: centerGeo.lng };
+
+    const dLat = radiusKm / 111.32;
+    const dLng = radiusKm / (111.32 * Math.cos((center.lat * Math.PI) / 180));
+    const box = (field) => ({
+      [`${field}.lat`]: { $gte: center.lat - dLat, $lte: center.lat + dLat },
+      [`${field}.lng`]: { $gte: center.lng - dLng, $lte: center.lng + dLng },
+    });
+    const around = await Customer.find({ $or: [box("coordinates"), box("geo")] })
+      .select("CardCode CardName address deliveryAddress coordinates geo phoneNumber status assignedTo")
+      .limit(5000)
+      .lean();
+
+    const zips = new Set();
+    const addZip = (c) => {
+      const zip = String(deliveryAddressOf(c)?.zipCode || "").trim();
+      if (zip) zips.add(zip);
+    };
+    addZip(centerCustomer);
+
+    const customers = [];
+    around.forEach((c) => {
+      const geo = customerGeo(c);
+      if (!geo) return;
+      const distanceKm = haversineKm(center, geo);
+      if (distanceKm > radiusKm) return;
+      addZip(c);
+      if (c.CardCode === cardCode) return;
+      customers.push({
+        cardCode: c.CardCode,
+        cardName: c.CardName,
+        address: deliveryAddressOf(c),
+        phone: c.phoneNumber,
+        status: c.status,
+        coordinates: { lat: geo.lat, lng: geo.lng },
+        distanceKm: Math.round(distanceKm * 100) / 100,
+      });
+    });
+    // Customers in these postal codes that have an address but no pin yet:
+    // locate a few per request (each is one geocoding lookup), the rest next time.
+    let customersPending = 0;
+    if (zips.size > 0) {
+      const numeric = (f) => ({ [`${f}.lat`]: { $type: "number" } });
+      const unpinned = {
+        $nor: [numeric("coordinates"), numeric("geo")],
+        "geo.geocodeStatus": { $ne: "failed" },
+        $or: [{ "address.zipCode": { $in: [...zips] } }, { "deliveryAddress.zipCode": { $in: [...zips] } }],
+      };
+      const budget = GEOCODE_PER_REQUEST();
+      const [todo, waiting] = await Promise.all([Customer.find(unpinned).limit(budget), Customer.countDocuments(unpinned)]);
+      customersPending = Math.max(0, waiting - todo.length);
+      for (let i = 0; i < todo.length; i += 5) {
+        await Promise.all(
+          todo.slice(i, i + 5).map(async (doc) => {
+            try {
+              await geocodeCustomer(doc);
+            } catch (error) {
+              return;
+            }
+            const c = doc.toObject();
+            const geo = customerGeo(c);
+            if (!geo || c.CardCode === cardCode) return;
+            const distanceKm = haversineKm(center, geo);
+            if (distanceKm > radiusKm) return;
+            around.push(c);
+            customers.push({
+              cardCode: c.CardCode,
+              cardName: c.CardName,
+              address: deliveryAddressOf(c),
+              phone: c.phoneNumber,
+              status: c.status,
+              coordinates: { lat: geo.lat, lng: geo.lng },
+              distanceKm: Math.round(distanceKm * 100) / 100,
+            });
+          })
+        );
+      }
+    }
+    customers.sort((a, b) => a.distanceKm - b.distanceKm);
+
+    let potentials = [];
+    let potentialsPending = 0;
+    let potentialsUnlocated = 0;
+    if (req.query.potential !== "false" && zips.size > 0) {
+      const restaurants = await ScrapedRestaurant.find({ postal_code: { $in: [...zips] }, status: { $ne: "failed" } })
+        .select("name url postal_code menu_items_count contact_info scraped_at")
+        .limit(1500)
+        .lean();
+      const geoById = await locateRestaurants(restaurants, GEOCODE_PER_REQUEST());
+      // A scraped place with the same name as a customer here is that customer.
+      const customerNames = new Set([centerCustomer, ...around].map((c) => normName(c.CardName)).filter(Boolean));
+      restaurants.forEach((r) => {
+        const geo = geoById.get(String(r._id));
+        if (!geo) return potentialsPending++;
+        if (geo.status !== "ok") return potentialsUnlocated++;
+        if (customerNames.has(normName(r.name))) return;
+        const distanceKm = haversineKm(center, geo);
+        if (distanceKm > radiusKm) return;
+        potentials.push({
+          id: String(r._id),
+          name: r.name,
+          address: usable(r.contact_info?.address),
+          postalCode: r.postal_code,
+          phone: usable(r.contact_info?.phone),
+          email: usable(r.contact_info?.email),
+          url: r.url,
+          menuItems: r.menu_items_count || 0,
+          scrapedAt: r.scraped_at,
+          coordinates: { lat: geo.lat, lng: geo.lng },
+          approximate: geo.confidence === "low",
+          distanceKm: Math.round(distanceKm * 100) / 100,
+        });
+      });
+      potentials.sort((a, b) => a.distanceKm - b.distanceKm);
+    }
+
+    res.json({
+      center: {
+        cardCode: centerCustomer.CardCode,
+        cardName: centerCustomer.CardName,
+        address: deliveryAddressOf(centerCustomer),
+        phone: centerCustomer.phoneNumber,
+        coordinates: center,
+      },
+      radiusKm,
+      customers: customers.slice(0, NEARBY_MAX_CUSTOMERS),
+      customersTotal: customers.length,
+      customersPending,
+      potentials: potentials.slice(0, NEARBY_MAX_POTENTIALS),
+      potentialsTotal: potentials.length,
+      potentialsPending,
+      potentialsUnlocated,
+      postalCodes: [...zips].sort(),
+    });
+  } catch (error) {
+    console.error("Nearby customers error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// ---------- Sales map: every customer, with their activity in a period ----------
+
+// Documents of one kind per customer in the period: { CardCode -> { count, total } }.
+async function activityByCustomer(Model, range) {
+  const rows = await Model.aggregate([
+    { $match: { DocDate: range } },
+    { $group: { _id: "$CardCode", count: { $sum: 1 }, total: { $sum: { $ifNull: ["$DocTotal", 0] } } } },
+  ]);
+  return new Map(rows.filter((r) => r._id).map((r) => [r._id, r]));
+}
+
+// GET /api/map/overview?startDate=&endDate=[&inactive=false]
+// One entry per customer that has a pin: how many invoices, sales orders and
+// quotations they had in the period (and the totals). Customers with nothing
+// in the period are included too (inactive=false leaves them out), so the map
+// can show who is not buying.
+exports.getOverview = async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    if (!startDate || !endDate) return res.status(400).json({ message: "startDate and endDate are required" });
+    const from = new Date(startDate);
+    from.setHours(0, 0, 0, 0);
+    const to = new Date(endDate);
+    to.setHours(23, 59, 59, 999);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) {
+      return res.status(400).json({ message: "Invalid date range" });
+    }
+    const range = { $gte: from, $lte: to };
+
+    const [invoices, orders, quotations] = await Promise.all([
+      activityByCustomer(Invoice, range),
+      activityByCustomer(SalesOrder, range),
+      activityByCustomer(Quotation, range).catch(() => new Map()),
+    ]);
+    const active = new Set([...invoices.keys(), ...orders.keys(), ...quotations.keys()]);
+
+    const numeric = (f) => ({ [`${f}.lat`]: { $type: "number" } });
+    const pinned = { $or: [numeric("coordinates"), numeric("geo")] };
+    const query = req.query.inactive === "false" ? { CardCode: { $in: [...active] } } : pinned;
+    const customers = await Customer.find(query)
+      .select("CardCode CardName address deliveryAddress coordinates geo phoneNumber")
+      .lean();
+
+    const round = (n) => Math.round(n * 100) / 100;
+    const locations = [];
+    let activeDrawn = 0;
+    customers.forEach((c) => {
+      const geo = customerGeo(c);
+      if (!geo) return;
+      if (active.has(c.CardCode)) activeDrawn++;
+      const inv = invoices.get(c.CardCode);
+      const ord = orders.get(c.CardCode);
+      const quo = quotations.get(c.CardCode);
+      const address = deliveryAddressOf(c) || {};
+      locations.push({
+        cardCode: c.CardCode,
+        cardName: c.CardName,
+        zipCode: address.zipCode || "",
+        city: address.city || "",
+        street: address.street || "",
+        phone: c.phoneNumber || "",
+        lat: geo.lat,
+        lng: geo.lng,
+        invoiceCount: inv ? inv.count : 0,
+        invoiceTotal: inv ? round(inv.total) : 0,
+        orderCount: ord ? ord.count : 0,
+        orderTotal: ord ? round(ord.total) : 0,
+        quotationCount: quo ? quo.count : 0,
+        quotationTotal: quo ? round(quo.total) : 0,
+      });
+    });
+
+    const sum = (m) => [...m.values()].reduce((n, r) => n + r.count, 0);
+    res.json({
+      startDate,
+      endDate,
+      locations,
+      totals: {
+        customers: locations.length,
+        invoices: sum(invoices),
+        orders: sum(orders),
+        quotations: sum(quotations),
+        activeCustomers: active.size,
+        // customers with documents in the period that can't be drawn (no pin yet)
+        activeWithoutPin: Math.max(0, active.size - activeDrawn),
+      },
+    });
+  } catch (error) {
+    console.error("Map overview error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
