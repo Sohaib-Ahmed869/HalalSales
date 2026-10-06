@@ -5,6 +5,7 @@ const router = express.Router();
 const path = require("path");
 const fs = require("fs");
 const { auth, checkRole } = require("../middleware/auth");
+const { serviceAuth } = require("../middleware/serviceAuth");
 const leadController = require("../controllers/lead2.controller");
 
 // Ensure uploads directory exists
@@ -45,6 +46,9 @@ const upload = multer({
     fileSize: 10 * 1024 * 1024, // 10 MB file size limit
   },
 });
+
+// AI WhatsApp agent hand-off (hfs-intelligence). Service key, not a user JWT.
+router.post("/ai-handoff", serviceAuth, leadController.upsertAiHandoffLead);
 
 // Lead CRUD Operations
 router.get("/", auth, leadController.getLeads);

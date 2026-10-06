@@ -56,8 +56,37 @@ const LeadSchema = new Schema({
   // NEW: Restaurant integration fields
   sourceType: {
     type: String,
-    enum: ["manual", "import", "restaurant_scraping"],
+    enum: ["manual", "import", "restaurant_scraping", "ai_generated"],
     default: "manual",
+  },
+
+  // An existing SAP customer brought back in as a lead (e.g. by the AI
+  // WhatsApp agent). Such a lead is never converted — that would create a
+  // duplicate account — the agent opens the existing customer instead.
+  sapCardCode: {
+    type: String,
+    trim: true,
+    index: true,
+  },
+  existingCustomer: {
+    type: Schema.Types.ObjectId,
+    ref: "Customer",
+  },
+
+  // What the AI agent hands over with an ai_generated lead.
+  aiHandoff: {
+    reason: String, // ready_to_order | gave_prices | negotiation | conversation | no_price_sheet | reopened
+    reasonLabel: String,
+    threadId: String, // CustomerThread id in hfs-intelligence
+    summary: String,
+    conversation: [
+      {
+        direction: { type: String, enum: ["inbound", "outbound"] },
+        text: String,
+        at: Date,
+      },
+    ],
+    handedOffAt: Date,
   },
   relatedRestaurant: {
     type: Schema.Types.ObjectId,

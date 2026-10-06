@@ -56,6 +56,7 @@ exports.getLeads = async (req, res) => {
         { notes: { $regex: search, $options: "i" } },
         { 'restaurantData.name': { $regex: search, $options: "i" } }, // NEW: Search restaurant name
         { 'restaurantData.postalCode': { $regex: search, $options: "i" } }, // NEW: Search postal code
+        { sapCardCode: { $regex: search, $options: "i" } },
       ];
     }
 
@@ -145,6 +146,7 @@ exports.getLeadsPaginated = async (req, res) => {
         { notes: { $regex: search, $options: "i" } },
         { 'restaurantData.name': { $regex: search, $options: "i" } }, // NEW: Search restaurant name
         { 'restaurantData.postalCode': { $regex: search, $options: "i" } }, // NEW: Search postal code
+        { sapCardCode: { $regex: search, $options: "i" } },
       ];
     }
 
@@ -269,6 +271,9 @@ exports.getLeadStats = async (req, res) => {
           restaurantLeads: {
             $sum: { $cond: [{ $eq: ["$sourceType", "restaurant_scraping"] }, 1, 0] },
           },
+          aiGeneratedLeads: {
+            $sum: { $cond: [{ $eq: ["$sourceType", "ai_generated"] }, 1, 0] },
+          },
           // Time-to-first-contact proxy: time between createdAt and updatedAt
           // (Lead docs are updated when an agent touches them — status change,
           // notes, etc., so this approximates time to first contact.)
@@ -293,6 +298,7 @@ exports.getLeadStats = async (req, res) => {
           lostLeads: 1,
           unassignedLeads: 1,
           restaurantLeads: 1,
+          aiGeneratedLeads: 1,
           avgUpdateLagDays: { $round: ["$avgUpdateLagDays", 1] },
           conversionRate: {
             $cond: [
@@ -781,6 +787,17 @@ exports.convertLeadToCustomer = async (req, res) => {
       });
     }
 
+    // An existing SAP customer brought back as a lead must not be converted:
+    // that would create a second account for the same business.
+    if (lead.sapCardCode || lead.existingCustomer) {
+      return res.status(400).json({
+        success: false,
+        code: "EXISTING_CUSTOMER",
+        message: `This lead is already an existing customer (${lead.sapCardCode || "linked account"}). Open the customer instead of converting.`,
+        existingCustomer: { CardCode: lead.sapCardCode },
+      });
+    }
+
     // Check if customer with this email already exists
     if (lead.email) {
       const existingCustomer = await Customer.findOne({
@@ -940,6 +957,15 @@ exports.previewLeadConversion = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Lead has already been converted",
+      });
+    }
+
+    if (lead.sapCardCode || lead.existingCustomer) {
+      return res.status(400).json({
+        success: false,
+        code: "EXISTING_CUSTOMER",
+        message: `This lead is already an existing customer (${lead.sapCardCode || "linked account"}). Open the customer instead of converting.`,
+        existingCustomer: { CardCode: lead.sapCardCode },
       });
     }
 
@@ -1911,6 +1937,132 @@ exports.mergeDuplicateLeads = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error merging duplicate leads",
+      error: error.message,
+    });
+  }
+};
+
+// AI WhatsApp agent hand-off (called by hfs-intelligence with a service key).
+//
+// The agent reopened a conversation with an existing customer and it has
+// reached the point where a person must take over (they want to order, or are
+// negotiating price). This lands it on the leads screen as an "ai_generated"
+// lead linked to the customer's SAP account, so it is followed up and tracked
+// rather than lost in the inbox — and it is never converted into a duplicate.
+//
+// Idempotent per conversation: a second hand-off on the same thread (or the
+// same open customer) updates the lead instead of creating another.
+exports.upsertAiHandoffLead = async (req, res) => {
+  try {
+    const {
+      cardCode,
+      name,
+      phoneNumber,
+      email,
+      reason,
+      reasonLabel,
+      summary,
+      conversation,
+      threadId,
+      handedOffAt,
+    } = req.body || {};
+
+    if (!name && !cardCode) {
+      return res.status(400).json({ success: false, message: "name or cardCode is required" });
+    }
+
+    // Resolve the existing account: by CardCode first, then by phone.
+    let customer = null;
+    if (cardCode) {
+      customer = await Customer.findOne({ CardCode: cardCode })
+        .select("_id CardCode CardName assignedTo Email phoneNumber")
+        .lean();
+    }
+    if (!customer && phoneNumber) {
+      const digits = String(phoneNumber).replace(/\D/g, "");
+      const variants = [phoneNumber, digits, `+${digits}`];
+      if (digits.startsWith("33")) variants.push(`0${digits.slice(2)}`);
+      customer = await Customer.findOne({
+        $or: [
+          { phoneNumber: { $in: variants } },
+          { additionalPhoneNumbers: { $in: variants } },
+        ],
+      })
+        .select("_id CardCode CardName assignedTo Email phoneNumber")
+        .lean();
+    }
+
+    const sapCardCode = customer?.CardCode || cardCode || undefined;
+    const at = handedOffAt ? new Date(handedOffAt) : new Date();
+    const convo = Array.isArray(conversation)
+      ? conversation.slice(-30).map((m) => ({
+          direction: m.direction === "inbound" ? "inbound" : "outbound",
+          text: String(m.text || "").slice(0, 2000),
+          at: m.at ? new Date(m.at) : undefined,
+        }))
+      : [];
+
+    const stamp = at.toLocaleString("fr-FR", { timeZone: "Europe/Paris" });
+    const noteEntry =
+      `[${stamp}] AI agent hand-off — ${reasonLabel || reason || "needs a person"}` +
+      (summary ? `\n${summary}` : "");
+
+    const openQuery = {
+      sourceType: "ai_generated",
+      status: { $nin: ["converted", "dead"] },
+      $or: [
+        ...(sapCardCode ? [{ sapCardCode }] : []),
+        ...(threadId ? [{ "aiHandoff.threadId": String(threadId) }] : []),
+      ],
+    };
+    let lead = openQuery.$or.length ? await Lead.findOne(openQuery) : null;
+    const created = !lead;
+
+    if (!lead) {
+      lead = new Lead({
+        fullName: name || customer?.CardName || sapCardCode,
+        company: customer?.CardName || name,
+        email: (email || customer?.Email || "").toLowerCase() || undefined,
+        phoneNumber: phoneNumber || customer?.phoneNumber,
+        status: "qualified",
+        sourceType: "ai_generated",
+        assignedTo: customer?.assignedTo || undefined,
+        notes: noteEntry,
+      });
+    } else {
+      lead.notes = lead.notes ? `${noteEntry}\n\n${lead.notes}` : noteEntry;
+    }
+
+    lead.sapCardCode = sapCardCode;
+    if (customer?._id) lead.existingCustomer = customer._id;
+    lead.tags = [...new Set([...(lead.tags || []), reason === "ready_to_order" ? "hot" : "warm"])];
+    lead.aiHandoff = {
+      reason,
+      reasonLabel,
+      threadId: threadId ? String(threadId) : lead.aiHandoff?.threadId,
+      summary,
+      conversation: convo,
+      handedOffAt: at,
+    };
+    lead.nextFollowUp = lead.nextFollowUp || at;
+
+    await lead.save();
+
+    res.status(created ? 201 : 200).json({
+      success: true,
+      data: {
+        leadId: lead._id,
+        created,
+        sapCardCode: lead.sapCardCode,
+        existingCustomer: Boolean(customer),
+        assignedTo: lead.assignedTo || null,
+      },
+    });
+  } catch (error) {
+    console.error("Error upserting AI hand-off lead:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error creating AI hand-off lead",
       error: error.message,
     });
   }
