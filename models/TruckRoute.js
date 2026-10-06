@@ -61,6 +61,13 @@ const OrderEntrySchema = new Schema(
     deliveredBy: { type: String, enum: ["gps", "manual"] },
     // Live estimate from the truck's GPS (utils/liveEta.js); the planned
     // etaMin/waitMin above are never changed by it. Same clock as etaMin.
+    // Traffic delay (minutes above free flow) on the leg to this stop: what
+    // the plan assumed, and the most the live traffic showed while the truck
+    // was driving that leg (utils/liveEta.js). Lets the planned-vs-actual
+    // report say how much of a late arrival was traffic.
+    plannedTrafficMin: { type: Number },
+    liveTrafficMin: { type: Number },
+    liveTrafficAt: { type: Date },
     liveEtaMin: { type: Number },
     liveWaitMin: { type: Number },
     liveLate: { type: Boolean },

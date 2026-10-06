@@ -13,10 +13,20 @@
 //   missed_stop        never stopped at a planned stop
 //   out_of_order       visited the stops in another order than planned
 //   unexplained_stop   parked for a long time away from every planned stop
+//   standstill_on_route  stood still for a long time ON the planned road with
+//                      the engine running: most likely a traffic jam or a queue
 //   off_route          drove away from the planned road for a while
 //   extra_distance     drove clearly more km than planned
 //   late_return        got back to the depot later than planned
 //   not_returned       hasn't come back although the planned return is long past
+//
+// Two extra inputs separate traffic from driver behaviour when available:
+//   engineStops   from MyGeotab trips: for each standstill, how long the engine
+//                 was off and how long it was running. Engine off = parked.
+//                 Engine running on the planned road = probably traffic.
+//   traffic       per stop, the traffic delay the plan assumed on the leg to it
+//                 and the worst live traffic recorded while driving that leg;
+//                 the difference is how much of a late arrival was traffic.
 //
 // All times are minutes from midnight of the route's day on the depot's clock
 // (the same clock as etaMin), so they can pass 1440 for a return after midnight.
@@ -37,6 +47,8 @@ const defaults = () => {
     lateReturnMin: n("ADHERENCE_LATE_RETURN_MIN", 15),
     extraKmFactor: n("ADHERENCE_EXTRA_KM_FACTOR", 1.15),
     extraKmMin: n("ADHERENCE_EXTRA_KM_MIN", 5),
+    engineOffShare: n("ADHERENCE_ENGINE_OFF_SHARE", 0.5), // of a standstill with the engine off = "parked"
+    trafficShare: n("ADHERENCE_TRAFFIC_SHARE", 0.7), // of a delay explained by traffic = minor
   };
 };
 
@@ -105,12 +117,30 @@ const dist = (m) => (m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m
  * @param {Array}  input.points          GPS fixes sorted by time: [{ lat, lng, t (minutes on the depot clock), speedKmh }]
  * @param {Array}  [input.plannedLine]   road line [[lat, lng], ...]; without it straight lines between the stops are used
  * @param {number} [input.nowMin]        "now" on the same clock (to tell "not yet" from "missed")
+ * @param {Array}  [input.engineStops]   [{ startMin, endMin, offMin, idleMin }] standstills with engine state
  * @param {Object} [input.config]        overrides of the thresholds above
  */
-function analyzeRoute({ depot, departureMin, plannedReturnMin, plannedKm, stops, points, plannedLine, nowMin, config = {} }) {
+function analyzeRoute({ depot, departureMin, plannedReturnMin, plannedKm, stops, points, plannedLine, engineStops = [], nowMin, config = {} }) {
   const c = { ...defaults(), ...config };
   const deviations = [];
   const add = (type, severity, atMin, message, extra = {}) => deviations.push({ type, severity, atMin: Math.round(atMin), message, ...extra });
+
+  // Engine state during [a, b]: minutes off and running, from the Geotab
+  // standstills overlapping it (null when Geotab has nothing for that time).
+  const engineDuring = (a, b) => {
+    let offMin = 0;
+    let idleMin = 0;
+    let known = false;
+    engineStops.forEach((e) => {
+      const overlap = Math.min(b, e.endMin) - Math.max(a, e.startMin);
+      const length = e.endMin - e.startMin;
+      if (overlap <= 0 || length <= 0) return;
+      known = true;
+      offMin += (e.offMin * overlap) / length;
+      idleMin += (e.idleMin * overlap) / length;
+    });
+    return known ? { offMin: Math.round(offMin), idleMin: Math.round(idleMin) } : null;
+  };
 
   const planned = {
     departureMin,
@@ -195,6 +225,19 @@ function analyzeRoute({ depot, departureMin, plannedReturnMin, plannedKm, stops,
     row.droveBy = row.actualArrivalMin == null && driveBy;
   });
 
+  // Traffic heavier than planned adds up along the route: a stop is late by
+  // what was lost on every leg driven before it, not only on its own leg.
+  const extraTraffic = [];
+  let lostToTraffic = 0;
+  let anyTraffic = false;
+  stops.forEach((s, k) => {
+    if (Number.isFinite(s.liveTrafficMin)) {
+      anyTraffic = true;
+      lostToTraffic += Math.max(0, s.liveTrafficMin - (s.plannedTrafficMin || 0));
+    }
+    extraTraffic[k] = anyTraffic ? lostToTraffic : null;
+  });
+
   stopRows.forEach((r) => {
     if (r.actualArrivalMin == null) {
       r.status = dayOver ? "missed" : "pending";
@@ -208,10 +251,18 @@ function analyzeRoute({ depot, departureMin, plannedReturnMin, plannedKm, stops,
     if (r.plannedArrivalMin != null) {
       r.deltaMin = r.actualArrivalMin - r.plannedArrivalMin;
       r.status = r.deltaMin > c.lateMin ? "late" : r.deltaMin < -c.lateMin ? "early" : "on_time";
+      // How much of the delay the live traffic on this leg explains, beyond
+      // the traffic the plan already counted.
+      const k = stopRows.indexOf(r);
+      const trafficKnown = extraTraffic[k] != null;
+      if (trafficKnown) r.trafficMin = Math.max(0, Math.min(Math.max(r.deltaMin, 0), Math.round(extraTraffic[k])));
       if (r.status === "late") {
-        add("late_stop", r.deltaMin > 30 ? "high" : "medium", r.actualArrivalMin, `Stop ${r.seq} ${r.name}: arrived ${fmt(r.actualArrivalMin)}, ${mins(r.deltaMin)} late (planned ${fmt(r.plannedArrivalMin)}).`, {
+        const mostlyTraffic = trafficKnown && r.trafficMin >= r.deltaMin * c.trafficShare;
+        const note = !trafficKnown ? "" : r.trafficMin >= 3 ? ` About ${mins(r.trafficMin)} of it was traffic heavier than planned.` : " Traffic on the way was as planned.";
+        add("late_stop", mostlyTraffic ? "low" : r.deltaMin > 30 ? "high" : "medium", r.actualArrivalMin, `Stop ${r.seq} ${r.name}: arrived ${fmt(r.actualArrivalMin)}, ${mins(r.deltaMin)} late (planned ${fmt(r.plannedArrivalMin)}).${note}`, {
           docEntry: r.docEntry,
           delayMin: r.deltaMin,
+          ...(trafficKnown ? { trafficMin: r.trafficMin } : {}),
         });
       }
     } else {
@@ -290,13 +341,24 @@ function analyzeRoute({ depot, departureMin, plannedReturnMin, plannedKm, stops,
       const atStop = stopPoints.some((s) => distanceM(here, s) <= c.stopRadiusM + 50);
       if (!atDepot && !atStop) {
         const offRoute = off[i] > offLimit;
-        unexplained.push([i, j]);
-        add("unexplained_stop", duration >= 60 ? "high" : "medium", here.t, `Parked ${mins(duration)} from ${fmt(here.t)} to ${fmt(pts[j].t)} at a place that is not a planned stop${offRoute ? `, ${dist(off[i])} off the planned route` : ""}.`, {
+        const engine = engineDuring(here.t, pts[j].t);
+        const extra = {
           durationMin: Math.round(duration),
           lat: here.lat,
           lng: here.lng,
           offRouteM: Math.round(off[i]),
-        });
+          ...(engine ? { engineOffMin: engine.offMin, engineOnMin: engine.idleMin } : {}),
+        };
+        const parked = engine && engine.offMin >= duration * c.engineOffShare;
+        if (engine && !parked && !offRoute) {
+          // Engine running the whole time, on the planned road: the truck was
+          // held up, not parked. Reported, but not as a driver deviation.
+          add("standstill_on_route", "low", here.t, `Stood still ${mins(duration)} from ${fmt(here.t)} to ${fmt(pts[j].t)} on the planned route with the engine running: probably a traffic jam or a queue.`, extra);
+        } else {
+          unexplained.push([i, j]);
+          const how = !engine ? "" : parked ? ` Engine off for ${mins(engine.offMin)}.` : ` Engine running for ${mins(engine.idleMin)} (idling).`;
+          add("unexplained_stop", duration >= 60 ? "high" : "medium", here.t, `Parked ${mins(duration)} from ${fmt(here.t)} to ${fmt(pts[j].t)} at a place that is not a planned stop${offRoute ? `, ${dist(off[i])} off the planned route` : ""}.${how}`, extra);
+        }
       }
     }
     i = j > i ? j : i + 1;
@@ -359,8 +421,10 @@ function summarize(stopRows, deviations) {
     late: visited.filter((r) => r.status === "late").length,
     missed: stopRows.filter((r) => r.status === "missed").length,
     onTimePercent: visited.length > 0 ? Math.round((onTime / visited.length) * 100) : null,
-    deviations: deviations.length,
+    // "low" = explained by traffic: shown, but not counted as a deviation.
+    deviations: deviations.filter((d) => d.severity !== "low").length,
     high: deviations.filter((d) => d.severity === "high").length,
+    traffic: deviations.filter((d) => d.severity === "low").length,
   };
 }
 

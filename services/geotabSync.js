@@ -220,6 +220,34 @@ async function backfillDay(device, from, to) {
   return docs.length;
 }
 
+/**
+ * Every time the vehicle stood still between two instants, with how long the
+ * engine was off and how long it was running (from Geotab's trips). Lets the
+ * planned-vs-actual report tell a parked truck from one standing in traffic.
+ * @returns {Promise<Array<{ from: Date, to: Date, lat: number, lng: number, offMin: number, idleMin: number }>>}
+ */
+async function engineStops(device, from, to) {
+  if (!geotab.isConfigured() || !device.geotabId) return [];
+  const trips = (await geotab.getTrips(device.geotabId, from, to)) || [];
+  const stops = [];
+  for (const t of trips) {
+    const start = new Date(t.stop);
+    const end = new Date(t.nextTripStart);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) continue;
+    const total = (end - start) / 60000;
+    const idleMin = Math.min(total, geotab.timeSpanMinutes(t.idlingDuration));
+    stops.push({
+      from: start,
+      to: end,
+      lat: t.stopPoint?.y,
+      lng: t.stopPoint?.x,
+      idleMin,
+      offMin: Math.max(0, total - idleMin),
+    });
+  }
+  return stops;
+}
+
 // ---------- Fleet data ----------
 
 const listEnv = (name) =>
@@ -410,4 +438,4 @@ async function fleetOverview(from, to, { fresh = false } = {}) {
   return data;
 }
 
-module.exports = { start, stop, status, pollOnce, syncVehicles, backfillDay, fleetOverview, tenant };
+module.exports = { start, stop, status, pollOnce, syncVehicles, backfillDay, engineStops, fleetOverview, tenant };

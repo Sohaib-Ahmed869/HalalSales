@@ -110,6 +110,13 @@ async function updateLiveEtas(device, position, now = new Date()) {
     // Truck -> remaining stops (no return leg: only the stop ETAs matter here).
     const legs = await getTrafficLegs([start, ...stops.map((s) => s.coordinates)], now, startMin, depot.timeZone);
     if (legs) provider = legs.provider;
+    // The first leg is the one the truck is on now. Keep the worst traffic
+    // seen while driving it (a later reading covers less of the leg).
+    const onLeg = legs && legs.legDelayMin ? legs.legDelayMin[0] : null;
+    if (Number.isFinite(onLeg) && !here) {
+      remaining[0].liveTrafficMin = Math.max(remaining[0].liveTrafficMin || 0, Math.round(onLeg));
+      remaining[0].liveTrafficAt = now;
+    }
     const fixed = evaluateFixedRoute(stops, start, startMin, undefined, legs || null);
     const byId = new Map(fixed.sequence.map((s) => [s.id, s]));
     remaining.forEach((o) => {

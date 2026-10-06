@@ -1010,6 +1010,8 @@ function clearLiveEtas(route) {
     o.liveEtaMin = undefined;
     o.liveWaitMin = undefined;
     o.liveLate = undefined;
+    o.liveTrafficMin = undefined;
+    o.liveTrafficAt = undefined;
   });
 }
 
@@ -1023,6 +1025,7 @@ async function applyTrafficEtas(route) {
   route.trafficDepartAt = undefined;
   route.trafficDelayMin = undefined;
   route.trafficProvider = undefined;
+  route.orders.forEach((o) => (o.plannedTrafficMin = undefined));
   const depot = getDepot(route.tenant);
   const stops = stopsOf(route);
   const geocoded = stops.filter(
@@ -1039,11 +1042,15 @@ async function applyTrafficEtas(route) {
 
   const fixed = evaluateFixedRoute(stops, depot, departureMinOf(route), undefined, legs);
   const byId = new Map(fixed.sequence.map((s) => [s.id, s]));
+  // Leg i of the traffic answer ends at the i-th geocoded stop.
+  const legDelayById = new Map(geocoded.map((s, i) => [s.id, legs.legDelayMin ? legs.legDelayMin[i] : null]));
   route.orders.forEach((o) => {
     const evaluated = byId.get(String(o._id));
     if (evaluated) {
       applyEvaluated(o, evaluated);
     }
+    const delay = legDelayById.get(String(o._id));
+    if (Number.isFinite(delay)) o.plannedTrafficMin = Math.round(delay);
   });
   route.totalDistanceKm = fixed.totalDistanceKm;
   route.totalDurationMin = fixed.totalDurationMin;

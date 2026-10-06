@@ -58,6 +58,8 @@ async function analyzeOne(route, device, { backfill = true, now = new Date() } =
     etaMin: o.etaMin,
     waitMin: o.waitMin || 0,
     serviceMin,
+    plannedTrafficMin: o.plannedTrafficMin,
+    liveTrafficMin: o.liveTrafficMin,
   }));
   const plannedReturnMin = departureMin + (route.totalDurationMin || 0);
 
@@ -67,7 +69,13 @@ async function analyzeOne(route, device, { backfill = true, now = new Date() } =
   const to = new Date(Math.min(now.getTime(), midnightMs + (plannedReturnMin + 360) * 60000));
 
   let points = [];
+  let engine = [];
   if (device) {
+    try {
+      engine = await geotabSync.engineStops(device, from, to);
+    } catch (error) {
+      console.warn(`[adherence] Geotab trips for truck ${route.truckNumber} unavailable:`, error.message);
+    }
     if (backfill) {
       try {
         await geotabSync.backfillDay(device, from, to);
@@ -100,6 +108,7 @@ async function analyzeOne(route, device, { backfill = true, now = new Date() } =
     stops,
     points: points.map((p) => ({ lat: p.lat, lng: p.lng, speedKmh: p.speedKmh, t: toMin(p.recordedAt) })),
     plannedLine,
+    engineStops: engine.map((e) => ({ startMin: toMin(e.from), endMin: toMin(e.to), offMin: e.offMin, idleMin: e.idleMin })),
     nowMin: toMin(now),
   });
   // Lets the page turn "minutes on the depot clock" back into real times.

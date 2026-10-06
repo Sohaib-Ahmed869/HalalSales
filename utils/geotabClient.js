@@ -122,6 +122,20 @@ const getDeviceStatusInfo = () => get("DeviceStatusInfo");
 const getLogRecords = (deviceId, from, to) =>
   get("LogRecord", { deviceSearch: { id: deviceId }, fromDate: iso(from), toDate: iso(to) });
 
+// Trips of one vehicle in the period. Each trip ends with a stop that lasts
+// until nextTripStart: stopDuration is how long, idlingDuration how much of
+// it the engine was running. Geotab ends a trip when the ignition goes off or
+// the vehicle has stood still for about 200 seconds.
+const getTrips = (deviceId, from, to) =>
+  get("Trip", { deviceSearch: { id: deviceId }, fromDate: iso(from), toDate: iso(to) });
+
+// Geotab TimeSpan ("hh:mm:ss.fffffff" or "d.hh:mm:ss") -> minutes.
+function timeSpanMinutes(value) {
+  const m = /^(?:(\d+)\.)?(\d{1,2}):(\d{2}):(\d{2}(?:\.\d+)?)$/.exec(String(value || ""));
+  if (!m) return 0;
+  return (Number(m[1] || 0) * 24 + Number(m[2])) * 60 + Number(m[3]) + Number(m[4]) / 60;
+}
+
 const getRules = () => get("Rule");
 
 // Rule violations (idling, speeding, ...) of every vehicle in the period.
@@ -161,6 +175,8 @@ module.exports = {
   getDevices,
   getDeviceStatusInfo,
   getLogRecords,
+  getTrips,
+  timeSpanMinutes,
   getRules,
   getExceptionEvents,
   getFillUps,
