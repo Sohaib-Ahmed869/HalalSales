@@ -5,6 +5,7 @@ const Customer = require("../models/Customer");
 const Quotation = require("../models/Quotation");
 const { ScrapedRestaurant, ScrapedRestaurantGeo } = require("../models/ScrapedRestaurant");
 const SalesLead = require("../models/SalesLead");
+const SalesLeadGeo = require("../models/SalesLeadGeo");
 const { geocodeCustomer, geocodeAddress, deliveryPoint, deliveryAddressOf } = require("../utils/geocodingService");
 const { haversineKm } = require("../utils/routeOptimizer");
 
@@ -457,6 +458,79 @@ exports.getNearby = async (req, res) => {
     let leadsPending = 0;
     let leadsUnlocated = 0;
     let leadsOutside = 0;
+
+    // Leads typed by hand or imported on the Leads page: no scraped restaurant
+    // behind them, so they are placed from their own address (once, the pin kept
+    // in SalesLeadGeo). They are few and come before every other lookup.
+    let lookupsLeft = GEOCODE_PER_REQUEST();
+    const manualLeads = [];
+    let leadsNoPostalCode = 0;
+    if (req.query.potential !== "false" && zips.size > 0) {
+      const open = { relatedRestaurant: null, status: { $ne: "converted" } };
+      const docs = await SalesLead.find({ ...open, "address.zipCode": { $in: [...zips] } })
+        .select("fullName company status tags sourceType address phoneNumber email")
+        .limit(2000)
+        .lean();
+      const keyOf = (l) => normName([l.address?.street, l.address?.zipCode, l.address?.city].join(" "));
+      const known = await SalesLeadGeo.find({ leadId: { $in: docs.map((l) => l._id) } }).lean();
+      const geoByLead = new Map(known.map((g) => [String(g.leadId), g]));
+      // A pin made from an address that has since been changed does not count.
+      const pinOf = (l) => {
+        const g = geoByLead.get(String(l._id));
+        return g && g.addressKey === keyOf(l) ? g : null;
+      };
+      const todo = docs.filter((l) => !pinOf(l)).slice(0, lookupsLeft);
+      for (let i = 0; i < todo.length; i += 5) {
+        await Promise.all(
+          todo.slice(i, i + 5).map(async (l) => {
+            const zipCode = String(l.address.zipCode).trim();
+            // Without a street, the company or the name is searched in that postal code.
+            const street = usable(l.address.street) || usable(l.company) || usable(l.fullName);
+            // The Leads form fills in "England" by default; a five-digit postal code is French.
+            const country = /^\d{5}$/.test(zipCode) ? "France" : l.address.country;
+            let hit = null;
+            try {
+              hit = await geocodeAddress({ street, zipCode, city: l.address.city, country }, `lead:${l._id}`);
+            } catch (error) {
+              hit = null;
+            }
+            const doc = hit
+              ? { leadId: l._id, addressKey: keyOf(l), lat: hit.lat, lng: hit.lng, status: "ok", source: hit.source, confidence: hit.confidence, geocodedAt: new Date() }
+              : { leadId: l._id, addressKey: keyOf(l), status: "failed", geocodedAt: new Date() };
+            await SalesLeadGeo.updateOne({ leadId: l._id }, { $set: doc }, { upsert: true });
+            geoByLead.set(String(l._id), doc);
+          })
+        );
+      }
+      lookupsLeft -= todo.length;
+      docs.forEach((l) => {
+        const geo = pinOf(l);
+        if (!geo) return leadsPending++;
+        if (geo.status !== "ok") return leadsUnlocated++;
+        const distanceKm = haversineKm(center, geo);
+        if (distanceKm > radiusKm) return leadsOutside++;
+        manualLeads.push({
+          id: String(l._id),
+          name: l.fullName,
+          company: usable(l.company),
+          status: l.status || "new",
+          tags: l.tags || [],
+          sourceType: l.sourceType || "manual",
+          address: usable(l.address.street),
+          city: usable(l.address.city),
+          postalCode: String(l.address.zipCode).trim(),
+          phone: usable(l.phoneNumber),
+          email: usable(l.email),
+          coordinates: { lat: geo.lat, lng: geo.lng },
+          approximate: geo.confidence === "low" || !usable(l.address.street),
+          distanceKm: Math.round(distanceKm * 100) / 100,
+        });
+      });
+      manualLeads.sort((a, b) => a.distanceKm - b.distanceKm);
+      // Open leads that can never be matched to an area: no postal code at all.
+      leadsNoPostalCode = await SalesLead.countDocuments({ ...open, status: { $nin: ["converted", "dead"] }, "address.zipCode": { $in: [null, ""] } });
+    }
+
     if (req.query.potential !== "false" && zips.size > 0) {
       const fields = "name url postal_code menu_items_count contact_info scraped_at status";
       const own = centerZip ? await ScrapedRestaurant.find({ postal_code: centerZip }).select(fields).limit(NEARBY_MAX_SCRAPED).lean() : [];
@@ -479,7 +553,7 @@ exports.getNearby = async (req, res) => {
       // looks for), then the customer's own postal code, then everything else.
       const rank = (r) => (leadByRestaurant.has(String(r._id)) ? 0 : String(r.postal_code) === centerZip ? 1 : 2);
       const restaurants = scraped.filter((r) => r.status !== "failed").sort((a, b) => rank(a) - rank(b));
-      const geoById = await locateRestaurants(restaurants, GEOCODE_PER_REQUEST());
+      const geoById = await locateRestaurants(restaurants, lookupsLeft);
       // A scraped place with the same name as a customer here is that customer.
       const customerNames = new Set([centerCustomer, ...around].map((c) => normName(c.CardName)).filter(Boolean));
       const count = (r, field) => {
@@ -554,6 +628,9 @@ exports.getNearby = async (req, res) => {
       leadsPending,
       leadsUnlocated,
       leadsOutside,
+      manualLeads,
+      manualLeadsTotal: manualLeads.length,
+      leadsNoPostalCode,
       potentialsByPostalCode,
       centerPostalCode: centerZip,
       postalCodes: [...zips].sort(),
