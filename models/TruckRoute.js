@@ -152,6 +152,10 @@ const TruckRouteSchema = new Schema({
   trafficAt: { type: Date },
   trafficDepartAt: { type: String },
   trafficDelayMin: { type: Number },
+  // The leg back to the depot (the stops carry their own leg's figures): its
+  // drive time and its traffic delay, so the map can grade that stretch too.
+  returnDriveMin: { type: Number },
+  returnTrafficMin: { type: Number },
   trafficProvider: { type: String }, // "google" | "tomtom"
   // When the stops' live ETAs were last recomputed from GPS, how ("google" =
   // live traffic, "estimate") and from where (utils/liveEta.js).

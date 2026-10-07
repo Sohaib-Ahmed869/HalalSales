@@ -1025,6 +1025,8 @@ async function applyTrafficEtas(route) {
   route.trafficDepartAt = undefined;
   route.trafficDelayMin = undefined;
   route.trafficProvider = undefined;
+  route.returnDriveMin = undefined;
+  route.returnTrafficMin = undefined;
   route.orders.forEach((o) => (o.plannedTrafficMin = undefined));
   const depot = getDepot(route.tenant);
   const stops = stopsOf(route);
@@ -1059,6 +1061,10 @@ async function applyTrafficEtas(route) {
   route.trafficDepartAt = legs.departAt;
   route.trafficDelayMin = legs.delayMin;
   route.trafficProvider = legs.provider;
+  // The last leg is the drive back to the depot.
+  const back = geocoded.length;
+  if (legs.legMin && Number.isFinite(legs.legMin[back])) route.returnDriveMin = Math.round(legs.legMin[back]);
+  if (legs.legDelayMin && Number.isFinite(legs.legDelayMin[back])) route.returnTrafficMin = Math.round(legs.legDelayMin[back]);
 }
 
 async function sequenceRouteOrders(route) {

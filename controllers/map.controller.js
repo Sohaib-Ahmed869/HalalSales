@@ -4,6 +4,7 @@ const SalesOrder = require("../models/SalesOrder");
 const Customer = require("../models/Customer");
 const Quotation = require("../models/Quotation");
 const { ScrapedRestaurant, ScrapedRestaurantGeo } = require("../models/ScrapedRestaurant");
+const SalesLead = require("../models/SalesLead");
 const { geocodeCustomer, geocodeAddress, deliveryPoint, deliveryAddressOf } = require("../utils/geocodingService");
 const { haversineKm } = require("../utils/routeOptimizer");
 
@@ -290,7 +291,9 @@ exports.setCustomerCoordinates = async (req, res) => {
 // ---------- Sales map: who is around a customer ----------
 
 const NEARBY_MAX_CUSTOMERS = 400;
-const NEARBY_MAX_POTENTIALS = 400;
+const NEARBY_MAX_POTENTIALS = 1500;
+// Scraped restaurants read per request (the customer's own postal code first).
+const NEARBY_MAX_SCRAPED = 20000;
 // New scraped addresses located per request (each is one geocoding lookup);
 // the rest are reported as `potentialsPending` and done on the next requests.
 const GEOCODE_PER_REQUEST = () => Number(process.env.SALES_MAP_GEOCODE_PER_REQUEST) || 25;
@@ -439,25 +442,77 @@ exports.getNearby = async (req, res) => {
     }
     customers.sort((a, b) => a.distanceKm - b.distanceKm);
 
+    // Potential customers: the scraped restaurants of the postal codes found
+    // above. The picked customer's own postal code is read and located first,
+    // so its restaurants are complete before the wider area's. Every scraped
+    // restaurant is accounted for per postal code (shown, outside the circle,
+    // already a customer, not found, still to place, failed scrape) so the list
+    // can be compared with the Postal Scraping page.
     let potentials = [];
     let potentialsPending = 0;
     let potentialsUnlocated = 0;
+    const centerZip = String(deliveryAddressOf(centerCustomer)?.zipCode || "").trim();
+    const perZip = new Map();
+    let potentialLeadsTotal = 0;
+    let leadsPending = 0;
+    let leadsUnlocated = 0;
+    let leadsOutside = 0;
     if (req.query.potential !== "false" && zips.size > 0) {
-      const restaurants = await ScrapedRestaurant.find({ postal_code: { $in: [...zips] }, status: { $ne: "failed" } })
-        .select("name url postal_code menu_items_count contact_info scraped_at")
-        .limit(1500)
-        .lean();
+      const fields = "name url postal_code menu_items_count contact_info scraped_at status";
+      const own = centerZip ? await ScrapedRestaurant.find({ postal_code: centerZip }).select(fields).limit(NEARBY_MAX_SCRAPED).lean() : [];
+      const otherZips = [...zips].filter((z) => z !== centerZip);
+      const others =
+        otherZips.length > 0 && own.length < NEARBY_MAX_SCRAPED
+          ? await ScrapedRestaurant.find({ postal_code: { $in: otherZips } }).select(fields).limit(NEARBY_MAX_SCRAPED - own.length).lean()
+          : [];
+      const scraped = [...own, ...others];
+      // Scraped restaurants that the Leads page turned into a lead (a lead that
+      // became a customer is left out: that customer is on the map already).
+      const leadDocs =
+        scraped.length > 0
+          ? await SalesLead.find({ relatedRestaurant: { $in: scraped.map((r) => r._id) }, status: { $ne: "converted" } })
+              .select("fullName company status tags relatedRestaurant")
+              .lean()
+          : [];
+      const leadByRestaurant = new Map(leadDocs.map((l) => [String(l.relatedRestaurant), l]));
+      // Located in this order: the leads of the area (few, and what the user
+      // looks for), then the customer's own postal code, then everything else.
+      const rank = (r) => (leadByRestaurant.has(String(r._id)) ? 0 : String(r.postal_code) === centerZip ? 1 : 2);
+      const restaurants = scraped.filter((r) => r.status !== "failed").sort((a, b) => rank(a) - rank(b));
       const geoById = await locateRestaurants(restaurants, GEOCODE_PER_REQUEST());
       // A scraped place with the same name as a customer here is that customer.
       const customerNames = new Set([centerCustomer, ...around].map((c) => normName(c.CardName)).filter(Boolean));
-      restaurants.forEach((r) => {
+      const count = (r, field) => {
+        const zip = String(r.postal_code || "");
+        if (!perZip.has(zip)) perZip.set(zip, { postalCode: zip, scraped: 0, shown: 0, outside: 0, customers: 0, unlocated: 0, pending: 0, failed: 0 });
+        const row = perZip.get(zip);
+        row.scraped++;
+        row[field]++;
+      };
+      scraped.forEach((r) => {
+        if (r.status === "failed") return count(r, "failed");
         const geo = geoById.get(String(r._id));
-        if (!geo) return potentialsPending++;
-        if (geo.status !== "ok") return potentialsUnlocated++;
-        if (customerNames.has(normName(r.name))) return;
+        const lead = leadByRestaurant.get(String(r._id));
+        if (!geo) {
+          potentialsPending++;
+          if (lead) leadsPending++;
+          return count(r, "pending");
+        }
+        if (geo.status !== "ok") {
+          potentialsUnlocated++;
+          if (lead) leadsUnlocated++;
+          return count(r, "unlocated");
+        }
+        if (customerNames.has(normName(r.name))) return count(r, "customers");
         const distanceKm = haversineKm(center, geo);
-        if (distanceKm > radiusKm) return;
+        if (distanceKm > radiusKm) {
+          if (lead) leadsOutside++;
+          return count(r, "outside");
+        }
+        count(r, "shown");
+        if (lead) potentialLeadsTotal++;
         potentials.push({
+          lead: lead ? { id: String(lead._id), name: lead.fullName, status: lead.status || "new", tags: lead.tags || [] } : null,
           id: String(r._id),
           name: r.name,
           address: usable(r.contact_info?.address),
@@ -474,6 +529,9 @@ exports.getNearby = async (req, res) => {
       });
       potentials.sort((a, b) => a.distanceKm - b.distanceKm);
     }
+    const potentialsByPostalCode = [...perZip.values()].sort(
+      (a, b) => (b.postalCode === centerZip) - (a.postalCode === centerZip) || b.scraped - a.scraped || a.postalCode.localeCompare(b.postalCode)
+    );
 
     res.json({
       center: {
@@ -486,11 +544,18 @@ exports.getNearby = async (req, res) => {
       radiusKm,
       customers: customers.slice(0, NEARBY_MAX_CUSTOMERS),
       customersTotal: customers.length,
+      leadsTotal: customers.filter((c) => c.status === "lead" || c.status === "prospect").length,
       customersPending,
       potentials: potentials.slice(0, NEARBY_MAX_POTENTIALS),
       potentialsTotal: potentials.length,
       potentialsPending,
       potentialsUnlocated,
+      potentialLeadsTotal,
+      leadsPending,
+      leadsUnlocated,
+      leadsOutside,
+      potentialsByPostalCode,
+      centerPostalCode: centerZip,
       postalCodes: [...zips].sort(),
     });
   } catch (error) {
