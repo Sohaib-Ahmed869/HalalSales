@@ -29,6 +29,9 @@ const TruckScheduleSchema = new Schema({
   trucks: [
     {
       truckNumber: { type: Number, required: true },
+      // The MyGeotab vehicle this truck is (TruckDevice.geotabId); truckNumber
+      // and truckName are taken from it when the schedule is saved.
+      geotabId: { type: String },
       truckName: { type: String, trim: true },
       maxWeightKg: { type: Number, required: true },
       truckType: {
@@ -39,6 +42,7 @@ const TruckScheduleSchema = new Schema({
       // "HH:MM" the truck leaves the depot on days initialized from this
       // template. Drives every stop's ETA.
       departureTime: { type: String, default: "08:00" },
+      serviceMin: { type: Number }, // minutes allowed per stop; unset = default
     },
   ],
   isActive: {

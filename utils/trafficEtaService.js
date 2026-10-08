@@ -142,6 +142,12 @@ async function getTrafficLegs(points, routeDate, departureMin, timeZone) {
       durMin[i][i] = 0;
     }
     let delaySec = 0;
+    // Traffic delay of each leg (leg i = points[i] -> points[i + 1]) against free flow.
+    const legDelayMin = rawLegs.map((leg) =>
+      Number.isFinite(leg.seconds) && Number.isFinite(leg.freeFlowSeconds) ? Math.max(0, leg.seconds - leg.freeFlowSeconds) / 60 : null
+    );
+    // Drive time of each leg in this traffic.
+    const legMin = rawLegs.map((leg) => (Number.isFinite(leg.seconds) ? leg.seconds / 60 : null));
     rawLegs.forEach((leg, i) => {
       const a = index.get(pointKey(points[i]));
       const b = index.get(pointKey(points[i + 1]));
@@ -161,7 +167,7 @@ async function getTrafficLegs(points, routeDate, departureMin, timeZone) {
       })
     );
 
-    const value = { index, distKm, durMin, delayMin: Math.round(delaySec / 60), departAt, positions, provider };
+    const value = { index, distKm, durMin, delayMin: Math.round(delaySec / 60), legDelayMin, legMin, departAt, positions, provider };
     cache.set(requestKey, { at: Date.now(), value });
     if (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
     return value;

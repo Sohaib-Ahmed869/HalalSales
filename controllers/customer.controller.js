@@ -2553,6 +2553,9 @@ exports.updateCustomer = async (req, res) => {
       notes,
       openingTime,
       closingTime,
+      preferredDeliveryFrom,
+      preferredDeliveryTo,
+      marketingStatus,
     } = req.body;
 
     // Find customer
@@ -2572,6 +2575,9 @@ exports.updateCustomer = async (req, res) => {
     if (notes !== undefined) updateData.notes = notes;
     if (openingTime !== undefined) updateData.openingTime = openingTime;
     if (closingTime !== undefined) updateData.closingTime = closingTime;
+    if (preferredDeliveryFrom !== undefined) updateData.preferredDeliveryFrom = preferredDeliveryFrom;
+    if (preferredDeliveryTo !== undefined) updateData.preferredDeliveryTo = preferredDeliveryTo;
+    if (marketingStatus !== undefined) updateData.marketingStatus = marketingStatus;
 
     // Handle assignedTo separately with permission checks
     if (assignedTo !== undefined) {

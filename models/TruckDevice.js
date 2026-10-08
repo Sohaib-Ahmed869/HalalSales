@@ -1,13 +1,10 @@
 const mongoose = require("mongoose");
 const Schema = mongoose.Schema;
 
-// A phone running the Traccar Client app, assigned to one truck.
-// `deviceId` is what the driver types into Traccar Client's "Device
-// identifier" field. It is generated here (random, unguessable) and doubles as
-// the credential: the ingest endpoint has no login because the app can't send
-// a Bearer token, so knowing the id is what authorises a position.
+// A MyGeotab vehicle (GO device) assigned to one truck number.
 // Trucks are matched by `truckNumber` (same number as TruckSchedule/TruckRoute),
-// so the phone follows the truck across days without re-registering.
+// so the vehicle follows the truck across days. services/geotabSync.js keeps
+// `lastPosition` current from Geotab's DeviceStatusInfo feed.
 const TruckDeviceSchema = new Schema({
   deviceId: { type: String, required: true, unique: true, index: true },
   tenant: {
@@ -16,7 +13,17 @@ const TruckDeviceSchema = new Schema({
     default: "halal-food-sales",
   },
   truckNumber: { type: Number, required: true },
-  label: { type: String, trim: true }, // e.g. driver name / phone
+  label: { type: String, trim: true }, // vehicle name in MyGeotab
+  // deviceId is "geotab:<Geotab device id>" for vehicles read from MyGeotab.
+  provider: { type: String, default: "geotab" },
+  geotabId: { type: String },
+  licensePlate: { type: String, trim: true },
+  vin: { type: String, trim: true },
+  serialNumber: { type: String, trim: true },
+  // Set in the portal (Weekly Templates): payload in kg and usual departure
+  // time, offered again whenever this vehicle is picked for a schedule.
+  maxWeightKg: { type: Number },
+  departureTime: { type: String },
   isActive: { type: Boolean, default: true },
   // Latest fix, kept on the device so "where is everyone" is one query.
   lastPosition: {
@@ -27,6 +34,8 @@ const TruckDeviceSchema = new Schema({
     accuracyM: Number,
     battery: Number,
     recordedAt: Date, // device clock
+    driving: Boolean,
+    communicating: Boolean,
   },
   lastSeenAt: { type: Date }, // server clock
   createdAt: { type: Date, default: Date.now },

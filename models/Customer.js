@@ -263,6 +263,14 @@ const CustomerSchema = new Schema({
     // is never reused.
     addressKey: { type: String },
   },
+  // Optional window the customer prefers to be delivered in ("HH:MM"). When
+  // set, auto-routing aims for it instead of the whole opening hours.
+  preferredDeliveryFrom: {
+    type: String,
+  },
+  preferredDeliveryTo: {
+    type: String,
+  },
   fulfillmentMethod: {
     type: String,
     enum: ["delivery", "pickup"],

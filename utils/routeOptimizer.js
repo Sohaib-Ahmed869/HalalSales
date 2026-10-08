@@ -151,6 +151,33 @@ function parseTimeWindow(openingTime, closingTime) {
 }
 
 /**
+ * The time window a stop is planned for. A customer's preferred delivery
+ * window (storeHours.preferredFrom / preferredTo), when given, narrows the
+ * shop's opening hours; customers without one are planned on opening hours
+ * alone, as before. A preferred window that doesn't overlap the opening hours
+ * is used as given (the customer asked for it).
+ *
+ * @param {Object} hours - { openingTime, closingTime, preferredFrom, preferredTo }
+ * @returns {{ windowOpen: number|null, windowClose: number|null, shopClose: number|null, hasPreferred: boolean }}
+ */
+function stopWindow(hours = {}) {
+  const shop = parseTimeWindow(hours?.openingTime, hours?.closingTime);
+  const pref = parseTimeWindow(hours?.preferredFrom, hours?.preferredTo);
+  if (pref.windowOpen == null && pref.windowClose == null) {
+    return { windowOpen: shop.windowOpen, windowClose: shop.windowClose, shopClose: shop.windowClose, hasPreferred: false };
+  }
+  let windowOpen = pref.windowOpen;
+  let windowClose = pref.windowClose;
+  if (shop.windowOpen != null) windowOpen = windowOpen == null ? shop.windowOpen : Math.max(windowOpen, shop.windowOpen);
+  if (shop.windowClose != null) windowClose = windowClose == null ? shop.windowClose : Math.min(windowClose, shop.windowClose);
+  if (windowOpen != null && windowClose != null && windowClose < windowOpen) {
+    windowOpen = pref.windowOpen;
+    windowClose = pref.windowClose;
+  }
+  return { windowOpen, windowClose, shopClose: shop.windowClose, hasPreferred: true };
+}
+
+/**
  * Sweep-clusters stops by polar angle around the depot, splitting whenever
  * adding the next stop would exceed the given capacity. Produces the fewest
  * geographically-coherent clusters that fit within capacity.
@@ -1016,6 +1043,7 @@ module.exports = {
   DEFAULT_SERVICE_MIN,
   parseTimeToMinutes,
   parseTimeWindow,
+  stopWindow,
   sweepCluster,
   proximityCluster,
   timelineAssign,

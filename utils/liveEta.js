@@ -1,6 +1,6 @@
 // utils/liveEta.js
 //
-// Live ETAs from the truck's GPS (Traccar Client). The planned ETAs
+// Live ETAs from the truck's GPS (MyGeotab). The planned ETAs
 // (etaMin/waitMin, computed when the route is optimized) are never changed;
 // this adds a second, live estimate per remaining stop:
 //
@@ -11,21 +11,21 @@
 //   route.liveEtaAt / liveEtaProvider ("google" = live traffic, "estimate")
 //
 // How: start = the truck's latest fix at "now" (or, if the truck is at a stop
-// that isn't delivered yet, that stop once its service time is over), then
-// the remaining (not delivered / failed) stops in their planned order go
+// it hasn't left yet, that stop once its service time is over), then the
+// remaining stops (not visited yet, see utils/stopVisits.js) in their planned order go
 // through the same timeline as planning (evaluateFixedRoute: drive time,
 // waits for opening, service time, late flags), with Google live-traffic
 // drive times (trafficEtaService) or the straight-line estimate if Google is
 // unavailable.
 //
 // Recomputed at most every LIVE_ETA_INTERVAL_MIN per truck (default 10),
-// and right away when GPS marks a stop arrived/delivered. Only for today's
+// and right away when GPS sees the truck reach or leave a stop. Only for today's
 // route and fresh fixes. Each recompute is one Google request per 25 stops.
 //
 // Env: LIVE_ETA_ENABLED ("false" = off), LIVE_ETA_INTERVAL_MIN (10).
 
 const TruckRoute = require("../models/TruckRoute");
-const { evaluateFixedRoute, parseTimeWindow, serviceOf } = require("./routeOptimizer");
+const { evaluateFixedRoute, stopWindow, serviceOf } = require("./routeOptimizer");
 const { getTrafficLegs } = require("./trafficEtaService");
 const { getWarehouse } = require("./regions");
 
@@ -53,11 +53,12 @@ function dayRange(at) {
   return { $gte: start, $lt: new Date(start.getTime() + 24 * 60 * 60 * 1000) };
 }
 
-const toStop = (o) => ({
-  id: String(o._id),
-  coordinates: o.coordinates,
-  ...parseTimeWindow(o.storeHours?.openingTime, o.storeHours?.closingTime),
-});
+const toStop = (o, serviceMin) => {
+  const { windowOpen, windowClose } = stopWindow(o.storeHours);
+  const stop = { id: String(o._id), coordinates: o.coordinates, windowOpen, windowClose };
+  if (Number.isFinite(serviceMin)) stop.serviceMin = serviceMin;
+  return stop;
+};
 
 /**
  * Recomputes the live ETAs of the truck's remaining stops and saves them.
@@ -75,10 +76,10 @@ async function updateLiveEtas(device, position, now = new Date()) {
   const ordered = route.orders
     .filter((o) => o.coordinates && Number.isFinite(o.coordinates.lat) && Number.isFinite(o.coordinates.lng))
     .sort((a, b) => (a.sequenceNumber || 0) - (b.sequenceNumber || 0));
-  const open = ordered.filter((o) => o.status !== "delivered" && o.status !== "failed");
+  const done = (o) => Boolean(o.departedAt) || o.status === "delivered" || o.status === "failed";
+  const open = ordered.filter((o) => !done(o));
 
-  // Truck parked at a stop that isn't delivered yet: it leaves there once
-  // that stop's service time is over.
+  // Truck parked at a stop: it leaves there once that stop's service time is over.
   const nowMin = clockMinutes(now, depot.timeZone);
   let start = { lat: position.lat, lng: position.lng };
   let startMin = nowMin;
@@ -87,16 +88,16 @@ async function updateLiveEtas(device, position, now = new Date()) {
   if (here) {
     const arrivedMin = nowMin - (now - here.arrivedAt) / 60000;
     start = here.coordinates;
-    startMin = Math.max(nowMin, arrivedMin + serviceOf(toStop(here)));
+    startMin = Math.max(nowMin, arrivedMin + serviceOf(toStop(here, route.serviceMin)));
     here.liveEtaMin = Math.round(arrivedMin);
     here.liveWaitMin = 0;
     here.liveLate = false;
     remaining = open.filter((o) => o !== here);
   }
 
-  // Delivered / failed stops don't get a live ETA any more.
+  // Stops the truck has already been to don't get a live ETA any more.
   ordered.forEach((o) => {
-    if (o.status === "delivered" || o.status === "failed") {
+    if (done(o)) {
       o.liveEtaMin = undefined;
       o.liveWaitMin = undefined;
       o.liveLate = undefined;
@@ -105,10 +106,17 @@ async function updateLiveEtas(device, position, now = new Date()) {
 
   let provider = "estimate";
   if (remaining.length > 0) {
-    const stops = remaining.map(toStop);
+    const stops = remaining.map((o) => toStop(o, route.serviceMin));
     // Truck -> remaining stops (no return leg: only the stop ETAs matter here).
     const legs = await getTrafficLegs([start, ...stops.map((s) => s.coordinates)], now, startMin, depot.timeZone);
     if (legs) provider = legs.provider;
+    // The first leg is the one the truck is on now. Keep the worst traffic
+    // seen while driving it (a later reading covers less of the leg).
+    const onLeg = legs && legs.legDelayMin ? legs.legDelayMin[0] : null;
+    if (Number.isFinite(onLeg) && !here) {
+      remaining[0].liveTrafficMin = Math.max(remaining[0].liveTrafficMin || 0, Math.round(onLeg));
+      remaining[0].liveTrafficAt = now;
+    }
     const fixed = evaluateFixedRoute(stops, start, startMin, undefined, legs || null);
     const byId = new Map(fixed.sequence.map((s) => [s.id, s]));
     remaining.forEach((o) => {
@@ -129,7 +137,7 @@ async function updateLiveEtas(device, position, now = new Date()) {
 
 /**
  * Called for every GPS fix; recomputes when due. Never throws.
- * @param {boolean} force - a stop was just marked arrived/delivered
+ * @param {boolean} force - the truck just reached or left a stop
  * @param {function} onUpdated - called with the result when ETAs changed
  */
 async function maybeUpdateLiveEtas(device, fix, { force = false, onUpdated } = {}) {
@@ -138,7 +146,7 @@ async function maybeUpdateLiveEtas(device, fix, { force = false, onUpdated } = {
   if (Date.now() - fix.recordedAt.getTime() > FRESH_FIX_MS) return; // old/buffered fix
   const key = `${device.tenant}|${device.truckNumber}`;
   if (running.has(key)) {
-    // An arrival/delivery during a recompute must not be lost: run once more after.
+    // An arrival during a recompute must not be lost: run once more after.
     if (force) rerun.set(key, { device, fix, onUpdated });
     return;
   }

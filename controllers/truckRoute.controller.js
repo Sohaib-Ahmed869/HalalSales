@@ -3,11 +3,15 @@ const TruckSchedule = require("../models/TruckSchedule");
 const TruckRoute = require("../models/TruckRoute");
 const Customer = require("../models/Customer");
 const DeliveryNote = require("../models/DeliveryNote");
+const LogisticsOrder = require("../models/LogisticsOrder");
+const SalesOrder = require("../models/SalesOrder");
+const TruckDevice = require("../models/TruckDevice");
+const RouteAdherence = require("../models/RouteAdherence");
 const Item = require("../models/item");
 const {
   sequenceRoute,
   parseTimeToMinutes,
-  parseTimeWindow,
+  stopWindow,
   evaluateFixedRoute,
   DEFAULT_DEPARTURE_MIN,
   planRegionAssignment,
@@ -52,6 +56,40 @@ exports.getSchedules = async (req, res) => {
   }
 };
 
+// Trucks of a schedule are MyGeotab vehicles picked in the portal. Their
+// truck number and name always come from the vehicle (TruckDevice), and the
+// capacity / departure time entered here are remembered on the vehicle so the
+// next schedule offers them again. Returns an error message, or null.
+async function resolveScheduleTrucks(trucks, { tenant, dayOfWeek, scheduleId }) {
+  const picked = trucks.filter((t) => t.geotabId);
+  if (picked.length > 0) {
+    const devices = await TruckDevice.find({ tenant, isActive: true, geotabId: { $in: picked.map((t) => t.geotabId) } });
+    const byGeotabId = new Map(devices.map((d) => [d.geotabId, d]));
+    for (const truck of picked) {
+      const device = byGeotabId.get(truck.geotabId);
+      if (!device) return "One of the selected vehicles is no longer available in MyGeotab.";
+      truck.truckNumber = device.truckNumber;
+      truck.truckName = device.label || device.licensePlate || `Truck ${device.truckNumber}`;
+      truck.truckType = "custom";
+      device.maxWeightKg = truck.maxWeightKg;
+      device.departureTime = truck.departureTime;
+      await device.save();
+    }
+  }
+  if (trucks.some((t) => !(Number(t.maxWeightKg) > 0))) return "Enter the capacity (kg) of every truck.";
+  const numbers = trucks.map((t) => t.truckNumber);
+  if (new Set(numbers).size !== numbers.length) return "The same truck is in this schedule twice.";
+  // A truck does one route a day: it can't be in two schedules of the same weekday.
+  const query = { tenant, dayOfWeek, isActive: true, "trucks.truckNumber": { $in: numbers } };
+  if (scheduleId) query._id = { $ne: scheduleId };
+  const clash = await TruckSchedule.findOne(query).lean();
+  if (clash) {
+    const truck = clash.trucks.find((t) => numbers.includes(t.truckNumber));
+    return `${truck.truckName || `Truck ${truck.truckNumber}`} is already in the ${dayOfWeek} schedule for ${clash.region}.`;
+  }
+  return null;
+}
+
 // Create or update. Matches the fact that TruckSchedules.jsx sends the same
 // payload for both create and edit; if the body carries an existing `_id`,
 // this upserts instead of creating a duplicate.
@@ -62,6 +100,9 @@ exports.createSchedule = async (req, res) => {
     if (!dayOfWeek || !trucks || trucks.length === 0) {
       return res.status(400).json({ message: "dayOfWeek and at least one truck are required" });
     }
+
+    const problem = await resolveScheduleTrucks(trucks, { tenant: tenantFromReq(req), dayOfWeek, scheduleId: _id });
+    if (problem) return res.status(400).json({ message: problem });
 
     const data = {
       dayOfWeek,
@@ -93,6 +134,16 @@ exports.createSchedule = async (req, res) => {
 
 exports.updateSchedule = async (req, res) => {
   try {
+    if (Array.isArray(req.body.trucks)) {
+      const current = await TruckSchedule.findById(req.params.id).lean();
+      if (!current) return res.status(404).json({ message: "Schedule not found" });
+      const problem = await resolveScheduleTrucks(req.body.trucks, {
+        tenant: current.tenant,
+        dayOfWeek: req.body.dayOfWeek || current.dayOfWeek,
+        scheduleId: req.params.id,
+      });
+      if (problem) return res.status(400).json({ message: problem });
+    }
     const schedule = await TruckSchedule.findByIdAndUpdate(req.params.id, req.body, {
       new: true,
       runValidators: true,
@@ -118,56 +169,51 @@ exports.deleteSchedule = async (req, res) => {
 
 // ---------- Per-date routes ----------
 
+// Creates the day's truck routes from the active weekly templates of that
+// weekday (trucks that already have a route for the date are left alone).
+async function initializeTrucksFor(date, tenant) {
+  const weekday = dayOfWeekFor(date);
+  const schedules = await TruckSchedule.find({ dayOfWeek: weekday, isActive: true, tenant });
+
+  const dayStart = new Date(date);
+  dayStart.setHours(0, 0, 0, 0);
+
+  let created = 0;
+  let skipped = 0;
+  for (const schedule of schedules) {
+    for (const truck of schedule.trucks) {
+      const exists = await TruckRoute.findOne({ date: dayStart, truckNumber: truck.truckNumber, region: schedule.region, tenant });
+      if (exists) {
+        skipped++;
+        continue;
+      }
+      await TruckRoute.create({
+        date: dayStart,
+        truckNumber: truck.truckNumber,
+        truckName: truck.truckName || `Truck ${truck.truckNumber}`,
+        truckType: truck.truckType,
+        maxWeightKg: truck.maxWeightKg,
+        departureTime: truck.departureTime || "08:00",
+        serviceMin: truck.serviceMin,
+        region: schedule.region,
+        departments: schedule.departments,
+        cities: schedule.cities,
+        scheduleId: schedule._id,
+        tenant,
+        status: "planning",
+        orders: [],
+      });
+      created++;
+    }
+  }
+  return { created, skipped, weekday, templates: schedules.length };
+}
+
 exports.initializeDate = async (req, res) => {
   try {
     const { date } = req.body;
     if (!date) return res.status(400).json({ message: "date is required" });
-
-    const tenant = tenantFromReq(req);
-    const weekday = dayOfWeekFor(date);
-    const schedules = await TruckSchedule.find({
-      dayOfWeek: weekday,
-      isActive: true,
-      tenant,
-    });
-
-    const dayStart = new Date(date);
-    dayStart.setHours(0, 0, 0, 0);
-
-    let created = 0;
-    let skipped = 0;
-
-    for (const schedule of schedules) {
-      for (const truck of schedule.trucks) {
-        const exists = await TruckRoute.findOne({
-          date: dayStart,
-          truckNumber: truck.truckNumber,
-          region: schedule.region,
-        });
-        if (exists) {
-          skipped++;
-          continue;
-        }
-
-        await TruckRoute.create({
-          date: dayStart,
-          truckNumber: truck.truckNumber,
-          truckName: truck.truckName || `Truck ${truck.truckNumber}`,
-          truckType: truck.truckType,
-          maxWeightKg: truck.maxWeightKg,
-          departureTime: truck.departureTime || "08:00",
-          region: schedule.region,
-          departments: schedule.departments,
-          cities: schedule.cities,
-          scheduleId: schedule._id,
-          tenant,
-          status: "planning",
-          orders: [],
-        });
-        created++;
-      }
-    }
-
+    const { created, skipped, weekday } = await initializeTrucksFor(date, tenantFromReq(req));
     res.json({
       message: `Initialized ${created} truck route(s) for ${weekday} ${date}`,
       created,
@@ -188,14 +234,45 @@ exports.getRoutesByDate = async (req, res) => {
     const dayEnd = new Date(dayStart);
     dayEnd.setHours(23, 59, 59, 999);
 
+    const tenant = tenantFromReq(req);
+    // A day with orders sent to Logistics always has its trucks: any truck of
+    // that weekday's templates still missing (template added or changed after
+    // the orders were sent) is created here. There is no separate button.
+    if (!USE_DELIVERY_NOTES() && (await LogisticsOrder.exists({ tenant, deliveryDate: { $gte: dayStart, $lte: dayEnd } }))) {
+      await initializeTrucksFor(date, tenant);
+    }
+
     const routes = await TruckRoute.find({
       date: { $gte: dayStart, $lte: dayEnd },
-      tenant: tenantFromReq(req),
+      tenant,
     }).sort({ region: 1, truckNumber: 1 });
 
     res.json({ routes });
   } catch (error) {
     console.error("Get routes by date error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// DELETE /truck-routes/date/:date - removes the trucks of a day that has no
+// orders sent to Logistics (days set up before orders came from the Bulk
+// Order Conversion page). Refused for a day that is in use.
+exports.clearDate = async (req, res) => {
+  try {
+    const tenant = tenantFromReq(req);
+    const { dayStart, dayEnd } = dayBounds(req.params.date);
+    if (Number.isNaN(dayStart.getTime())) return res.status(400).json({ message: "Invalid date" });
+    const day = { $gte: dayStart, $lte: dayEnd };
+    if (await LogisticsOrder.exists({ tenant, deliveryDate: day })) {
+      return res.status(400).json({ message: "Orders are planned for this date, so its trucks can't be removed." });
+    }
+    const routes = await TruckRoute.find({ tenant, date: day }).select("_id").lean();
+    const ids = routes.map((r) => r._id);
+    await RouteAdherence.deleteMany({ routeId: { $in: ids } });
+    const result = await TruckRoute.deleteMany({ _id: { $in: ids } });
+    res.json({ message: `Removed ${result.deletedCount} truck(s) from ${req.params.date}`, removed: result.deletedCount });
+  } catch (error) {
+    console.error("Clear date error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
@@ -227,6 +304,26 @@ exports.setDepartureTime = async (req, res) => {
     res.json({ message: "Departure time updated", route });
   } catch (error) {
     console.error("Set departure time error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// Minutes allowed at each stop of this route (15 / 20 / 30 in the UI); every
+// later ETA and the return time move with it.
+exports.setServiceTime = async (req, res) => {
+  try {
+    const serviceMin = Number(req.body.serviceMin);
+    if (!Number.isFinite(serviceMin) || serviceMin < 0 || serviceMin > 180) {
+      return res.status(400).json({ message: "serviceMin must be a number of minutes between 0 and 180" });
+    }
+    const route = await TruckRoute.findById(req.params.routeId);
+    if (!route) return res.status(404).json({ message: "Route not found" });
+    route.serviceMin = serviceMin;
+    await resequenceRoute(route);
+    await route.save();
+    res.json({ message: "Stop time allowance updated", route });
+  } catch (error) {
+    console.error("Set service time error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
@@ -338,6 +435,10 @@ async function buildDeliverableOrder(deliveryNote, customersByCode, tenant) {
     coordinates: geoSource ? { lat: geoSource.lat, lng: geoSource.lng } : null,
     openingTime: customer ? customer.openingTime : undefined,
     closingTime: customer ? customer.closingTime : undefined,
+    preferredDeliveryFrom: customer ? customer.preferredDeliveryFrom : undefined,
+    preferredDeliveryTo: customer ? customer.preferredDeliveryTo : undefined,
+    docType: deliveryNote.deliveryDate ? "order" : "deliveryNote",
+    deliveryDate: deliveryNote.deliveryDate,
     geocodeStatus: geoSource ? "ok" : customer?.geo?.geocodeStatus || "pending",
     fulfillmentMethod: customer ? customer.fulfillmentMethod : "delivery",
     // Derived from the customer's postal code via utils/regions.js — the
@@ -348,8 +449,187 @@ async function buildDeliverableOrder(deliveryNote, customersByCode, tenant) {
   };
 }
 
-// Every deliverable DeliveryNote for the date that isn't already assigned to
-// a TruckRoute. Excludes pickup customers (never routed at all).
+// ---------- Orders sent to Logistics (explicit selection) ----------
+//
+// The plan for a date is made of the sales orders an operator moved here from
+// the Bulk Order Conversion page for that date (models/LogisticsOrder.js),
+// not of every document dated that day: many orders are open and only the
+// chosen ones go out. LOGISTICS_ORDER_SOURCE=delivery-notes restores the old
+// "every SAP delivery note dated that day" behaviour.
+
+const USE_DELIVERY_NOTES = () => process.env.LOGISTICS_ORDER_SOURCE === "delivery-notes";
+
+function dayBounds(date) {
+  const dayStart = new Date(date);
+  dayStart.setHours(0, 0, 0, 0);
+  const dayEnd = new Date(dayStart);
+  dayEnd.setHours(23, 59, 59, 999);
+  return { dayStart, dayEnd };
+}
+
+// The documents that may be planned between dayStart and dayEnd.
+async function loadPool(dayStart, dayEnd, tenant) {
+  if (USE_DELIVERY_NOTES()) {
+    return DeliveryNote.find({ Cancelled: { $ne: "Y" }, DocDate: { $gte: dayStart, $lte: dayEnd } });
+  }
+  return LogisticsOrder.find({ tenant, deliveryDate: { $gte: dayStart, $lte: dayEnd } }).lean();
+}
+
+async function findPoolDoc(docEntry, tenant) {
+  if (USE_DELIVERY_NOTES()) return DeliveryNote.findOne({ DocEntry: docEntry, Cancelled: { $ne: "Y" } });
+  return LogisticsOrder.findOne({ tenant, DocEntry: docEntry }).lean();
+}
+
+const isoDay = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+// POST /truck-routes/selection  { deliveryDate: "YYYY-MM-DD", orders: [{ DocEntry, ... }] }
+// Sends sales orders to Logistics for a delivery date. Sending an order again
+// moves it to the new date, unless it is already on a truck.
+exports.moveToLogistics = async (req, res) => {
+  try {
+    const { deliveryDate, orders } = req.body;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(deliveryDate || "")) {
+      return res.status(400).json({ message: "deliveryDate (YYYY-MM-DD) is required" });
+    }
+    if (!Array.isArray(orders) || orders.length === 0) {
+      return res.status(400).json({ message: "Select at least one order" });
+    }
+    const tenant = tenantFromReq(req);
+    const { dayStart } = dayBounds(deliveryDate);
+
+    const docEntries = [...new Set(orders.map((o) => Number(o.DocEntry)).filter(Number.isFinite))];
+    const [fresh, existing, onTrucks] = await Promise.all([
+      SalesOrder.find({ DocEntry: { $in: docEntries } })
+        .select("DocEntry DocNum DocDate DocDueDate CardCode CardName DocTotal DocumentLines.ItemCode DocumentLines.ItemDescription DocumentLines.Quantity")
+        .lean(),
+      LogisticsOrder.find({ tenant, DocEntry: { $in: docEntries } }).lean(),
+      TruckRoute.find({ tenant, "orders.order.DocEntry": { $in: docEntries } }).lean(),
+    ]);
+    const freshByEntry = new Map(fresh.map((o) => [o.DocEntry, o]));
+    const existingByEntry = new Map(existing.map((o) => [o.DocEntry, o]));
+    const truckByEntry = new Map();
+    onTrucks.forEach((r) =>
+      r.orders.forEach((o) => truckByEntry.set(o.order.DocEntry, { truckName: r.truckName || `Truck ${r.truckNumber}`, date: isoDay(r.date) }))
+    );
+
+    let moved = 0;
+    let rescheduled = 0;
+    const alreadyOnTruck = [];
+    const skipped = [];
+    for (const sent of orders) {
+      const docEntry = Number(sent.DocEntry);
+      // The copy in this database is the freshest; what the page sent is the fallback.
+      const src = freshByEntry.get(docEntry) || sent;
+      if (!Number.isFinite(docEntry) || !src.CardCode) {
+        skipped.push({ docEntry: sent.DocEntry, reason: "missing order number or customer" });
+        continue;
+      }
+      const onTruck = truckByEntry.get(docEntry);
+      if (onTruck) {
+        alreadyOnTruck.push({ docEntry, docNum: src.DocNum, cardName: src.CardName, ...onTruck });
+        continue;
+      }
+      const before = existingByEntry.get(docEntry);
+      await LogisticsOrder.updateOne(
+        { tenant, DocEntry: docEntry },
+        {
+          $set: {
+            DocNum: src.DocNum,
+            DocDate: src.DocDate,
+            DocDueDate: src.DocDueDate,
+            CardCode: src.CardCode,
+            CardName: src.CardName,
+            DocTotal: src.DocTotal,
+            DocumentLines: (src.DocumentLines || []).map((l) => ({
+              ItemCode: l.ItemCode,
+              ItemDescription: l.ItemDescription,
+              Quantity: l.Quantity,
+            })),
+            deliveryDate: dayStart,
+            movedBy: req.user?._id,
+            movedAt: new Date(),
+          },
+        },
+        { upsert: true }
+      );
+      if (before && before.deliveryDate.getTime() !== dayStart.getTime()) rescheduled++;
+      else if (!before) moved++;
+    }
+
+    // Sending orders for a day is what opens that day in Logistics: its trucks
+    // are created from the weekly templates right away.
+    const trucks = moved + rescheduled > 0 || existing.length > 0 ? await initializeTrucksFor(deliveryDate, tenant) : null;
+    const trucksForDate = await TruckRoute.countDocuments({ tenant, date: dayStart });
+
+    res.json({
+      message: `${moved + rescheduled} order(s) sent to Logistics for ${deliveryDate}`,
+      trucksCreated: trucks ? trucks.created : 0,
+      trucksForDate,
+      weekday: dayOfWeekFor(deliveryDate),
+      deliveryDate,
+      moved,
+      rescheduled,
+      unchanged: orders.length - moved - rescheduled - alreadyOnTruck.length - skipped.length,
+      alreadyOnTruck,
+      skipped,
+    });
+  } catch (error) {
+    console.error("Move to logistics error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// DELETE /truck-routes/selection/:docEntry - takes an order back out of Logistics.
+exports.removeFromLogistics = async (req, res) => {
+  try {
+    const tenant = tenantFromReq(req);
+    const docEntry = Number(req.params.docEntry);
+    const onTruck = await TruckRoute.findOne({ tenant, "orders.order.DocEntry": docEntry }).lean();
+    if (onTruck) {
+      return res.status(400).json({
+        message: `This order is on ${onTruck.truckName || `Truck ${onTruck.truckNumber}`} (${isoDay(onTruck.date)}). Remove it from the truck first.`,
+      });
+    }
+    const result = await LogisticsOrder.deleteOne({ tenant, DocEntry: docEntry });
+    if (result.deletedCount === 0) return res.status(404).json({ message: "Order is not in Logistics" });
+    res.json({ message: "Order removed from Logistics" });
+  } catch (error) {
+    console.error("Remove from logistics error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// GET /truck-routes/selection/dates - how many orders are waiting per planned
+// delivery date (from yesterday on), so the page can offer those dates.
+exports.getSelectionDates = async (req, res) => {
+  try {
+    const tenant = tenantFromReq(req);
+    const from = new Date();
+    from.setHours(0, 0, 0, 0);
+    from.setDate(from.getDate() - 1);
+    const [selected, routes] = await Promise.all([
+      LogisticsOrder.find({ tenant, deliveryDate: { $gte: from } }).select("DocEntry deliveryDate").lean(),
+      TruckRoute.find({ tenant, date: { $gte: from } }).select("orders.order.DocEntry").lean(),
+    ]);
+    const assigned = new Set(routes.flatMap((r) => r.orders.map((o) => o.order.DocEntry)));
+    const byDate = new Map();
+    selected.forEach((o) => {
+      const key = isoDay(o.deliveryDate);
+      const entry = byDate.get(key) || { date: key, total: 0, unassigned: 0 };
+      entry.total++;
+      if (!assigned.has(o.DocEntry)) entry.unassigned++;
+      byDate.set(key, entry);
+    });
+    res.json({ dates: [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date)) });
+  } catch (error) {
+    console.error("Selection dates error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// Every order planned for the date that isn't on a TruckRoute yet. Excludes
+// pickup customers (never routed at all).
 exports.getAvailableOrders = async (req, res) => {
   try {
     const { date } = req.params;
@@ -365,10 +645,7 @@ exports.getAvailableOrders = async (req, res) => {
     const dayEnd = new Date(endDate ? new Date(endDate) : dayStart);
     dayEnd.setHours(23, 59, 59, 999);
 
-    const deliveryNotes = await DeliveryNote.find({
-      Cancelled: { $ne: "Y" },
-      DocDate: { $gte: dayStart, $lte: dayEnd },
-    });
+    const deliveryNotes = await loadPool(dayStart, dayEnd, tenant);
 
     const routes = await TruckRoute.find({ date: { $gte: dayStart, $lte: dayEnd }, tenant });
     const assignedDocEntries = new Set(
@@ -430,8 +707,8 @@ exports.assignOrderToTruck = async (req, res) => {
       return res.status(400).json({ message: "Order already assigned to this truck" });
     }
 
-    const deliveryNote = await DeliveryNote.findOne({ DocEntry: orderDocEntry, Cancelled: { $ne: "Y" } });
-    if (!deliveryNote) return res.status(404).json({ message: "Deliverable order not found" });
+    const deliveryNote = await findPoolDoc(orderDocEntry, route.tenant);
+    if (!deliveryNote) return res.status(404).json({ message: "This order hasn't been sent to Logistics" });
 
     const customer = await Customer.findOne({ CardCode: deliveryNote.CardCode }).lean();
     const customersByCode = new Map(customer ? [[customer.CardCode, customer]] : []);
@@ -461,11 +738,12 @@ exports.assignOrderToTruck = async (req, res) => {
         address: built.address,
         totalWeight: built.totalWeight,
         weightUnit: built.weightUnit,
+        docType: built.docType,
       },
       sequenceNumber: sequenceNumber || route.orders.length + 1,
       orderWeightKg: built.totalWeight,
       coordinates: built.coordinates,
-      storeHours: { openingTime: built.openingTime, closingTime: built.closingTime },
+      storeHours: storeHoursOf(built),
       // A caller that explicitly asked for a specific position meant it —
       // lock that placement so the auto-resequence below doesn't move it.
       // The normal path (no sequenceNumber given) leaves it unlocked so it
@@ -543,7 +821,7 @@ exports.reorderOrders = async (req, res) => {
     // (unlike resequenceRoute, which would ignore these stops entirely once
     // every one of them is locked).
     const depot = getDepot(route.tenant);
-    const fixedStops = route.orders.map(toOptimizerStop);
+    const fixedStops = stopsOf(route);
     const matrix = await roadMatrixFor(depot, fixedStops);
     const { sequence, totalDistanceKm, totalDurationMin, totalWaitMin } = evaluateFixedRoute(
       fixedStops,
@@ -558,11 +836,7 @@ exports.reorderOrders = async (req, res) => {
     route.orders.forEach((o) => {
       const evaluated = byId.get(String(o._id));
       if (evaluated) {
-        o.etaMin = evaluated.etaMin;
-        o.waitMin = evaluated.waitMin;
-        o.driveMin = evaluated.driveMin;
-        o.legKm = evaluated.legKm;
-        o.status = statusAfterSequencing(o, evaluated.infeasible);
+        applyEvaluated(o, evaluated);
       }
     });
     route.totalDistanceKm = totalDistanceKm;
@@ -661,13 +935,50 @@ function departureMinOf(route) {
   return parsed == null ? DEFAULT_DEPARTURE_MIN : parsed;
 }
 
-function toOptimizerStop(orderEntry) {
+// What a route snapshots about when a stop can be served.
+function storeHoursOf(built) {
   return {
+    openingTime: built.openingTime,
+    closingTime: built.closingTime,
+    preferredFrom: built.preferredDeliveryFrom,
+    preferredTo: built.preferredDeliveryTo,
+  };
+}
+
+// serviceMin: the route's own minutes-per-stop allowance (unset = default).
+function toOptimizerStop(orderEntry, serviceMin) {
+  const { windowOpen, windowClose } = stopWindow(orderEntry.storeHours);
+  const stop = {
     id: String(orderEntry._id),
     coordinates: orderEntry.coordinates,
-    ...parseTimeWindow(orderEntry.storeHours?.openingTime, orderEntry.storeHours?.closingTime),
+    windowOpen,
+    windowClose,
     weightKg: orderEntry.orderWeightKg || 0,
   };
+  if (Number.isFinite(serviceMin)) stop.serviceMin = serviceMin;
+  return stop;
+}
+
+const stopsOf = (route, orders = route.orders) => orders.map((o) => toOptimizerStop(o, route.serviceMin));
+
+// Copies one evaluated stop (ETA, wait, leg) onto its route entry. `infeasible`
+// from the optimizer means "after the planned window closes"; for a customer
+// with a preferred window that is only a missed preference unless the shop
+// itself is closed by then.
+function applyEvaluated(o, evaluated) {
+  o.etaMin = evaluated.etaMin;
+  o.waitMin = evaluated.waitMin;
+  o.driveMin = evaluated.driveMin;
+  o.legKm = evaluated.legKm;
+  const w = stopWindow(o.storeHours);
+  if (w.hasPreferred) {
+    const shopClosed = w.shopClose != null && evaluated.etaMin > w.shopClose;
+    o.preferredMissed = Boolean(evaluated.infeasible) && !shopClosed;
+    o.status = statusAfterSequencing(o, shopClosed);
+  } else {
+    o.preferredMissed = undefined;
+    o.status = statusAfterSequencing(o, evaluated.infeasible);
+  }
 }
 
 // Real road distance/duration matrix for the depot plus the given stops
@@ -699,6 +1010,8 @@ function clearLiveEtas(route) {
     o.liveEtaMin = undefined;
     o.liveWaitMin = undefined;
     o.liveLate = undefined;
+    o.liveTrafficMin = undefined;
+    o.liveTrafficAt = undefined;
   });
 }
 
@@ -712,8 +1025,11 @@ async function applyTrafficEtas(route) {
   route.trafficDepartAt = undefined;
   route.trafficDelayMin = undefined;
   route.trafficProvider = undefined;
+  route.returnDriveMin = undefined;
+  route.returnTrafficMin = undefined;
+  route.orders.forEach((o) => (o.plannedTrafficMin = undefined));
   const depot = getDepot(route.tenant);
-  const stops = route.orders.map(toOptimizerStop);
+  const stops = stopsOf(route);
   const geocoded = stops.filter(
     (s) => s.coordinates && Number.isFinite(s.coordinates.lat) && Number.isFinite(s.coordinates.lng)
   );
@@ -728,15 +1044,15 @@ async function applyTrafficEtas(route) {
 
   const fixed = evaluateFixedRoute(stops, depot, departureMinOf(route), undefined, legs);
   const byId = new Map(fixed.sequence.map((s) => [s.id, s]));
+  // Leg i of the traffic answer ends at the i-th geocoded stop.
+  const legDelayById = new Map(geocoded.map((s, i) => [s.id, legs.legDelayMin ? legs.legDelayMin[i] : null]));
   route.orders.forEach((o) => {
     const evaluated = byId.get(String(o._id));
     if (evaluated) {
-      o.etaMin = evaluated.etaMin;
-      o.waitMin = evaluated.waitMin;
-      o.driveMin = evaluated.driveMin;
-      o.legKm = evaluated.legKm;
-      o.status = statusAfterSequencing(o, evaluated.infeasible);
+      applyEvaluated(o, evaluated);
     }
+    const delay = legDelayById.get(String(o._id));
+    if (Number.isFinite(delay)) o.plannedTrafficMin = Math.round(delay);
   });
   route.totalDistanceKm = fixed.totalDistanceKm;
   route.totalDurationMin = fixed.totalDurationMin;
@@ -745,13 +1061,17 @@ async function applyTrafficEtas(route) {
   route.trafficDepartAt = legs.departAt;
   route.trafficDelayMin = legs.delayMin;
   route.trafficProvider = legs.provider;
+  // The last leg is the drive back to the depot.
+  const back = geocoded.length;
+  if (legs.legMin && Number.isFinite(legs.legMin[back])) route.returnDriveMin = Math.round(legs.legMin[back]);
+  if (legs.legDelayMin && Number.isFinite(legs.legDelayMin[back])) route.returnTrafficMin = Math.round(legs.legDelayMin[back]);
 }
 
 async function sequenceRouteOrders(route) {
   const depot = getDepot(route.tenant);
   const locked = route.orders.filter((o) => o.locked);
-  const toSequence = route.orders.filter((o) => !o.locked).map((o) => toOptimizerStop(o));
-  const matrix = await roadMatrixFor(depot, route.orders.map(toOptimizerStop));
+  const toSequence = stopsOf(route, route.orders.filter((o) => !o.locked));
+  const matrix = await roadMatrixFor(depot, stopsOf(route));
 
   // Uses whatever strategy was last chosen for this route (persisted on the
   // document, default "shortest") — a manual assign/remove's automatic
@@ -775,11 +1095,7 @@ async function sequenceRouteOrders(route) {
       const optimized = bySeqId.get(String(o._id));
       if (optimized) {
         o.sequenceNumber = optimized.seq;
-        o.etaMin = optimized.etaMin;
-        o.waitMin = optimized.waitMin;
-        o.driveMin = optimized.driveMin;
-        o.legKm = optimized.legKm;
-        o.status = statusAfterSequencing(o, optimized.infeasible);
+        applyEvaluated(o, optimized);
       }
       return o;
     });
@@ -816,17 +1132,13 @@ async function sequenceRouteOrders(route) {
   const fillQueue = [...placed, ...unplaced];
   const ordered = slots.map((o) => o || fillQueue.shift());
 
-  const fixed = evaluateFixedRoute(ordered.map(toOptimizerStop), depot, departureMinOf(route), undefined, matrix);
+  const fixed = evaluateFixedRoute(stopsOf(route, ordered), depot, departureMinOf(route), undefined, matrix);
   const evalById = new Map(fixed.sequence.map((s) => [s.id, s]));
   ordered.forEach((o, i) => {
     o.sequenceNumber = i + 1;
     const evaluated = evalById.get(String(o._id));
     if (evaluated) {
-      o.etaMin = evaluated.etaMin;
-      o.waitMin = evaluated.waitMin;
-      o.driveMin = evaluated.driveMin;
-      o.legKm = evaluated.legKm;
-      o.status = statusAfterSequencing(o, evaluated.infeasible);
+      applyEvaluated(o, evaluated);
     }
   });
   route.orders = ordered;
@@ -876,10 +1188,7 @@ exports.generateRoute = async (req, res) => {
     const dayEnd = new Date(dayStart);
     dayEnd.setHours(23, 59, 59, 999);
 
-    const deliveryNotes = await DeliveryNote.find({
-      Cancelled: { $ne: "Y" },
-      DocDate: { $gte: dayStart, $lte: dayEnd },
-    });
+    const deliveryNotes = await loadPool(dayStart, dayEnd, route.tenant);
 
     const allRoutesToday = await TruckRoute.find({
       date: { $gte: dayStart, $lte: dayEnd },
@@ -925,7 +1234,7 @@ exports.generateRoute = async (req, res) => {
         sequenceNumber: route.orders.length + 1,
         orderWeightKg: built.totalWeight,
         coordinates: built.coordinates,
-        storeHours: { openingTime: built.openingTime, closingTime: built.closingTime },
+        storeHours: storeHoursOf(built),
       });
 
       remainingCapacity -= built.totalWeight;
@@ -972,7 +1281,7 @@ exports.autoFillAllTrucks = async (req, res) => {
     const routes = await TruckRoute.find({ date: { $gte: dayStart, $lte: dayEnd }, tenant });
     if (routes.length === 0) {
       return res.status(400).json({
-        message: "No trucks initialized for this date — run Initialize Date first",
+        message: `There are no trucks for this date: no active weekly template for ${dayOfWeekFor(date)}. Add one in the Weekly Templates tab.`,
       });
     }
     // Persist the chosen strategy on every route for this date right away —
@@ -989,10 +1298,7 @@ exports.autoFillAllTrucks = async (req, res) => {
         })
     );
 
-    const deliveryNotes = await DeliveryNote.find({
-      Cancelled: { $ne: "Y" },
-      DocDate: { $gte: dayStart, $lte: dayEnd },
-    });
+    const deliveryNotes = await loadPool(dayStart, dayEnd, tenant);
     const cardCodes = [...new Set(deliveryNotes.map((i) => i.CardCode))];
     const customers = await Customer.find({ CardCode: { $in: cardCodes } }).lean();
     const customersByCode = new Map(customers.map((c) => [c.CardCode, c]));
@@ -1007,7 +1313,19 @@ exports.autoFillAllTrucks = async (req, res) => {
     for (const deliveryNote of deliveryNotes) {
       if (alreadyAssigned.has(deliveryNote.DocEntry)) continue;
       const customer = customersByCode.get(deliveryNote.CardCode);
-      if (!customer || customer.fulfillmentMethod === "pickup") continue;
+      if (!customer) {
+        // An explicitly selected order is never dropped without a word.
+        unassignable.push({
+          docEntry: deliveryNote.DocEntry,
+          cardName: deliveryNote.CardName,
+          reason: `customer ${deliveryNote.CardCode} not found in the customer list`,
+        });
+        continue;
+      }
+      if (customer.fulfillmentMethod === "pickup") {
+        unassignable.push({ docEntry: deliveryNote.DocEntry, cardName: deliveryNote.CardName, reason: "pickup customer (collects the order)" });
+        continue;
+      }
 
       const built = await buildDeliverableOrder(deliveryNote, customersByCode, tenant);
       if (!built.coordinates) {
@@ -1064,21 +1382,19 @@ exports.autoFillAllTrucks = async (req, res) => {
         capacityKg: route.maxWeightKg,
         remainingKg: route.maxWeightKg - route.totalWeightKg,
         stops: route.orders.map((o) => ({
-          id: String(o._id),
-          coordinates: o.coordinates,
-          ...parseTimeWindow(o.storeHours?.openingTime, o.storeHours?.closingTime),
-          weightKg: o.orderWeightKg || 0,
+          ...toOptimizerStop(o, route.serviceMin),
           locked: o.locked,
           _raw: o,
         })),
       }));
       // The new orders, as optimizer stops. `_built` carries the full order
       // through so the winning plan can create the TruckRoute entries.
+      const regionServiceMin = regionRoutes.find((r) => Number.isFinite(r.serviceMin))?.serviceMin;
       const poolStops = pool.map((o) => ({
-        id: `new:${o.DocEntry}`,
-        coordinates: o.coordinates,
-        ...parseTimeWindow(o.openingTime, o.closingTime),
-        weightKg: o.totalWeight || 0,
+        ...toOptimizerStop(
+          { _id: `new:${o.DocEntry}`, coordinates: o.coordinates, storeHours: storeHoursOf(o), orderWeightKg: o.totalWeight },
+          regionServiceMin
+        ),
         _built: o,
       }));
 
@@ -1161,10 +1477,11 @@ exports.autoFillAllTrucks = async (req, res) => {
                 address: built.address,
                 totalWeight: built.totalWeight,
                 weightUnit: built.weightUnit,
+                docType: built.docType,
               },
               orderWeightKg: built.totalWeight,
               coordinates: built.coordinates,
-              storeHours: { openingTime: built.openingTime, closingTime: built.closingTime },
+              storeHours: storeHoursOf(built),
             };
             totalAdded++;
           }
@@ -1173,11 +1490,7 @@ exports.autoFillAllTrucks = async (req, res) => {
           // a locked stop keeps its own sequenceNumber; resequenceRoute below
           // recomputes ETAs and totals around it.
           if (!raw.locked) raw.sequenceNumber = s.seq;
-          raw.etaMin = s.etaMin;
-          raw.waitMin = s.waitMin;
-          raw.driveMin = s.driveMin;
-          raw.legKm = s.legKm;
-          raw.status = statusAfterSequencing(raw, s.infeasible);
+          applyEvaluated(raw, s);
           return raw;
         });
         recalcTotals(route);

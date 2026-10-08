@@ -93,6 +93,9 @@ const { startDailyCron } = require('./services/ringoverDailyExportCron');
 const invoiceEmailSettingsRoutes = require('./routes/invoiceEmailSettings.routes');
 const { initInvoiceEmailCron } = require('./services/dailyInvoiceEmailCron');
 const { startCustomerBalanceSyncCron } = require('./services/sapCustomerBalanceSync.service');
+const geotabSync = require("./services/geotabSync");
+const adherenceService = require("./services/adherenceService");
+
 // Initialize express app
 const app = express();
 
@@ -181,6 +184,10 @@ mongoose
     } catch (error) {
       console.error("❌ Error initializing SuperChat cron jobs:", error);
     }
+
+    // Live truck GPS from MyGeotab, and the evening planned-vs-actual report.
+    geotabSync.start();
+    adherenceService.startCron();
   })
   .catch((err) => {
     console.error("❌ MongoDB connection error:", err);
