@@ -115,7 +115,10 @@ exports.createSchedule = async (req, res) => {
     };
 
     let schedule;
+    const weekdays = [dayOfWeek];
     if (_id) {
+      const before = await TruckSchedule.findById(_id).lean();
+      if (before) weekdays.push(before.dayOfWeek);
       schedule = await TruckSchedule.findByIdAndUpdate(_id, data, {
         new: true,
         upsert: true,
@@ -125,7 +128,8 @@ exports.createSchedule = async (req, res) => {
       schedule = await TruckSchedule.create(data);
     }
 
-    res.status(201).json({ message: "Schedule saved", schedule });
+    const daysUpdated = await refreshUpcomingDays(data.tenant, weekdays);
+    res.status(201).json({ message: "Schedule saved", schedule, daysUpdated });
   } catch (error) {
     console.error("Create schedule error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
@@ -134,9 +138,9 @@ exports.createSchedule = async (req, res) => {
 
 exports.updateSchedule = async (req, res) => {
   try {
+    const current = await TruckSchedule.findById(req.params.id).lean();
+    if (!current) return res.status(404).json({ message: "Schedule not found" });
     if (Array.isArray(req.body.trucks)) {
-      const current = await TruckSchedule.findById(req.params.id).lean();
-      if (!current) return res.status(404).json({ message: "Schedule not found" });
       const problem = await resolveScheduleTrucks(req.body.trucks, {
         tenant: current.tenant,
         dayOfWeek: req.body.dayOfWeek || current.dayOfWeek,
@@ -149,7 +153,8 @@ exports.updateSchedule = async (req, res) => {
       runValidators: true,
     });
     if (!schedule) return res.status(404).json({ message: "Schedule not found" });
-    res.json({ message: "Schedule updated", schedule });
+    const daysUpdated = await refreshUpcomingDays(schedule.tenant, [current.dayOfWeek, schedule.dayOfWeek]);
+    res.json({ message: "Schedule updated", schedule, daysUpdated });
   } catch (error) {
     console.error("Update schedule error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
@@ -160,7 +165,8 @@ exports.deleteSchedule = async (req, res) => {
   try {
     const schedule = await TruckSchedule.findByIdAndDelete(req.params.id);
     if (!schedule) return res.status(404).json({ message: "Schedule not found" });
-    res.json({ message: "Schedule deleted" });
+    const daysUpdated = await refreshUpcomingDays(schedule.tenant, [schedule.dayOfWeek]);
+    res.json({ message: "Schedule deleted", daysUpdated });
   } catch (error) {
     console.error("Delete schedule error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
@@ -169,56 +175,185 @@ exports.deleteSchedule = async (req, res) => {
 
 // ---------- Per-date routes ----------
 
-// Creates the day's truck routes from the active weekly templates of that
-// weekday (trucks that already have a route for the date are left alone).
-async function initializeTrucksFor(date, tenant) {
-  const weekday = dayOfWeekFor(date);
-  const schedules = await TruckSchedule.find({ dayOfWeek: weekday, isActive: true, tenant });
+const sameList = (a = [], b = []) => a.length === b.length && a.every((v, i) => v === b[i]);
 
-  const dayStart = new Date(date);
-  dayStart.setHours(0, 0, 0, 0);
+// Copies a template truck's values onto the route it already has for the day.
+// A value is taken over only when the template changed since it was last
+// copied, so a departure or stop time set on the truck card for this date
+// stays. A truck with orders keeps its region, and its capacity when the new
+// one is below what it already carries. Returns { changed, kept }.
+async function applyTemplateToRoute(route, schedule, truck) {
+  const template = {
+    maxWeightKg: truck.maxWeightKg,
+    departureTime: truck.departureTime || "08:00",
+    serviceMin: truck.serviceMin ?? null,
+  };
+  const last = route.templateValues || {};
+  const loaded = route.orders.length > 0;
+  const edited = (field) => template[field] !== (last[field] ?? null) && template[field] !== (route[field] ?? null);
+  const kept = [];
+  let changed = false;
+  let retime = false;
 
-  let created = 0;
-  let skipped = 0;
-  for (const schedule of schedules) {
-    for (const truck of schedule.trucks) {
-      const exists = await TruckRoute.findOne({ date: dayStart, truckNumber: truck.truckNumber, region: schedule.region, tenant });
-      if (exists) {
-        skipped++;
-        continue;
-      }
-      await TruckRoute.create({
-        date: dayStart,
-        truckNumber: truck.truckNumber,
-        truckName: truck.truckName || `Truck ${truck.truckNumber}`,
-        truckType: truck.truckType,
-        maxWeightKg: truck.maxWeightKg,
-        departureTime: truck.departureTime || "08:00",
-        serviceMin: truck.serviceMin,
-        region: schedule.region,
-        departments: schedule.departments,
-        cities: schedule.cities,
-        scheduleId: schedule._id,
-        tenant,
-        status: "planning",
-        orders: [],
-      });
-      created++;
+  const truckName = truck.truckName || `Truck ${truck.truckNumber}`;
+  if (route.truckName !== truckName) {
+    route.truckName = truckName;
+    changed = true;
+  }
+  if (truck.truckType && route.truckType !== truck.truckType) route.truckType = truck.truckType;
+  if (String(route.scheduleId || "") !== String(schedule._id)) route.scheduleId = schedule._id;
+
+  let capacityKept = false;
+  if (edited("maxWeightKg")) {
+    if (loaded && template.maxWeightKg < (route.totalWeightKg || 0)) {
+      kept.push("capacity");
+      capacityKept = true;
+    } else {
+      route.maxWeightKg = template.maxWeightKg;
+      changed = true;
     }
   }
-  return { created, skipped, weekday, templates: schedules.length };
+  if (edited("departureTime")) {
+    route.departureTime = template.departureTime;
+    changed = retime = true;
+  }
+  if (edited("serviceMin")) {
+    route.serviceMin = template.serviceMin ?? undefined;
+    changed = retime = true;
+  }
+
+  const areaChanged =
+    route.region !== schedule.region || !sameList(route.departments, schedule.departments) || !sameList(route.cities, schedule.cities);
+  if (areaChanged) {
+    if (loaded) kept.push("region");
+    else {
+      route.region = schedule.region;
+      route.departments = schedule.departments;
+      route.cities = schedule.cities;
+      changed = true;
+    }
+  }
+
+  route.templateValues = {
+    maxWeightKg: capacityKept ? last.maxWeightKg : template.maxWeightKg,
+    departureTime: template.departureTime,
+    serviceMin: template.serviceMin ?? undefined,
+  };
+  if (loaded && retime) await resequenceRoute(route);
+  recalcTotals(route);
+  await route.save();
+  return { changed, kept };
+}
+
+// Makes the day's trucks match the active weekly templates of its weekday. A
+// truck is one vehicle doing one route that day, so it is recognised by its
+// truck number alone: a template edit (region, capacity, departure, time per
+// stop) changes the truck that is already there instead of adding a second
+// one. Missing trucks are created; empty trucks that are doubled or no longer
+// in a template are removed; a truck with orders is never removed.
+async function syncTrucksFor(date, tenant) {
+  const weekday = dayOfWeekFor(date);
+  const schedules = await TruckSchedule.find({ dayOfWeek: weekday, isActive: true, tenant });
+  const { dayStart, dayEnd } = dayBounds(date);
+
+  const existing = await TruckRoute.find({ tenant, date: { $gte: dayStart, $lte: dayEnd } }).sort({ _id: 1 });
+  const byNumber = new Map();
+  existing.forEach((r) => byNumber.set(r.truckNumber, [...(byNumber.get(r.truckNumber) || []), r]));
+
+  const result = { created: 0, updated: 0, skipped: 0, removed: 0, keptWithOrders: [], notApplied: [], weekday, templates: schedules.length };
+  const remove = async (routes) => {
+    if (routes.length === 0) return;
+    const ids = routes.map((r) => r._id);
+    await RouteAdherence.deleteMany({ routeId: { $in: ids } });
+    await TruckRoute.deleteMany({ _id: { $in: ids } });
+    result.removed += ids.length;
+  };
+  const label = (r) => r.truckName || `Truck ${r.truckNumber}`;
+
+  // The same truck twice on one day: keep the one carrying orders (else the first).
+  for (const [number, routes] of byNumber) {
+    if (routes.length < 2) continue;
+    const loaded = routes.filter((r) => r.orders.length > 0);
+    const keep = loaded.length > 0 ? loaded : [routes[0]];
+    await remove(routes.filter((r) => !keep.includes(r)));
+    byNumber.set(number, keep);
+  }
+
+  const wanted = new Set();
+  for (const schedule of schedules) {
+    for (const truck of schedule.trucks) {
+      wanted.add(truck.truckNumber);
+      const route = (byNumber.get(truck.truckNumber) || [])[0];
+      if (!route) {
+        await TruckRoute.create({
+          date: dayStart,
+          truckNumber: truck.truckNumber,
+          truckName: truck.truckName || `Truck ${truck.truckNumber}`,
+          truckType: truck.truckType,
+          maxWeightKg: truck.maxWeightKg,
+          departureTime: truck.departureTime || "08:00",
+          serviceMin: truck.serviceMin,
+          templateValues: { maxWeightKg: truck.maxWeightKg, departureTime: truck.departureTime || "08:00", serviceMin: truck.serviceMin },
+          region: schedule.region,
+          departments: schedule.departments,
+          cities: schedule.cities,
+          scheduleId: schedule._id,
+          tenant,
+          status: "planning",
+          orders: [],
+        });
+        result.created++;
+        continue;
+      }
+      const { changed, kept } = await applyTemplateToRoute(route, schedule, truck);
+      if (changed) result.updated++;
+      else result.skipped++;
+      if (kept.length > 0) result.notApplied.push({ truck: label(route), kept });
+    }
+  }
+
+  // Trucks of the day that no template lists any more.
+  for (const [number, routes] of byNumber) {
+    if (wanted.has(number)) continue;
+    await remove(routes.filter((r) => r.orders.length === 0));
+    routes.filter((r) => r.orders.length > 0).forEach((r) => result.keptWithOrders.push(label(r)));
+  }
+  return result;
+}
+
+// One sync at a time per day: two at once would each create the missing truck.
+const truckSyncQueue = new Map();
+function initializeTrucksFor(date, tenant) {
+  const key = `${tenant}|${isoDay(dayBounds(date).dayStart)}`;
+  const run = (truckSyncQueue.get(key) || Promise.resolve()).catch(() => {}).then(() => syncTrucksFor(date, tenant));
+  truckSyncQueue.set(key, run);
+  run.catch(() => {}).then(() => truckSyncQueue.get(key) === run && truckSyncQueue.delete(key));
+  return run;
+}
+
+// After a weekly template is saved or deleted: the days from today on that
+// already have trucks, on the weekdays concerned, are brought in line with it.
+// Days without trucks stay empty until "Initialize trucks" is pressed.
+async function refreshUpcomingDays(tenant, weekdays) {
+  try {
+    const dates = await TruckRoute.distinct("date", { tenant, date: { $gte: dayBounds(new Date()).dayStart } });
+    const days = [...new Set(dates.map(isoDay))].filter((d) => weekdays.includes(dayOfWeekFor(d))).sort();
+    for (const day of days) await initializeTrucksFor(day, tenant);
+    return days;
+  } catch (error) {
+    console.error("Refreshing trucks after a template change failed:", error.message);
+    return [];
+  }
 }
 
 exports.initializeDate = async (req, res) => {
   try {
     const { date } = req.body;
     if (!date) return res.status(400).json({ message: "date is required" });
-    const { created, skipped, weekday } = await initializeTrucksFor(date, tenantFromReq(req));
+    const result = await initializeTrucksFor(date, tenantFromReq(req));
     res.json({
-      message: `Initialized ${created} truck route(s) for ${weekday} ${date}`,
-      created,
-      skipped,
-      weekday,
+      message: `Trucks for ${result.weekday} ${date}: ${result.created} created, ${result.updated} updated, ${result.removed} removed`,
+      ...result,
     });
   } catch (error) {
     console.error("Initialize date error:", error);
@@ -235,13 +370,8 @@ exports.getRoutesByDate = async (req, res) => {
     dayEnd.setHours(23, 59, 59, 999);
 
     const tenant = tenantFromReq(req);
-    // A day with orders sent to Logistics always has its trucks: any truck of
-    // that weekday's templates still missing (template added or changed after
-    // the orders were sent) is created here. There is no separate button.
-    if (!USE_DELIVERY_NOTES() && (await LogisticsOrder.exists({ tenant, deliveryDate: { $gte: dayStart, $lte: dayEnd } }))) {
-      await initializeTrucksFor(date, tenant);
-    }
-
+    // Reading a day never creates trucks: that is done by "Initialize trucks"
+    // and by saving a weekly template (for days that already have trucks).
     const routes = await TruckRoute.find({
       date: { $gte: dayStart, $lte: dayEnd },
       tenant,
@@ -557,14 +687,12 @@ exports.moveToLogistics = async (req, res) => {
       else if (!before) moved++;
     }
 
-    // Sending orders for a day is what opens that day in Logistics: its trucks
-    // are created from the weekly templates right away.
-    const trucks = moved + rescheduled > 0 || existing.length > 0 ? await initializeTrucksFor(deliveryDate, tenant) : null;
+    // Sending orders does not create the day's trucks ("Initialize trucks" does).
     const trucksForDate = await TruckRoute.countDocuments({ tenant, date: dayStart });
 
     res.json({
       message: `${moved + rescheduled} order(s) sent to Logistics for ${deliveryDate}`,
-      trucksCreated: trucks ? trucks.created : 0,
+      trucksCreated: 0,
       trucksForDate,
       weekday: dayOfWeekFor(deliveryDate),
       deliveryDate,

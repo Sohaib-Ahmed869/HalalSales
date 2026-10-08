@@ -107,6 +107,14 @@ const TruckRouteSchema = new Schema({
   departments: [{ type: String, trim: true }],
   cities: [{ type: String, trim: true }],
   scheduleId: { type: Schema.Types.ObjectId, ref: "TruckSchedule" },
+  // The weekly template's values last copied onto this route. A later edit of
+  // the template is recognised by comparing with these, so a value changed on
+  // the truck card for this date only is not overwritten by an unchanged template.
+  templateValues: {
+    maxWeightKg: { type: Number },
+    departureTime: { type: String },
+    serviceMin: { type: Number },
+  },
   tenant: {
     type: String,
     enum: ["halal-food-sales", "pqf", "data-tech", "ms-foods"],
