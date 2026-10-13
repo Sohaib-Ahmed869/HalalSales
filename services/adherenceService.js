@@ -38,8 +38,17 @@ function dayBounds(date) {
 
 const validPoint = (p) => p && Number.isFinite(p.lat) && Number.isFinite(p.lng);
 
-// One route -> the analyzer's input and its result.
-async function analyzeOne(route, device, { backfill = true, now = new Date() } = {}) {
+// Minutes kept clear between two runs of the same vehicle in the report.
+const RUN_MARGIN_MIN = 30;
+const departureOf = (route) => {
+  const parsed = parseTimeToMinutes(route.departureTime);
+  return parsed == null ? DEFAULT_DEPARTURE_MIN : parsed;
+};
+
+// One route -> the analyzer's input and its result. When the vehicle does
+// several runs that day, `afterEarlierRun` / `nextDepartureMin` keep this
+// run's GPS window clear of the other runs' driving.
+async function analyzeOne(route, device, { backfill = true, now = new Date(), afterEarlierRun = false, nextDepartureMin = null } = {}) {
   const depot = getWarehouse(route.tenant);
   // 00:00 of the route's day on the depot's clock; every time below is minutes from it.
   const midnightMs = wallClockToMs(`${isoDay(route.date)}T00:00:00`, depot.timeZone);
@@ -65,8 +74,13 @@ async function analyzeOne(route, device, { backfill = true, now = new Date() } =
 
   // The truck's day: from 3 h before the planned departure to 6 h after the
   // planned return (a late return can run past midnight).
-  const from = new Date(midnightMs + (departureMin - 180) * 60000);
-  const to = new Date(Math.min(now.getTime(), midnightMs + (plannedReturnMin + 360) * 60000));
+  // A run after an earlier one starts RUN_MARGIN_MIN before its own departure;
+  // a run before a later one ends RUN_MARGIN_MIN before that one leaves.
+  const windowFromMin = afterEarlierRun ? departureMin - RUN_MARGIN_MIN : departureMin - 180;
+  let windowToMin = plannedReturnMin + 360;
+  if (Number.isFinite(nextDepartureMin)) windowToMin = Math.min(windowToMin, Math.max(nextDepartureMin - RUN_MARGIN_MIN, departureMin));
+  const from = new Date(midnightMs + windowFromMin * 60000);
+  const to = new Date(Math.min(now.getTime(), midnightMs + windowToMin * 60000));
 
   let points = [];
   let engine = [];
@@ -122,7 +136,13 @@ async function analyzeOne(route, device, { backfill = true, now = new Date() } =
  */
 async function runForDate(date, tenant = "halal-food-sales", options = {}) {
   const { dayStart, dayEnd } = dayBounds(date);
-  const routes = await TruckRoute.find({ tenant, date: { $gte: dayStart, $lte: dayEnd } }).sort({ truckNumber: 1 }).lean();
+  const routes = await TruckRoute.find({ tenant, date: { $gte: dayStart, $lte: dayEnd } }).sort({ truckNumber: 1, trip: 1 }).lean();
+  // The runs (with stops) of each vehicle, first run first.
+  const runsByTruck = new Map();
+  routes
+    .filter((r) => r.orders && r.orders.length > 0)
+    .forEach((r) => runsByTruck.set(r.truckNumber, [...(runsByTruck.get(r.truckNumber) || []), r]));
+  runsByTruck.forEach((runs) => runs.sort((a, b) => departureOf(a) - departureOf(b)));
   const devices = await TruckDevice.find({ tenant, isActive: true, provider: "geotab" }).lean();
   const deviceByTruck = new Map(devices.map((d) => [d.truckNumber, d]));
 
@@ -130,13 +150,22 @@ async function runForDate(date, tenant = "halal-food-sales", options = {}) {
   for (const route of routes) {
     if (!route.orders || route.orders.length === 0) continue;
     const device = deviceByTruck.get(route.truckNumber) || null;
-    const result = await analyzeOne(route, device, options);
+    const runs = runsByTruck.get(route.truckNumber) || [route];
+    const position = runs.indexOf(route);
+    const next = runs[position + 1];
+    const result = await analyzeOne(route, device, {
+      ...options,
+      afterEarlierRun: position > 0,
+      nextDepartureMin: next ? departureOf(next) : null,
+    });
+    const trip = route.trip || 1;
     const doc = {
       routeId: route._id,
       tenant,
       date: dayStart,
       truckNumber: route.truckNumber,
-      truckName: route.truckName || `Truck ${route.truckNumber}`,
+      trip,
+      truckName: `${route.truckName || `Truck ${route.truckNumber}`}${runs.length > 1 || trip > 1 ? ` · run ${trip}` : ""}`,
       region: route.region,
       vehicle: device ? [device.label, device.licensePlate].filter(Boolean).join(" · ") : "",
       hasTracker: Boolean(device),
@@ -153,7 +182,7 @@ async function runForDate(date, tenant = "halal-food-sales", options = {}) {
 
 async function getForDate(date, tenant = "halal-food-sales") {
   const { dayStart } = dayBounds(date);
-  return RouteAdherence.find({ tenant, date: dayStart }).sort({ truckNumber: 1 }).lean();
+  return RouteAdherence.find({ tenant, date: dayStart }).sort({ truckNumber: 1, trip: 1 }).lean();
 }
 
 let job = null;

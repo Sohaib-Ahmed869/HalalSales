@@ -1,10 +1,14 @@
 const mongoose = require("mongoose");
 const Schema = mongoose.Schema;
 
-// One TruckRoute per truck per delivery date. Created by
-// POST /truck-routes/initialize-date from the active TruckSchedule for that
-// weekday/region (one TruckRoute per embedded truck entry), then populated
-// with orders by assign/generate/auto-fill/optimize.
+// One TruckRoute per run of a truck on a delivery date. A vehicle normally
+// does one run a day (trip 1); a second or third run the same day (a short
+// morning run, back to the depot, an afternoon run) is another TruckRoute with
+// the same truckNumber and trip 2, 3, ... and its own departure time. Created
+// by POST /truck-routes/initialize-date from the active TruckSchedule for that
+// weekday/region (one per embedded truck entry and per extra run), or added on
+// the day (manualTrip), then populated with orders by
+// assign/generate/auto-fill/optimize.
 //
 // Field names/shape here mirror exactly what SalesFrontend/src/pages/Dashboard/
 // MapPage.jsx already reads and writes (truckName/truckNumber/truckType flat on
@@ -90,6 +94,12 @@ const TruckRouteSchema = new Schema({
     index: true,
   },
   truckNumber: { type: Number, required: true },
+  // Run number of this vehicle on this date. A route saved before runs
+  // existed has no `trip` and is run 1.
+  trip: { type: Number, default: 1 },
+  // The run was added on the day itself ("Add a run" on the truck card), not
+  // from a weekly template, so syncing the day with the templates keeps it.
+  manualTrip: { type: Boolean },
   truckName: { type: String, trim: true },
   truckType: {
     type: String,
@@ -180,7 +190,9 @@ const TruckRouteSchema = new Schema({
   },
 });
 
-TruckRouteSchema.index({ date: 1, truckNumber: 1, region: 1 });
+// Not unique: a day's routes are recognised by truckNumber + trip in code
+// (syncTrucksFor), and doubles left by older versions may still exist.
+TruckRouteSchema.index({ date: 1, truckNumber: 1, trip: 1 });
 
 TruckRouteSchema.pre("save", function (next) {
   this.updatedAt = Date.now();

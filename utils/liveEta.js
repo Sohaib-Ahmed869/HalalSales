@@ -28,6 +28,7 @@ const TruckRoute = require("../models/TruckRoute");
 const { evaluateFixedRoute, stopWindow, serviceOf } = require("./routeOptimizer");
 const { getTrafficLegs } = require("./trafficEtaService");
 const { getWarehouse } = require("./regions");
+const { clockMinutes, eligibleRuns } = require("./truckRuns");
 
 const cfg = () => ({
   enabled: process.env.LIVE_ETA_ENABLED !== "false",
@@ -38,15 +39,6 @@ const FRESH_FIX_MS = 10 * 60 * 1000;
 const lastRun = new Map(); // "tenant|truck" -> ms
 const running = new Set();
 const rerun = new Map(); // key -> latest { device, fix, onUpdated } forced while running
-
-// Minutes since midnight of `date` on `timeZone`'s wall clock.
-function clockMinutes(date, timeZone) {
-  const parts = {};
-  new Intl.DateTimeFormat("en-US", { timeZone, hourCycle: "h23", hour: "2-digit", minute: "2-digit" })
-    .formatToParts(date)
-    .forEach((p) => (parts[p.type] = Number(p.value)));
-  return parts.hour * 60 + parts.minute + date.getSeconds() / 60;
-}
 
 function dayRange(at) {
   const start = new Date(at.getFullYear(), at.getMonth(), at.getDate());
@@ -66,12 +58,18 @@ const toStop = (o, serviceMin) => {
  */
 async function updateLiveEtas(device, position, now = new Date()) {
   const depot = getWarehouse(device.tenant);
-  const route = await TruckRoute.findOne({
+  // The vehicle may do several runs that day: work on the first one it can be
+  // on now that still has stops to visit (else the last of those).
+  const runs = await TruckRoute.find({
     tenant: device.tenant,
     truckNumber: device.truckNumber,
     date: dayRange(now),
   });
-  if (!route) return null;
+  if (runs.length === 0) return null;
+  const isOpen = (o) =>
+    o.coordinates && Number.isFinite(o.coordinates.lat) && Number.isFinite(o.coordinates.lng) && !o.departedAt && o.status !== "delivered" && o.status !== "failed";
+  const current = eligibleRuns(runs, clockMinutes(now, depot.timeZone));
+  const route = current.find((r) => r.orders.some(isOpen)) || current[current.length - 1];
 
   const ordered = route.orders
     .filter((o) => o.coordinates && Number.isFinite(o.coordinates.lat) && Number.isFinite(o.coordinates.lng))

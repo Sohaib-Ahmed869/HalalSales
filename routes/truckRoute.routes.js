@@ -44,6 +44,9 @@ router.patch("/:routeId/orders/:docEntry/status", controller.updateStopStatus);
 router.put("/:routeId/reorder", controller.reorderOrders);
 router.put("/:routeId/departure", controller.setDepartureTime);
 router.put("/:routeId/service-time", controller.setServiceTime);
+// Another run of the same vehicle on the same date / remove an empty later run
+router.post("/:routeId/runs", controller.addRun);
+router.delete("/:routeId/run", controller.removeRun);
 router.patch("/:routeId/status", controller.updateRouteStatus);
 router.patch("/:routeId/capacity", controller.updateCapacity);
 

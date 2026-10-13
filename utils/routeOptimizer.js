@@ -21,6 +21,31 @@ const DEFAULT_SPEED_KMH = 40; // used to turn distance into a duration estimate
 const DEFAULT_IMPROVE_BUDGET_MS = Number(process.env.ROUTE_IMPROVE_BUDGET_MS) > 0 ? Number(process.env.ROUTE_IMPROVE_BUDGET_MS) : 8000;
 const DEFAULT_DEPARTURE_MIN = 8 * 60; // 08:00, when a route has no departure time of its own
 
+// How long one run of a truck may take, depot to depot.
+//   ROUTE_MAX_DURATION_MIN  longest run (driving, waiting and time at the
+//                           stops), default 540 = 9 hours
+//   RUN_TURNAROUND_MIN      when the same vehicle does another run later that
+//                           day: minutes it needs at the depot in between
+//                           (unload, reload), default 30
+// The limit is soft. No order is left off a truck because of it; it stops the
+// planner from cramming a day's work into too few vehicles and makes it use
+// another run or vehicle instead.
+const positiveEnv = (name, fallback) => (Number(process.env[name]) > 0 ? Number(process.env[name]) : fallback);
+const routeMaxDurationMin = () => positiveEnv("ROUTE_MAX_DURATION_MIN", 540);
+const runTurnaroundMin = () => positiveEnv("RUN_TURNAROUND_MIN", 30);
+
+/**
+ * Longest a run leaving at `departureMin` may take: the general limit, and
+ * back in time for the same vehicle's next run when it has one.
+ */
+function maxRunDurationMin(departureMin, nextDepartureMin = null) {
+  let limit = routeMaxDurationMin();
+  if (Number.isFinite(nextDepartureMin) && nextDepartureMin > departureMin) {
+    limit = Math.min(limit, Math.max(15, nextDepartureMin - runTurnaroundMin() - departureMin));
+  }
+  return limit;
+}
+
 // Minutes spent at each stop (unloading, paperwork, signature) before the
 // truck can drive on. Without it every later ETA drifts earlier by the sum of
 // all previous stops. Override globally with STOP_SERVICE_MIN, or per stop
@@ -541,7 +566,14 @@ function pickSmallestFittingTruck(trucks, weightKg) {
  * @param {number} maxPasses
  * @param {"shortest"|"least_wait"} strategy - same meaning as sequenceRoute's:
  *   which metric a move has to improve before it's taken.
- * @param {Object} options - { maxMs } time budget for the search (default 8000, env ROUTE_IMPROVE_BUDGET_MS)
+ * @param {Object} options - { maxMs } time budget for the search (default 8000, env ROUTE_IMPROVE_BUDGET_MS);
+ *   { minimizeVehicles } (default true): never move a stop onto a vehicle that
+ *   is not out yet, and afterwards try to do the work with fewer vehicles
+ *   (see "Consolidate" below); { relieve } (default true): see "Relieve".
+ *   A truck may carry `vehicleId` (runs of one vehicle share it; default its
+ *   own id), `maxDurationMin` (longest the run may take door to door, see
+ *   maxRunDurationMin; default no limit) and `inUseElsewhere` (the vehicle
+ *   has work on a run that is not part of this plan).
  * @returns {Promise<Array>} same shape as input, each truck additionally carrying { sequence, totalDistanceKm, totalDurationMin, totalWaitMin }; the array has `timedOut: true` if the budget ended the search early
  */
 async function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, maxPasses = 3, strategy = "shortest", matrix = null, options = {}) {
@@ -549,6 +581,9 @@ async function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, ma
   const started = Date.now();
   let lastYield = started;
   const timeUp = () => Date.now() - started > maxMs;
+  // Relieving overlong runs and freeing vehicles come after the polish and
+  // matter more than it, so they get a little time of their own.
+  const hardTimeUp = () => Date.now() - started > maxMs * 1.5 + 1000;
   // Hand control back to the event loop regularly so a big Auto-Fill never
   // freezes the API for everyone else while it thinks.
   const maybeYield = async () => {
@@ -558,8 +593,20 @@ async function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, ma
     }
   };
 
-  const working = trucks.map((t) => ({ ...t, stops: t.stops.map((s) => ({ ...s })) }));
+  const minimizeVehicles = options.minimizeVehicles !== false;
+  const working = trucks.map((t) => ({ ...t, vehicleId: t.vehicleId ?? t.id, stops: t.stops.map((s) => ({ ...s })) }));
   const legs = makeLegs(matrix, speedKmh);
+
+  // How long a run may take door to door, and by how much a duration exceeds it.
+  const limitOf = (t) => (Number.isFinite(t.maxDurationMin) ? t.maxDurationMin : Infinity);
+  const overOf = (t, durationMin) => Math.max(0, durationMin - limitOf(t));
+  const OVER_TOL = 0.5; // minutes
+  // A vehicle is in use when any of its runs carries a stop (here or, as the
+  // caller says, on a run outside this plan).
+  const vehicleInUse = (vehicleId) => working.some((t) => t.vehicleId === vehicleId && (t.stops.length > 0 || t.inUseElsewhere));
+  // The polish never opens a vehicle that is not needed today: a stop may go
+  // onto an empty run only when that run's vehicle is already out.
+  const mayReceive = (to) => !minimizeVehicles || to.stops.length > 0 || vehicleInUse(to.vehicleId);
 
   // Full sequenceRoute results (cheapest insertion + 2-opt), keyed by
   // (departure, ordered stop ids). Only computed for a truck's CURRENT
@@ -597,97 +644,112 @@ async function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, ma
     }
     dist += legs.km(prev, depot);
     clock += legs.min(prev, depot);
-    return { cost: strategy === "least_wait" ? clock - departureMin : dist, late };
+    const elapsedMin = clock - departureMin;
+    return { cost: strategy === "least_wait" ? elapsedMin : dist, late, elapsed: elapsedMin };
   };
   const EPSILON = strategy === "least_wait" ? 1 : 0.05; // 1 min or 0.05 km - ignore savings too small to be worth an extra stop-swap
 
   // The truck's stops in their current best visiting order.
   const orderOf = (truck) => evalStops(truck.stops, truck.departureMin).sequence;
+  const weightOfStops = (stops) => stops.reduce((sum, o) => sum + (o.weightKg || 0), 0);
+  const lateOf = (result) => result.sequence.filter((x) => x.infeasible).length;
+  const elapsed = (result) => result.totalDurationMin;
+  const routable = (s) => s.coordinates && Number.isFinite(s.coordinates.lat) && Number.isFinite(s.coordinates.lng);
 
-  let movedAny = true;
-  let pass = 0;
   let timedOut = false;
-  outer: while (movedAny && pass < maxPasses) {
-    movedAny = false;
-    pass++;
 
-    for (let i = 0; i < working.length; i++) {
-      const from = working[i];
-      for (const stop of [...from.stops]) {
-        if (timeUp()) {
-          timedOut = true;
-          break outer;
-        }
-        await maybeYield();
-        if (stop.locked) continue;
-        if (!stop.coordinates || !Number.isFinite(stop.coordinates.lat)) continue; // can't be routed anyway
-        // No "leave at least one stop" guard here on purpose: fully draining
-        // a near-empty truck into others (an empty route, needed by nobody
-        // today) is exactly the "least trucks per area" outcome, not a bug
-        // to avoid. An empty TruckRoute is a valid, informative result - it
-        // means that scheduled truck genuinely isn't needed today.
+  // --- Relocation: one stop at a time to the truck it costs least on ---
+  const relocate = async (passes) => {
+    let movedAny = true;
+    let pass = 0;
+    outer: while (movedAny && pass < passes) {
+      movedAny = false;
+      pass++;
 
-        const fromOrder = orderOf(from);
-        const removalSavings =
-          orderMetrics(fromOrder, from.departureMin ?? DEFAULT_DEPARTURE_MIN).cost -
-          orderMetrics(fromOrder.filter((s) => s.id !== stop.id), from.departureMin ?? DEFAULT_DEPARTURE_MIN).cost;
-        // A move only happens if inserting costs less than removal saves
-        // (minus EPSILON), and an insertion never costs less than ~0 - so a
-        // stop whose removal saves next to nothing is not worth moving.
-        if (removalSavings <= EPSILON) continue;
+      for (let i = 0; i < working.length; i++) {
+        const from = working[i];
+        for (const stop of [...from.stops]) {
+          if (timeUp()) {
+            timedOut = true;
+            break outer;
+          }
+          await maybeYield();
+          if (stop.locked) continue;
+          if (!routable(stop)) continue; // can't be routed anyway
+          // No "leave at least one stop" guard here on purpose: fully draining
+          // a near-empty truck into others (an empty route, needed by nobody
+          // today) is exactly the "least trucks per area" outcome, not a bug
+          // to avoid. An empty TruckRoute is a valid, informative result - it
+          // means that scheduled truck genuinely isn't needed today.
 
-        let bestTo = null;
-        let bestInsertionCost = Infinity;
+          const fromOrder = orderOf(from);
+          const removalSavings =
+            orderMetrics(fromOrder, from.departureMin ?? DEFAULT_DEPARTURE_MIN).cost -
+            orderMetrics(fromOrder.filter((s) => s.id !== stop.id), from.departureMin ?? DEFAULT_DEPARTURE_MIN).cost;
+          // A move only happens if inserting costs less than removal saves
+          // (minus EPSILON), and an insertion never costs less than ~0 - so a
+          // stop whose removal saves next to nothing is not worth moving.
+          if (removalSavings <= EPSILON) continue;
 
-        for (let j = 0; j < working.length; j++) {
-          if (j === i) continue;
-          const to = working[j];
-          const usedWeight = to.stops.reduce((sum, o) => sum + (o.weightKg || 0), 0);
-          if (usedWeight + (stop.weightKg || 0) > to.capacityKg) continue;
+          let bestTo = null;
+          let bestInsertionCost = Infinity;
 
-          const dep = to.departureMin ?? DEFAULT_DEPARTURE_MIN;
-          const toOrder = orderOf(to);
-          const base = orderMetrics(toOrder, dep);
-          // Cheapest place to slot the stop into the target's current order.
-          // The stop itself must arrive in time, and no stop already on that
-          // truck may become late because of it.
-          for (let k = 0; k <= toOrder.length; k++) {
-            const candidate = [...toOrder.slice(0, k), stop, ...toOrder.slice(k)];
-            const m = orderMetrics(candidate, dep);
-            if (m.late > base.late) continue;
-            const insertionCost = m.cost - base.cost;
-            if (insertionCost < bestInsertionCost) {
-              bestInsertionCost = insertionCost;
-              bestTo = to;
+          for (let j = 0; j < working.length; j++) {
+            if (j === i) continue;
+            const to = working[j];
+            if (!mayReceive(to)) continue;
+            const usedWeight = to.stops.reduce((sum, o) => sum + (o.weightKg || 0), 0);
+            if (usedWeight + (stop.weightKg || 0) > to.capacityKg) continue;
+
+            const dep = to.departureMin ?? DEFAULT_DEPARTURE_MIN;
+            const toOrder = orderOf(to);
+            const base = orderMetrics(toOrder, dep);
+            // Cheapest place to slot the stop into the target's current order.
+            // The stop itself must arrive in time, no stop already on that
+            // truck may become late because of it, and the run must not get
+            // (more) over its allowed length.
+            for (let k = 0; k <= toOrder.length; k++) {
+              const candidate = [...toOrder.slice(0, k), stop, ...toOrder.slice(k)];
+              const m = orderMetrics(candidate, dep);
+              if (m.late > base.late) continue;
+              if (overOf(to, m.elapsed) > overOf(to, base.elapsed) + OVER_TOL) continue;
+              const insertionCost = m.cost - base.cost;
+              if (insertionCost < bestInsertionCost) {
+                bestInsertionCost = insertionCost;
+                bestTo = to;
+              }
             }
           }
-        }
 
-        // The order-preserving estimates above are conservative (a truck can
-        // usually re-sequence into something better than "same order plus
-        // one stop"), so a move that only narrowly fails them can still be a
-        // real improvement. Those get the exact check: full re-sequence of
-        // both trucks, the same test this search always used. The cheap
-        // estimate only decides which moves are worth that cost.
-        if (bestTo) {
-          const slack = Math.max(EPSILON * 4, Math.abs(removalSavings) * 0.3);
-          if (bestInsertionCost < removalSavings + slack) {
-            const cost = (r) => (strategy === "least_wait" ? r.totalDurationMin : r.totalDistanceKm);
-            const withoutStop = from.stops.filter((s) => s.id !== stop.id);
-            const exactRemoval = cost(evalStops(from.stops, from.departureMin)) - cost(evalStops(withoutStop, from.departureMin));
-            const withStopResult = evalStops([...bestTo.stops, stop], bestTo.departureMin);
-            const exactInsertion = cost(withStopResult) - cost(evalStops(bestTo.stops, bestTo.departureMin));
-            const placed = withStopResult.sequence.find((s) => s.id === stop.id);
-            if (placed && !placed.infeasible && exactInsertion < exactRemoval - EPSILON) {
-              from.stops = withoutStop;
-              bestTo.stops = [...bestTo.stops, stop];
-              movedAny = true;
+          // The order-preserving estimates above are conservative (a truck can
+          // usually re-sequence into something better than "same order plus
+          // one stop"), so a move that only narrowly fails them can still be a
+          // real improvement. Those get the exact check: full re-sequence of
+          // both trucks, the same test this search always used. The cheap
+          // estimate only decides which moves are worth that cost.
+          if (bestTo) {
+            const slack = Math.max(EPSILON * 4, Math.abs(removalSavings) * 0.3);
+            if (bestInsertionCost < removalSavings + slack) {
+              const cost = (r) => (strategy === "least_wait" ? r.totalDurationMin : r.totalDistanceKm);
+              const withoutStop = from.stops.filter((s) => s.id !== stop.id);
+              const exactRemoval = cost(evalStops(from.stops, from.departureMin)) - cost(evalStops(withoutStop, from.departureMin));
+              const toBefore = evalStops(bestTo.stops, bestTo.departureMin);
+              const withStopResult = evalStops([...bestTo.stops, stop], bestTo.departureMin);
+              const exactInsertion = cost(withStopResult) - cost(toBefore);
+              const placed = withStopResult.sequence.find((s) => s.id === stop.id);
+              const noOvertime = overOf(bestTo, elapsed(withStopResult)) <= overOf(bestTo, elapsed(toBefore)) + OVER_TOL;
+              if (placed && !placed.infeasible && noOvertime && exactInsertion < exactRemoval - EPSILON) {
+                from.stops = withoutStop;
+                bestTo.stops = [...bestTo.stops, stop];
+                movedAny = true;
+              }
             }
           }
         }
       }
     }
-  }
+  };
+  await relocate(maxPasses);
 
   // --- Swaps (least_wait only) ---
   // Moving one stop needs free capacity on the receiving truck, and a busy day
@@ -696,11 +758,9 @@ async function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, ma
   // A swap trades that stop for one on another truck, weight permitting, when
   // that lowers the two trucks' combined elapsed time without making any stop
   // late. Only stops that actually wait are worth swapping out, which keeps
-  // the search small.
+  // the search small. Both trucks of a swap already carry stops, so a swap
+  // never opens an unused vehicle.
   const useSwaps = options.swaps === undefined ? strategy === "least_wait" : Boolean(options.swaps);
-  const weightOfStops = (stops) => stops.reduce((sum, o) => sum + (o.weightKg || 0), 0);
-  const lateOf = (result) => result.sequence.filter((x) => x.infeasible).length;
-  const elapsed = (result) => result.totalDurationMin;
 
   // Looks for one improving swap between trucks X and Y; applies it and
   // returns true, or returns false when none exists.
@@ -735,7 +795,7 @@ async function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, ma
       let best = null;
       for (const b of Y.stops) {
         if (timeUp()) return false;
-        if (b.locked || !b.coordinates || !Number.isFinite(b.coordinates.lat)) continue;
+        if (b.locked || !routable(b)) continue;
         if (wX - (a.weightKg || 0) + (b.weightKg || 0) > X.capacityKg) continue;
         if (wY - (b.weightKg || 0) + (a.weightKg || 0) > Y.capacityKg) continue;
         const inX = bestInsert(xWithoutA, b, depX, baseX.late);
@@ -756,7 +816,9 @@ async function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, ma
       const beforeX = evalStops(X.stops, X.departureMin);
       const beforeY = evalStops(Y.stops, Y.departureMin);
       const exactGain = elapsed(beforeX) + elapsed(beforeY) - (elapsed(rx) + elapsed(ry));
-      if (exactGain > EPSILON && lateOf(rx) + lateOf(ry) <= lateOf(beforeX) + lateOf(beforeY)) {
+      const noOvertime =
+        overOf(X, elapsed(rx)) <= overOf(X, elapsed(beforeX)) + OVER_TOL && overOf(Y, elapsed(ry)) <= overOf(Y, elapsed(beforeY)) + OVER_TOL;
+      if (exactGain > EPSILON && noOvertime && lateOf(rx) + lateOf(ry) <= lateOf(beforeX) + lateOf(beforeY)) {
         X.stops = newX;
         Y.stops = newY;
         return true;
@@ -787,16 +849,175 @@ async function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, ma
     }
   }
 
+  // --- Relieve: a run that is too long, or has late stops, gets help ---
+  // The grouping fills trucks by weight alone, so a run can end up longer than
+  // a working day (or than the gap before the same vehicle's next run), or
+  // with stops it reaches after closing. While an empty run exists, the tail
+  // of such a run moves onto it: first an empty run of the same vehicle, then
+  // of another vehicle that is already out, and only then an unused vehicle.
+  // Kept only when the whole plan has fewer late stops, or as many and less
+  // overtime.
+  const planScore = () => {
+    let late = 0;
+    let over = 0;
+    for (const t of working) {
+      if (t.stops.length === 0) continue;
+      const r = evalStops(t.stops, t.departureMin);
+      late += lateOf(r);
+      over += overOf(t, elapsed(r));
+    }
+    return { late, over };
+  };
+  let relieved = 0;
+  const relieve = async () => {
+    const tried = new Set();
+    for (let guard = 0; guard < working.length * 2; guard++) {
+      if (hardTimeUp()) break;
+      await maybeYield();
+      let src = null;
+      let worst = null;
+      for (const t of working) {
+        if (t.stops.length < 2 || tried.has(t)) continue;
+        const r = evalStops(t.stops, t.departureMin);
+        const score = { late: lateOf(r), over: overOf(t, elapsed(r)) };
+        if (score.late === 0 && score.over <= OVER_TOL) continue;
+        if (!src || score.late > worst.late || (score.late === worst.late && score.over > worst.over)) {
+          src = t;
+          worst = score;
+        }
+      }
+      if (!src) break;
+      tried.add(src);
+      const empties = working.filter((t) => t.stops.length === 0 && t !== src);
+      if (empties.length === 0) break;
+      const rank = (t) => (t.vehicleId === src.vehicleId ? 0 : vehicleInUse(t.vehicleId) ? 1 : 2);
+      const targets = empties.slice().sort((a, b) => rank(a) - rank(b));
+      const before = planScore();
+      const seq = orderOf(src);
+      for (const target of targets) {
+        const moved = [];
+        let room = target.capacityKg;
+        for (let i = seq.length - 1; i >= 0 && src.stops.length - moved.length > 1; i--) {
+          const s = src.stops.find((x) => x.id === seq[i].id);
+          if (!s || s.locked || (s.weightKg || 0) > room) continue;
+          moved.push(s);
+          room -= s.weightKg || 0;
+          const rest = evalStops(src.stops.filter((x) => !moved.includes(x)), src.departureMin);
+          if (lateOf(rest) === 0 && overOf(src, elapsed(rest)) <= OVER_TOL) break;
+        }
+        if (moved.length === 0) continue;
+        const srcStops = src.stops;
+        src.stops = srcStops.filter((x) => !moved.includes(x));
+        target.stops = moved;
+        const after = planScore();
+        if (after.late < before.late || (after.late === before.late && after.over < before.over - OVER_TOL)) {
+          relieved++;
+          break;
+        }
+        src.stops = srcStops;
+        target.stops = [];
+      }
+    }
+  };
+  if (options.relieve !== false) await relieve();
+
+  // --- Consolidate: do the day's work with as few vehicles as possible ---
+  // Takes the vehicle with the fewest stops and tries to place every one of
+  // them on runs of the other vehicles that are out anyway: capacity must
+  // hold, no stop anywhere may become late, and no run may get (more) over
+  // its allowed length. If all its stops find a place the vehicle stays in
+  // the yard; if not, nothing changes and the next vehicle is tried.
+  const tryEmpty = (cand) => {
+    const targets = working.filter((t) => t.vehicleId !== cand.id && (t.stops.length > 0 || vehicleInUse(t.vehicleId)));
+    if (targets.length === 0) return false;
+    const tentative = new Map();
+    const stopsNow = (t) => tentative.get(t) || t.stops;
+    const stops = cand.runs.flatMap((t) => t.stops).sort((a, b) => (b.weightKg || 0) - (a.weightKg || 0));
+    for (const stop of stops) {
+      if (!routable(stop)) return false;
+      let best = null;
+      for (const to of targets) {
+        const cur = stopsNow(to);
+        if (weightOfStops(cur) + (stop.weightKg || 0) > to.capacityKg) continue;
+        const dep = to.departureMin ?? DEFAULT_DEPARTURE_MIN;
+        const order = evalStops(cur, to.departureMin).sequence;
+        const base = orderMetrics(order, dep);
+        for (let k = 0; k <= order.length; k++) {
+          const m = orderMetrics([...order.slice(0, k), stop, ...order.slice(k)], dep);
+          if (m.late > base.late) continue;
+          if (overOf(to, m.elapsed) > overOf(to, base.elapsed) + OVER_TOL) continue;
+          const insertion = m.cost - base.cost;
+          if (!best || insertion < best.cost) best = { to, cost: insertion };
+        }
+      }
+      if (!best) return false;
+      tentative.set(best.to, [...stopsNow(best.to), stop]);
+    }
+    // The estimates kept each run's order; confirm with a full re-sequence.
+    for (const [t, newStops] of tentative) {
+      const was = evalStops(t.stops, t.departureMin);
+      const now = evalStops(newStops, t.departureMin);
+      if (lateOf(now) > lateOf(was)) return false;
+      if (overOf(t, elapsed(now)) > overOf(t, elapsed(was)) + OVER_TOL) return false;
+    }
+    tentative.forEach((newStops, t) => (t.stops = newStops));
+    cand.runs.forEach((t) => (t.stops = []));
+    return true;
+  };
+  let vehiclesFreed = 0;
+  const consolidate = async () => {
+    const failed = new Set();
+    for (;;) {
+      if (hardTimeUp()) break;
+      const byVehicle = new Map();
+      working.forEach((t) => {
+        if (t.stops.length === 0 && !t.inUseElsewhere) return;
+        const v = byVehicle.get(t.vehicleId) || { id: t.vehicleId, runs: [], count: 0, weight: 0, fixed: false };
+        v.runs.push(t);
+        v.count += t.stops.length;
+        v.weight += weightOfStops(t.stops);
+        // Stays out whatever happens here: a pinned stop, or work on a run outside this plan.
+        if (t.inUseElsewhere || t.stops.some((s) => s.locked)) v.fixed = true;
+        byVehicle.set(t.vehicleId, v);
+      });
+      if (byVehicle.size < 2) break;
+      const candidates = [...byVehicle.values()]
+        .filter((v) => !v.fixed && v.count > 0 && !failed.has(v.id))
+        .sort((a, b) => a.count - b.count || a.weight - b.weight);
+      let emptied = false;
+      for (const cand of candidates) {
+        await maybeYield();
+        if (hardTimeUp()) break;
+        if (tryEmpty(cand)) {
+          vehiclesFreed++;
+          failed.clear();
+          emptied = true;
+          break;
+        }
+        failed.add(cand.id);
+      }
+      if (!emptied) break;
+    }
+  };
+  if (minimizeVehicles) {
+    await consolidate();
+    // Fuller trucks may now trade stops to their advantage (never onto a vehicle that stays in).
+    if (vehiclesFreed > 0 && !timeUp()) await relocate(1);
+  }
+
   // Every truck gets one final full re-sequence of what it ended up with.
   const results = [];
   for (const t of working) {
     await maybeYield();
     const { sequence, totalDistanceKm, totalDurationMin, totalWaitMin } = evalStops(t.stops, t.departureMin);
-    results.push({ ...t, sequence, totalDistanceKm, totalDurationMin, totalWaitMin });
+    const overtimeMin = sequence.length > 0 ? Math.round(overOf(t, totalDurationMin)) : 0;
+    results.push({ ...t, sequence, totalDistanceKm, totalDurationMin, totalWaitMin, overtimeMin });
   }
   // Tells the caller the search stopped on its time budget (result is still
   // valid - just not fully polished).
   results.timedOut = timedOut;
+  results.vehiclesFreed = vehiclesFreed;
+  results.relieved = relieved;
   return results;
 }
 
@@ -806,9 +1027,14 @@ async function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, ma
  */
 function summarizePlan(improved, unassignedKg = 0) {
   const used = improved.filter((t) => t.sequence.length > 0);
+  const overtime = (t) => (Number.isFinite(t.maxDurationMin) ? Math.max(0, t.totalDurationMin - t.maxDurationMin) : 0);
   return {
     unassignedKg,
-    trucks: used.length,
+    trucks: used.length, // runs with stops
+    // Vehicles that go out (a vehicle doing two runs counts once).
+    vehicles: new Set(improved.filter((t) => t.sequence.length > 0 || t.inUseElsewhere).map((t) => t.vehicleId ?? t.id)).size,
+    // Minutes by which runs exceed their allowed length, added up.
+    overtimeMin: used.reduce((sum, t) => sum + overtime(t), 0),
     late: used.reduce((n, t) => n + t.sequence.filter((x) => x.infeasible).length, 0),
     km: used.reduce((sum, t) => sum + t.totalDistanceKm, 0),
     // Total elapsed time: driving + waiting outside shops + unloading. This is
@@ -820,8 +1046,9 @@ function summarizePlan(improved, unassignedKg = 0) {
 
 /**
  * Is plan `a` better than plan `b` for the chosen strategy? Same priorities
- * for both strategies - place every order, then as few late stops as possible
- * - and then the strategy's own goal: "shortest" = less driving distance,
+ * for both strategies - place every order, then as few late stops as possible,
+ * then no run longer than allowed, then as few vehicles as possible - and
+ * then the strategy's own goal: "shortest" = less driving distance,
  * "least_wait" = less total elapsed time (which is where idle waiting counts).
  * Ties go to `b` so the incumbent (the current method) is only replaced when
  * the alternative is actually better.
@@ -829,6 +1056,12 @@ function summarizePlan(improved, unassignedKg = 0) {
 function isBetterPlan(a, b, strategy = "shortest") {
   if (Math.abs(a.unassignedKg - b.unassignedKg) > 0.01) return a.unassignedKg < b.unassignedKg;
   if (a.late !== b.late) return a.late < b.late;
+  const overA = a.overtimeMin || 0;
+  const overB = b.overtimeMin || 0;
+  if (Math.abs(overA - overB) > 5) return overA < overB;
+  const vehiclesA = a.vehicles ?? a.trucks;
+  const vehiclesB = b.vehicles ?? b.trucks;
+  if (vehiclesA !== vehiclesB) return vehiclesA < vehiclesB;
   const primary = strategy === "least_wait" ? "elapsedMin" : "km";
   const secondary = strategy === "least_wait" ? "km" : "elapsedMin";
   const tol = strategy === "least_wait" ? 1 : 0.05; // 1 minute / 50 metres: not a real difference
@@ -900,7 +1133,8 @@ function timelineAssign(state, pool, depot, matrix, strategy = "least_wait") {
 /**
  * Plans one region's Auto-Fill without touching anything: groups the new
  * orders using `method`, gives each whole group to the smallest truck that
- * still has room, then runs the cross-truck improvement over every truck in
+ * still has room (a group that fits nowhere is opened up and its orders
+ * placed one by one), then runs the cross-truck improvement over every truck in
  * the region (existing stops included). Pure - the caller applies the result.
  *
  * @param {Object} args
@@ -911,9 +1145,13 @@ function timelineAssign(state, pool, depot, matrix, strategy = "least_wait") {
  * @param {Object|null} args.matrix - road distance matrix covering depot + existing + new stops
  * @param {"sweep"|"proximity"|"timeline"} args.method - how the new orders are grouped ("timeline" = shop-hours aware, used for least_wait)
  * @param {number} args.maxMs - time budget for the improvement step
+ * @param {boolean} args.minimizeVehicles - default true (see crossRouteImprove)
  * @returns {Promise<{method, improved, unassigned, summary}>}
+ *
+ * A truck may also carry vehicleId / maxDurationMin / inUseElsewhere (see
+ * crossRouteImprove); the summary then counts vehicles and overtime.
  */
-async function planRegionAssignment({ poolStops, trucks, depot, strategy, matrix, method, maxMs }) {
+async function planRegionAssignment({ poolStops, trucks, depot, strategy, matrix, method, maxMs, minimizeVehicles = true }) {
   const state = trucks.map((t) => ({ ...t, stops: t.stops.map((s) => ({ ...s })), remaining: t.remainingKg }));
   const open = state.filter((t) => t.remaining > 0);
   const weightOf = (cl) => cl.reduce((sum, o) => sum + (o.weightKg || 0), 0);
@@ -935,9 +1173,15 @@ async function planRegionAssignment({ poolStops, trucks, depot, strategy, matrix
     // small trucks even though a big truck was free at the start.
     clusters.sort((a, b) => weightOf(b) - weightOf(a));
 
+    // Is this truck's vehicle already going out (on this run or another)?
+    const out = (t) => state.some((x) => (x.vehicleId ?? x.id) === (t.vehicleId ?? t.id) && (x.stops.length > 0 || x.inUseElsewhere));
     for (const cluster of clusters) {
       const w = weightOf(cluster);
-      const candidates = open.filter((t) => t.remaining > 0).map((t) => ({ maxWeightKg: t.remaining, _ref: t }));
+      // Among trucks with the same room, one whose vehicle is already out first.
+      const candidates = open
+        .filter((t) => t.remaining > 0)
+        .map((t) => ({ maxWeightKg: t.remaining, _ref: t, _out: out(t) ? 0 : 1 }))
+        .sort((a, b) => a._out - b._out);
       const fit = pickSmallestFittingTruck(candidates, w);
       if (!fit) {
         unassigned.push({ stops: cluster, weightKg: w });
@@ -947,16 +1191,61 @@ async function planRegionAssignment({ poolStops, trucks, depot, strategy, matrix
       fit._ref.stops.push(...cluster);
       fit._ref.remaining -= w;
     }
+
+    // The groups are cut to the size of the biggest truck, so with trucks of
+    // different sizes a whole group can find no truck while smaller trucks
+    // still have room (seen with the real weekly templates, 1,000 / 2,000 /
+    // 500 kg: 32 of 70 orders were left out next to an empty truck). Such a
+    // group is opened up and its orders are placed one at a time, heaviest
+    // first, on a truck with room: a vehicle that is already going out before
+    // an unused one, then the truck whose stops are nearest. Only an order
+    // that fits on no truck at all stays unassigned.
+    if (unassigned.length > 0) {
+      const leftovers = unassigned
+        .splice(0)
+        .flatMap((group) => group.stops)
+        .sort((a, b) => (b.weightKg || 0) - (a.weightKg || 0));
+      unassignedKg = 0;
+      const centreOf = (t) =>
+        t.stops.length === 0
+          ? depot
+          : { lat: t.stops.reduce((sum, x) => sum + x.coordinates.lat, 0) / t.stops.length, lng: t.stops.reduce((sum, x) => sum + x.coordinates.lng, 0) / t.stops.length };
+      for (const stop of leftovers) {
+        const w = stop.weightKg || 0;
+        let best = null;
+        for (const t of state) {
+          if (t.remaining <= 0 || t.remaining < w) continue;
+          const unused = out(t) ? 0 : 1;
+          const km = haversineKm(centreOf(t), stop.coordinates);
+          if (!best || unused < best.unused || (unused === best.unused && km < best.km)) best = { t, unused, km };
+        }
+        if (!best) {
+          unassigned.push({ stops: [stop], weightKg: w });
+          unassignedKg += w;
+          continue;
+        }
+        best.t.stops.push(stop);
+        best.t.remaining -= w;
+      }
+    }
   }
 
   const improved = await crossRouteImprove(
-    state.map((t) => ({ id: t.id, capacityKg: t.capacityKg, departureMin: t.departureMin, stops: t.stops })),
+    state.map((t) => ({
+      id: t.id,
+      vehicleId: t.vehicleId,
+      maxDurationMin: t.maxDurationMin,
+      inUseElsewhere: t.inUseElsewhere,
+      capacityKg: t.capacityKg,
+      departureMin: t.departureMin,
+      stops: t.stops,
+    })),
     depot,
     undefined,
     undefined,
     strategy,
     matrix,
-    { maxMs }
+    { maxMs, minimizeVehicles }
   );
   return { method, improved, unassigned, summary: summarizePlan(improved, unassignedKg) };
 }
@@ -1054,4 +1343,7 @@ module.exports = {
   pickSmallestFittingTruck,
   crossRouteImprove,
   evaluateFixedRoute,
+  maxRunDurationMin,
+  routeMaxDurationMin,
+  runTurnaroundMin,
 };

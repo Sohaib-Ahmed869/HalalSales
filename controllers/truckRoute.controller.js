@@ -16,6 +16,7 @@ const {
   DEFAULT_DEPARTURE_MIN,
   planRegionAssignment,
   isBetterPlan,
+  maxRunDurationMin,
 } = require("../utils/routeOptimizer");
 const { getWarehouse, regionForAddress } = require("../utils/regions");
 const { geocodeCustomer, deliveryPoint } = require("../utils/geocodingService");
@@ -77,9 +78,22 @@ async function resolveScheduleTrucks(trucks, { tenant, dayOfWeek, scheduleId }) 
     }
   }
   if (trucks.some((t) => !(Number(t.maxWeightKg) > 0))) return "Enter the capacity (kg) of every truck.";
+  // Further runs of a vehicle that day: a real time each, later than the run before.
+  for (const truck of trucks) {
+    const extra = (truck.extraRuns || []).filter((r) => r && r.departureTime);
+    truck.extraRuns = extra.map((r) => ({ departureTime: r.departureTime }));
+    let previous = parseTimeToMinutes(truck.departureTime || "08:00");
+    for (const run of extra) {
+      const at = parseTimeToMinutes(run.departureTime);
+      const name = truck.truckName || `Truck ${truck.truckNumber}`;
+      if (at == null || at >= 24 * 60) return `${name}: every run needs a departure time (HH:MM).`;
+      if (previous != null && at <= previous) return `${name}: each run must leave later than the run before it.`;
+      previous = at;
+    }
+  }
   const numbers = trucks.map((t) => t.truckNumber);
   if (new Set(numbers).size !== numbers.length) return "The same truck is in this schedule twice.";
-  // A truck does one route a day: it can't be in two schedules of the same weekday.
+  // A vehicle is in one schedule per weekday (its runs are listed there).
   const query = { tenant, dayOfWeek, isActive: true, "trucks.truckNumber": { $in: numbers } };
   if (scheduleId) query._id = { $ne: scheduleId };
   const clash = await TruckSchedule.findOne(query).lean();
@@ -182,10 +196,10 @@ const sameList = (a = [], b = []) => a.length === b.length && a.every((v, i) => 
 // copied, so a departure or stop time set on the truck card for this date
 // stays. A truck with orders keeps its region, and its capacity when the new
 // one is below what it already carries. Returns { changed, kept }.
-async function applyTemplateToRoute(route, schedule, truck) {
+async function applyTemplateToRoute(route, schedule, truck, departureTime = truck.departureTime || "08:00") {
   const template = {
     maxWeightKg: truck.maxWeightKg,
-    departureTime: truck.departureTime || "08:00",
+    departureTime,
     serviceMin: truck.serviceMin ?? null,
   };
   const last = route.templateValues || {};
@@ -202,6 +216,8 @@ async function applyTemplateToRoute(route, schedule, truck) {
   }
   if (truck.truckType && route.truckType !== truck.truckType) route.truckType = truck.truckType;
   if (String(route.scheduleId || "") !== String(schedule._id)) route.scheduleId = schedule._id;
+  // A run added by hand that the template now lists is the template's from here on.
+  if (route.manualTrip) route.manualTrip = undefined;
 
   let capacityKept = false;
   if (edited("maxWeightKg")) {
@@ -245,20 +261,32 @@ async function applyTemplateToRoute(route, schedule, truck) {
   return { changed, kept };
 }
 
+// Run number of a route; routes saved before runs existed are run 1.
+const tripOf = (route) => route.trip || 1;
+// "GS-351-KV", or "GS-351-KV · run 2" for a later run of that vehicle.
+const runLabel = (route) => `${route.truckName || `Truck ${route.truckNumber}`}${tripOf(route) > 1 ? ` · run ${tripOf(route)}` : ""}`;
+// The departure times of a template truck's runs, run 1 first.
+const templateRuns = (truck) => [truck.departureTime || "08:00", ...(truck.extraRuns || []).map((r) => r.departureTime).filter(Boolean)];
+
 // Makes the day's trucks match the active weekly templates of its weekday. A
-// truck is one vehicle doing one route that day, so it is recognised by its
-// truck number alone: a template edit (region, capacity, departure, time per
-// stop) changes the truck that is already there instead of adding a second
-// one. Missing trucks are created; empty trucks that are doubled or no longer
-// in a template are removed; a truck with orders is never removed.
+// truck of a day is one run of one vehicle, so it is recognised by its truck
+// number and run number: a template edit (region, capacity, departure, time
+// per stop) changes the run that is already there instead of adding a second
+// one. Missing runs are created; empty runs that are doubled or no longer in
+// a template are removed (a run added by hand on the day stays while its
+// vehicle is still in a template); a run with orders is never removed.
 async function syncTrucksFor(date, tenant) {
   const weekday = dayOfWeekFor(date);
   const schedules = await TruckSchedule.find({ dayOfWeek: weekday, isActive: true, tenant });
   const { dayStart, dayEnd } = dayBounds(date);
 
   const existing = await TruckRoute.find({ tenant, date: { $gte: dayStart, $lte: dayEnd } }).sort({ _id: 1 });
-  const byNumber = new Map();
-  existing.forEach((r) => byNumber.set(r.truckNumber, [...(byNumber.get(r.truckNumber) || []), r]));
+  const keyOf = (truckNumber, trip) => `${truckNumber}|${trip}`;
+  const byRun = new Map();
+  existing.forEach((r) => {
+    const key = keyOf(r.truckNumber, tripOf(r));
+    byRun.set(key, [...(byRun.get(key) || []), r]);
+  });
 
   const result = { created: 0, updated: 0, skipped: 0, removed: 0, keptWithOrders: [], notApplied: [], weekday, templates: schedules.length };
   const remove = async (routes) => {
@@ -268,55 +296,62 @@ async function syncTrucksFor(date, tenant) {
     await TruckRoute.deleteMany({ _id: { $in: ids } });
     result.removed += ids.length;
   };
-  const label = (r) => r.truckName || `Truck ${r.truckNumber}`;
 
-  // The same truck twice on one day: keep the one carrying orders (else the first).
-  for (const [number, routes] of byNumber) {
+  // The same run twice on one day: keep the one carrying orders (else the first).
+  for (const [key, routes] of byRun) {
     if (routes.length < 2) continue;
     const loaded = routes.filter((r) => r.orders.length > 0);
     const keep = loaded.length > 0 ? loaded : [routes[0]];
     await remove(routes.filter((r) => !keep.includes(r)));
-    byNumber.set(number, keep);
+    byRun.set(key, keep);
   }
 
   const wanted = new Set();
+  const wantedVehicles = new Set();
   for (const schedule of schedules) {
     for (const truck of schedule.trucks) {
-      wanted.add(truck.truckNumber);
-      const route = (byNumber.get(truck.truckNumber) || [])[0];
-      if (!route) {
-        await TruckRoute.create({
-          date: dayStart,
-          truckNumber: truck.truckNumber,
-          truckName: truck.truckName || `Truck ${truck.truckNumber}`,
-          truckType: truck.truckType,
-          maxWeightKg: truck.maxWeightKg,
-          departureTime: truck.departureTime || "08:00",
-          serviceMin: truck.serviceMin,
-          templateValues: { maxWeightKg: truck.maxWeightKg, departureTime: truck.departureTime || "08:00", serviceMin: truck.serviceMin },
-          region: schedule.region,
-          departments: schedule.departments,
-          cities: schedule.cities,
-          scheduleId: schedule._id,
-          tenant,
-          status: "planning",
-          orders: [],
-        });
-        result.created++;
-        continue;
+      wantedVehicles.add(truck.truckNumber);
+      const departures = templateRuns(truck);
+      for (let i = 0; i < departures.length; i++) {
+        const trip = i + 1;
+        const key = keyOf(truck.truckNumber, trip);
+        wanted.add(key);
+        const route = (byRun.get(key) || [])[0];
+        if (!route) {
+          await TruckRoute.create({
+            date: dayStart,
+            truckNumber: truck.truckNumber,
+            trip,
+            truckName: truck.truckName || `Truck ${truck.truckNumber}`,
+            truckType: truck.truckType,
+            maxWeightKg: truck.maxWeightKg,
+            departureTime: departures[i],
+            serviceMin: truck.serviceMin,
+            templateValues: { maxWeightKg: truck.maxWeightKg, departureTime: departures[i], serviceMin: truck.serviceMin },
+            region: schedule.region,
+            departments: schedule.departments,
+            cities: schedule.cities,
+            scheduleId: schedule._id,
+            tenant,
+            status: "planning",
+            orders: [],
+          });
+          result.created++;
+          continue;
+        }
+        const { changed, kept } = await applyTemplateToRoute(route, schedule, truck, departures[i]);
+        if (changed) result.updated++;
+        else result.skipped++;
+        if (kept.length > 0) result.notApplied.push({ truck: runLabel(route), kept });
       }
-      const { changed, kept } = await applyTemplateToRoute(route, schedule, truck);
-      if (changed) result.updated++;
-      else result.skipped++;
-      if (kept.length > 0) result.notApplied.push({ truck: label(route), kept });
     }
   }
 
-  // Trucks of the day that no template lists any more.
-  for (const [number, routes] of byNumber) {
-    if (wanted.has(number)) continue;
-    await remove(routes.filter((r) => r.orders.length === 0));
-    routes.filter((r) => r.orders.length > 0).forEach((r) => result.keptWithOrders.push(label(r)));
+  // Runs of the day that no template lists any more.
+  for (const [key, routes] of byRun) {
+    if (wanted.has(key)) continue;
+    await remove(routes.filter((r) => r.orders.length === 0 && !(r.manualTrip && wantedVehicles.has(r.truckNumber))));
+    routes.filter((r) => r.orders.length > 0).forEach((r) => result.keptWithOrders.push(runLabel(r)));
   }
   return result;
 }
@@ -375,9 +410,12 @@ exports.getRoutesByDate = async (req, res) => {
     const routes = await TruckRoute.find({
       date: { $gte: dayStart, $lte: dayEnd },
       tenant,
-    }).sort({ region: 1, truckNumber: 1 });
+    }).sort({ region: 1, truckNumber: 1, trip: 1 });
 
-    res.json({ routes });
+    // How many orders were sent to Logistics for this day, whatever the date:
+    // the page offers "Remove these trucks" only when it is none.
+    const ordersSent = USE_DELIVERY_NOTES() ? null : await LogisticsOrder.countDocuments({ tenant, deliveryDate: { $gte: dayStart, $lte: dayEnd } });
+    res.json({ routes, ordersSent });
   } catch (error) {
     console.error("Get routes by date error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
@@ -434,6 +472,68 @@ exports.setDepartureTime = async (req, res) => {
     res.json({ message: "Departure time updated", route });
   } catch (error) {
     console.error("Set departure time error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// POST /truck-routes/:routeId/runs { departureTime } - another run of the same
+// vehicle on the same date (back at the depot, loaded again, out again). It
+// copies the truck's capacity and area and leaves at its own time, which must
+// be later than the vehicle's last run so far.
+exports.addRun = async (req, res) => {
+  try {
+    const { departureTime } = req.body;
+    const at = parseTimeToMinutes(departureTime);
+    if (at == null || at >= 24 * 60) return res.status(400).json({ message: 'departureTime must be "HH:MM" (24h)' });
+    const route = await TruckRoute.findById(req.params.routeId);
+    if (!route) return res.status(404).json({ message: "Route not found" });
+
+    const { dayStart, dayEnd } = dayBounds(route.date);
+    const runs = await TruckRoute.find({ tenant: route.tenant, truckNumber: route.truckNumber, date: { $gte: dayStart, $lte: dayEnd } });
+    const last = runs.reduce((latest, r) => (departureMinOf(r) > departureMinOf(latest) ? r : latest), route);
+    if (at <= departureMinOf(last)) {
+      return res.status(400).json({
+        message: `The new run must leave later than ${runLabel(last)}, which leaves at ${last.departureTime || "08:00"}.`,
+      });
+    }
+    const created = await TruckRoute.create({
+      date: route.date,
+      truckNumber: route.truckNumber,
+      trip: Math.max(...runs.map(tripOf)) + 1,
+      manualTrip: true,
+      truckName: route.truckName,
+      truckType: route.truckType,
+      maxWeightKg: route.maxWeightKg,
+      departureTime,
+      serviceMin: route.serviceMin,
+      strategy: route.strategy,
+      region: route.region,
+      departments: route.departments,
+      cities: route.cities,
+      scheduleId: route.scheduleId,
+      tenant: route.tenant,
+      status: "planning",
+      orders: [],
+    });
+    res.status(201).json({ message: `${runLabel(created)} added, leaving at ${departureTime}`, route: created });
+  } catch (error) {
+    console.error("Add run error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// DELETE /truck-routes/:routeId/run - removes a later run that carries nothing.
+exports.removeRun = async (req, res) => {
+  try {
+    const route = await TruckRoute.findById(req.params.routeId);
+    if (!route) return res.status(404).json({ message: "Route not found" });
+    if (tripOf(route) === 1) return res.status(400).json({ message: "The first run of a truck can't be removed here. Take the truck out of the weekly template instead." });
+    if (route.orders.length > 0) return res.status(400).json({ message: "This run has orders on it. Take them off first." });
+    await RouteAdherence.deleteMany({ routeId: route._id });
+    await TruckRoute.deleteOne({ _id: route._id });
+    res.json({ message: `${runLabel(route)} removed` });
+  } catch (error) {
+    console.error("Remove run error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
@@ -1473,6 +1573,16 @@ exports.autoFillAllTrucks = async (req, res) => {
       byRegion.get(built.region).push(built);
     }
 
+    // How long each run may take: the general limit, and back in time for the
+    // same vehicle's next run that day (utils/routeOptimizer.js).
+    const runLimitOf = (route) => {
+      const dep = departureMinOf(route);
+      const later = routes
+        .filter((r) => r.truckNumber === route.truckNumber && String(r._id) !== String(route._id) && departureMinOf(r) > dep)
+        .map(departureMinOf);
+      return { limit: maxRunDurationMin(dep, later.length > 0 ? Math.min(...later) : null), nextAt: later.length > 0 ? Math.min(...later) : null };
+    };
+
     const autoFillStartedAt = Date.now();
     const planningReport = [];
     const depot = getDepot(tenant);
@@ -1506,6 +1616,10 @@ exports.autoFillAllTrucks = async (req, res) => {
       // existing stops only, plus how much room each truck has left.
       const baseTrucks = regionRoutes.map((route) => ({
         id: route._id.toString(),
+        // Runs of one vehicle share its number: the planner counts vehicles, not runs.
+        vehicleId: route.truckNumber,
+        maxDurationMin: runLimitOf(route).limit,
+        inUseElsewhere: routes.some((r) => r.truckNumber === route.truckNumber && r.region !== region && r.orders.length > 0),
         departureMin: departureMinOf(route),
         capacityKg: route.maxWeightKg,
         remainingKg: route.maxWeightKg - route.totalWeightKg,
@@ -1566,6 +1680,8 @@ exports.autoFillAllTrucks = async (req, res) => {
           idleMin: Math.round(c.summary.idleMin),
           lateStops: c.summary.late,
           trucksUsed: c.summary.trucks,
+          vehiclesUsed: c.summary.vehicles,
+          overtimeMin: Math.round(c.summary.overtimeMin),
           unassignedKg: Math.round(c.summary.unassignedKg * 10) / 10,
         })),
       });
@@ -1575,7 +1691,10 @@ exports.autoFillAllTrucks = async (req, res) => {
           unassignable.push({
             docEntry: s._built.DocEntry,
             cardName: s._built.CardName,
-            reason: `region "${region}" under-resourced for this date (a ${weightKg}kg group exceeds every available truck's remaining capacity)`,
+            reason:
+              cluster.length === 1
+                ? `no truck for "${region}" has ${Math.round(weightKg * 10) / 10} kg of room left on this date (add a truck or a run, or raise a capacity)`
+                : `region "${region}" under-resourced for this date (a ${weightKg}kg group exceeds every available truck's remaining capacity)`,
           })
         )
       );
@@ -1659,9 +1778,34 @@ exports.autoFillAllTrucks = async (req, res) => {
       );
     }
 
+    // What the day now needs: vehicles that go out, and runs still longer than allowed.
+    const clock = (min) => `${String(Math.floor(min / 60) % 24).padStart(2, "0")}:${String(Math.round(min) % 60).padStart(2, "0")}`;
+    const vehiclesUsed = new Set(routes.filter((r) => r.orders.length > 0).map((r) => r.truckNumber)).size;
+    const vehiclesAvailable = new Set(routes.map((r) => r.truckNumber)).size;
+    const overtime = routes
+      .filter((r) => r.orders.length > 0)
+      .map((r) => ({ route: r, ...runLimitOf(r) }))
+      .filter(({ route, limit }) => (route.totalDurationMin || 0) > limit + 0.5)
+      .map(({ route, limit, nextAt }) => {
+        const dep = departureMinOf(route);
+        const boundByNextRun = nextAt != null && limit < maxRunDurationMin(dep);
+        return {
+          truck: route.truckName || `Truck ${route.truckNumber}`,
+          run: tripOf(route),
+          backAt: clock(dep + route.totalDurationMin),
+          limitAt: clock(dep + limit),
+          overMin: Math.round(route.totalDurationMin - limit),
+          reason: boundByNextRun ? "next_run" : "day_length",
+          nextRunAt: boundByNextRun ? clock(nextAt) : undefined,
+        };
+      });
+
     res.json({
-      message: `Auto-filled ${totalAdded} order(s) across ${touchedRoutes.size} truck(s)`,
+      message: `Auto-filled ${totalAdded} order(s) across ${touchedRoutes.size} truck(s), using ${vehiclesUsed} of ${vehiclesAvailable} vehicle(s)`,
       totalAdded,
+      vehiclesUsed,
+      vehiclesAvailable,
+      overtime,
       unassignable,
       planning: planningReport,
       routes,

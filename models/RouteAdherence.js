@@ -9,6 +9,7 @@ const RouteAdherenceSchema = new Schema({
   tenant: { type: String, default: "halal-food-sales" },
   date: { type: Date, required: true, index: true },
   truckNumber: { type: Number },
+  trip: { type: Number, default: 1 }, // run of that vehicle that day
   truckName: { type: String },
   region: { type: String },
   vehicle: { type: String }, // MyGeotab vehicle name / registration
