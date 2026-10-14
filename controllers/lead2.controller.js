@@ -3,6 +3,7 @@ const Lead = require("../models/Lead");
 const Customer = require("../models/Customer");
 const User = require("../models/User");
 const Task = require("../models/Task");
+const WhatsAppMessage = require("../models/WhatsAppMessage");
 const csv = require("csv-parser");
 const fs = require("fs");
 const path = require("path");
@@ -2063,6 +2064,127 @@ exports.upsertAiHandoffLead = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Error creating AI hand-off lead",
+      error: error.message,
+    });
+  }
+};
+
+// WhatsApp chat history for a lead — mainly the AI-generated ones, so whoever
+// picks the lead up sees the whole conversation the agent had, plus anything
+// said since (the AI agent mirrors every message it sends into WhatsAppMessage,
+// and inbound/human messages land there via the webhook). Read live, so it is
+// never a stale copy. Falls back to the snapshot sent with the hand-off when
+// the phone number matches no conversation.
+const conversationIdsFor = (phones) => {
+  const ids = new Set();
+  for (const raw of phones) {
+    if (!raw) continue;
+    let d = String(raw).replace(/\D/g, "");
+    if (d.startsWith("00")) d = d.slice(2);
+    if (d.length === 10 && d.startsWith("0")) d = `33${d.slice(1)}`;
+    else if (d.length === 9) d = `33${d}`;
+    if (d.length < 8) continue;
+    ids.add(`+${d}`);
+    ids.add(d);
+  }
+  return [...ids];
+};
+
+const chatText = (m) => {
+  const c = m.content || {};
+  if (c.text) return typeof c.text === "string" ? c.text : c.text.body || "";
+  if (m.metadata?.renderedText) return m.metadata.renderedText;
+  if (c.template) return `[Template: ${c.template.name}]`;
+  if (c.caption) return c.caption;
+  if (c.filename) return `[${m.messageType}: ${c.filename}]`;
+  return m.messageType && m.messageType !== "text" ? `[${m.messageType}]` : "";
+};
+
+exports.getLeadChatHistory = async (req, res) => {
+  try {
+    const query = { _id: req.params.id };
+    if (req.user.role === "sales_agent") query.assignedTo = req.user._id;
+
+    const lead = await Lead.findOne(query)
+      .select("fullName company phoneNumber sapCardCode existingCustomer aiHandoff sourceType")
+      .lean();
+    if (!lead) {
+      return res.status(404).json({ success: false, message: "Lead not found" });
+    }
+
+    const phones = [lead.phoneNumber];
+    if (lead.existingCustomer || lead.sapCardCode) {
+      const customer = await Customer.findOne(
+        lead.existingCustomer ? { _id: lead.existingCustomer } : { CardCode: lead.sapCardCode }
+      )
+        .select("phoneNumber additionalPhoneNumbers")
+        .lean();
+      if (customer) phones.push(customer.phoneNumber, ...(customer.additionalPhoneNumbers || []));
+    }
+    const conversationIds = conversationIdsFor(phones);
+    const limit = Math.min(parseInt(req.query.limit, 10) || 300, 1000);
+
+    const rows = conversationIds.length
+      ? await WhatsAppMessage.find({ conversationId: { $in: conversationIds } })
+          .sort({ timestamp: -1 })
+          .limit(limit)
+          .populate("salesAgent", "firstName lastName")
+          .lean()
+      : [];
+
+    let source = "whatsapp";
+    let messages = rows.reverse().map((m) => ({
+      id: m._id,
+      direction: m.direction,
+      text: chatText(m),
+      at: m.timestamp || m.createdAt,
+      messageType: m.messageType,
+      mediaUrl: m.content?.mediaUrl,
+      status: m.status,
+      by:
+        m.direction === "inbound"
+          ? "customer"
+          : m.metadata?.aiAgent
+          ? "ai"
+          : m.salesAgent
+          ? `${m.salesAgent.firstName || ""} ${m.salesAgent.lastName || ""}`.trim() || "agent"
+          : "agent",
+      sandbox: Boolean(m.metadata?.sandbox),
+    }));
+
+    if (!messages.length && lead.aiHandoff?.conversation?.length) {
+      source = "handoff_snapshot";
+      messages = lead.aiHandoff.conversation.map((m, i) => ({
+        id: `snapshot-${i}`,
+        direction: m.direction,
+        text: m.text,
+        at: m.at,
+        by: m.direction === "inbound" ? "customer" : "ai",
+      }));
+    }
+
+    res.json({
+      success: true,
+      data: {
+        source,
+        conversationIds,
+        handoff: lead.aiHandoff
+          ? {
+              reason: lead.aiHandoff.reason,
+              reasonLabel: lead.aiHandoff.reasonLabel,
+              summary: lead.aiHandoff.summary,
+              handedOffAt: lead.aiHandoff.handedOffAt,
+            }
+          : null,
+        messages,
+        truncated: rows.length === limit,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching lead chat history:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching chat history",
       error: error.message,
     });
   }

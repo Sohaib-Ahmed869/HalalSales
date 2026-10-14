@@ -65,6 +65,7 @@ router.get(
   leadController.getUnassignedLeads
 );
 router.get("/:id", auth, leadController.getLeadById);
+router.get("/:id/chat-history", auth, leadController.getLeadChatHistory);
 
 // Lead Management
 router.post(
