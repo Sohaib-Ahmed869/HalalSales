@@ -73,6 +73,7 @@ const { syncFromFeb21 } = require("./jobs/hubspotJob");
 const { fetchCallsFromMay2UntilToday } = require("./jobs/mayScript");
 const targetScheduler = require("./services/targetScheduler");
 const truckRouteRoutes = require('./routes/truckRoute.routes');
+const ubereatsRoutes = require('./routes/ubereats.routes'); // Uber Eats Scraper page (ubereats_* collections)
 const callAcceptanceRoutes = require('./routes/callAcceptance.routes');
 // const rfqResponsePoller = require('./services/rfqResponsePoller'); // REPLACED by orchestratorAgent
 const orchestratorAgent = require('./agents/orchestratorAgent');
@@ -188,6 +189,10 @@ mongoose
     // Live truck GPS from MyGeotab, and the evening planned-vs-actual report.
     geotabSync.start();
     adherenceService.startCron();
+
+    // Uber Eats scraper: a separate worker process runs the jobs queued from the Uber Eats Scraper page
+    // (one in total across backend copies; off with UBEREATS_WORKER_ENABLED=false). See services/ubereats/supervisor.js.
+    require("./services/ubereats/supervisor").start();
   })
   .catch((err) => {
     console.error("❌ MongoDB connection error:", err);
@@ -261,6 +266,7 @@ app.use("/api/duplicates", require("./routes/duplicates.routes"));
 app.use("/api/ai-summary", aiSummaryRoutes);
 app.use("/api/area-analysis", areaAnalysisRoutes);
 app.use('/api/truck-routes', truckRouteRoutes);
+app.use('/api/ubereats', ubereatsRoutes);
 app.use('/api/rfq', rfqRoutes); // RFQ routes
 app.use('/api/vendor-email', vendorEmailRoutes);
 app.use('/api/whatsapp', whatsappRoutes);

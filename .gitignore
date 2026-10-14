@@ -1,3 +1,5 @@
 .env
 node_modules/
 .pdf
+# Uber Eats scraper browser profiles (Cloudflare cookies)
+.data/
