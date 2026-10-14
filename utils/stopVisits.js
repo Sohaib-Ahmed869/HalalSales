@@ -17,6 +17,8 @@
 //   STOP_VISIT_MAX_ACCURACY_M   fixes less accurate than this are ignored, default 100
 
 const TruckRoute = require("../models/TruckRoute");
+const { getWarehouse } = require("./regions");
+const { clockMinutes, eligibleRuns } = require("./truckRuns");
 
 const cfg = () => ({
   enabled: process.env.STOP_VISITS_ENABLED !== "false",
@@ -49,41 +51,47 @@ async function processFix(device, fix) {
   if (!c.enabled) return [];
   if (Number.isFinite(fix.accuracyM) && fix.accuracyM > c.maxAccuracyM) return [];
 
-  const route = await TruckRoute.findOne({
+  // Every run of the vehicle that day; only the runs it can be on right now
+  // are looked at (a stop of the afternoon run is not "visited" in the morning).
+  const all = await TruckRoute.find({
     tenant: device.tenant,
     truckNumber: device.truckNumber,
     date: dayRange(fix.recordedAt),
   });
-  if (!route) return [];
+  if (all.length === 0) return [];
 
   const at = fix.recordedAt;
+  const routes = all.length === 1 ? all : eligibleRuns(all, clockMinutes(at, getWarehouse(device.tenant).timeZone));
   const changed = [];
-  for (const stop of route.orders) {
-    if (stop.departedAt) continue; // already visited
-    const pos = stop.coordinates;
-    if (!pos || !Number.isFinite(pos.lat) || !Number.isFinite(pos.lng)) continue;
+  for (const route of routes) {
+    let touched = false;
+    for (const stop of route.orders) {
+      if (stop.departedAt) continue; // already visited
+      const pos = stop.coordinates;
+      if (!pos || !Number.isFinite(pos.lat) || !Number.isFinite(pos.lng)) continue;
 
-    const inside = distanceM(fix, pos) <= c.radiusM;
-    const before = { arrivedAt: stop.arrivedAt?.getTime(), departedAt: stop.departedAt?.getTime() };
+      const inside = distanceM(fix, pos) <= c.radiusM;
+      const before = { arrivedAt: stop.arrivedAt?.getTime(), departedAt: stop.departedAt?.getTime() };
 
-    if (inside) {
-      if (!stop.arrivedAt) stop.arrivedAt = at;
-    } else if (stop.arrivedAt && at > stop.arrivedAt) {
-      if (at - stop.arrivedAt >= c.dwellMs) stop.departedAt = at;
-      else stop.arrivedAt = undefined; // left too soon: a drive-by
+      if (inside) {
+        if (!stop.arrivedAt) stop.arrivedAt = at;
+      } else if (stop.arrivedAt && at > stop.arrivedAt) {
+        if (at - stop.arrivedAt >= c.dwellMs) stop.departedAt = at;
+        else stop.arrivedAt = undefined; // left too soon: a drive-by
+      }
+
+      if (before.arrivedAt !== stop.arrivedAt?.getTime() || before.departedAt !== stop.departedAt?.getTime()) {
+        touched = true;
+        changed.push({
+          routeId: String(route._id),
+          docEntry: stop.order?.DocEntry,
+          arrivedAt: stop.arrivedAt,
+          departedAt: stop.departedAt,
+        });
+      }
     }
-
-    if (before.arrivedAt !== stop.arrivedAt?.getTime() || before.departedAt !== stop.departedAt?.getTime()) {
-      changed.push({
-        routeId: String(route._id),
-        docEntry: stop.order?.DocEntry,
-        arrivedAt: stop.arrivedAt,
-        departedAt: stop.departedAt,
-      });
-    }
+    if (touched) await route.save();
   }
-
-  if (changed.length > 0) await route.save();
   return changed;
 }
 

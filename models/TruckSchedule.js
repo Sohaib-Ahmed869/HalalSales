@@ -42,6 +42,9 @@ const TruckScheduleSchema = new Schema({
       // "HH:MM" the truck leaves the depot on days initialized from this
       // template. Drives every stop's ETA.
       departureTime: { type: String, default: "08:00" },
+      // Further runs of the same vehicle that day (run 2, 3, ...): each leaves
+      // the depot at its own time, later than the run before it.
+      extraRuns: [{ _id: false, departureTime: { type: String } }],
       serviceMin: { type: Number }, // minutes allowed per stop; unset = default
     },
   ],

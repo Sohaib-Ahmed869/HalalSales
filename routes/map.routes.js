@@ -3,6 +3,7 @@ const express = require("express");
 const router = express.Router();
 const { auth } = require("../middleware/auth");
 const controller = require("../controllers/map.controller");
+const salesMap = require("../controllers/salesMap.controller");
 const tiles = require("../controllers/mapTiles.controller");
 
 // Map tile images: public URL checked with a short-lived "tiles" token
@@ -19,6 +20,9 @@ router.get("/customer/:cardCode", controller.getCustomerDocuments);
 router.get("/search-customers", controller.searchCustomers);
 router.get("/nearby", controller.getNearby);
 router.get("/overview", controller.getOverview);
+router.get("/sales", salesMap.getSalesMap);
+router.get("/search-areas", salesMap.searchAreas);
+router.get("/prospect/:id", salesMap.getProspect);
 router.get("/geocoding/stats", controller.getGeocodingStats);
 router.post("/geocoding/batch", controller.batchGeocode);
 router.put("/customer/:cardCode/coordinates", controller.setCustomerCoordinates);

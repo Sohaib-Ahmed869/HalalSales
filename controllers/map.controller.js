@@ -168,9 +168,15 @@ exports.searchCustomers = async (req, res) => {
     }
 
     const regex = new RegExp(search.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    const or = [{ CardName: regex }, { CardCode: regex }];
+    // Digits are also read as (the start of) a postal code.
+    if (/^\d{2,5}$/.test(search.trim())) {
+      const zip = new RegExp(`^\\s*${search.trim()}`);
+      or.push({ "address.zipCode": zip }, { "deliveryAddress.zipCode": zip });
+    }
     // .lean(): the synced `coordinates` / `deliveryAddress` fields aren't in the schema.
     const customers = await Customer.find({
-      $or: [{ CardName: regex }, { CardCode: regex }],
+      $or: or,
     })
       .limit(20)
       .lean();
@@ -733,3 +739,6 @@ exports.getOverview = async (req, res) => {
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };
+
+// Shared with controllers/salesMap.controller.js (the one-view Sales Map).
+exports.helpers = { customerGeo, locateRestaurants, normName, usable, GEOCODE_PER_REQUEST };
