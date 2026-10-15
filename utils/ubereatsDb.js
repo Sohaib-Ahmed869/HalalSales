@@ -12,6 +12,7 @@
 // optionally UBEREATS_MONGODB_DB, default "ubereats"); collections then have no prefix, exactly as
 // the standalone scraper (HalalFoods/ubereats-scraper-2-hfs) created them.
 const mongoose = require("mongoose");
+const { addressKey } = require("../services/ubereats/parse");
 
 const SEPARATE_URI = process.env.UBEREATS_MONGODB_URI || "";
 const SEPARATE_DB = process.env.UBEREATS_MONGODB_DB || "ubereats";
@@ -105,6 +106,9 @@ async function prepare(db) {
     col("restaurants").createIndex({ uuid: 1 }, { unique: true }),
     col("restaurants").createIndex({ deliversIn: 1 }),
     col("restaurants").createIndex({ postalCode: 1 }),
+    col("restaurants").createIndex({ addressKey: 1 }),
+    col("restaurants").createIndex({ email: 1 }, { sparse: true }),
+    col("restaurants").createIndex({ registrationNumber: 1 }, { sparse: true }),
     col("restaurants").createIndex({ categories: 1 }),
     col("restaurants").createIndex({ feedCategories: 1 }),
     col("restaurants").createIndex({ "location.postalCode": 1 }),
@@ -122,7 +126,9 @@ async function prepare(db) {
  * Idempotent (only matters for data written by the old standalone scraper):
  * - `postalCodes` (searched codes whose feed listed the store) became `deliversIn`;
  * - `postalCode` (where the store is located) is filled from `location.postalCode`, normalised to 5 digits;
- * - `geoSource` is set for coordinates that came from Uber Eats.
+ * - `geoSource` is set for coordinates that came from Uber Eats;
+ * - `addressKey` (stores sharing one address, see parse.js) is filled for stores saved before it existed
+ *   or with an older version of the key.
  */
 async function migrateRestaurants(restaurants) {
   await restaurants.updateMany({ postalCodes: { $exists: true } }, [
@@ -140,9 +146,35 @@ async function migrateRestaurants(restaurants) {
   await restaurants.updateMany({ postalCode: null }, { $unset: { postalCode: "" } });
   await restaurants.updateMany({ geo: { $exists: true }, geoSource: { $exists: false } }, { $set: { geoSource: "ubereats" } });
   await restaurants.dropIndex("postalCodes_1").catch(() => {});
+  await backfillAddressKeys(restaurants);
+}
+
+// Bump when addressKey() in parse.js changes, so existing stores get the new key once.
+const ADDRESS_KEY_VERSION = 1;
+
+async function backfillAddressKeys(restaurants) {
+  const cursor = restaurants.find(
+    { "location.postalCode": { $exists: true }, addressKeyVersion: { $ne: ADDRESS_KEY_VERSION } },
+    { projection: { location: 1 } }
+  );
+  let ops = [];
+  for await (const r of cursor) {
+    const key = addressKey(r.location);
+    ops.push({
+      updateOne: {
+        filter: { _id: r._id },
+        update: key ? { $set: { addressKey: key, addressKeyVersion: ADDRESS_KEY_VERSION } } : { $set: { addressKeyVersion: ADDRESS_KEY_VERSION }, $unset: { addressKey: "" } },
+      },
+    });
+    if (ops.length >= 500) {
+      await restaurants.bulkWrite(ops, { ordered: false });
+      ops = [];
+    }
+  }
+  if (ops.length) await restaurants.bulkWrite(ops, { ordered: false });
 }
 
 /** Shown on the page and in errors: "main database (ubereats_*)" or the separate database's name. */
 const UBEREATS_DB_NAME = SEPARATE_URI ? SEPARATE_DB : "main database, ubereats_* collections";
 
-module.exports = { ueCollections, UBEREATS_DB_NAME, UBEREATS_COLLECTIONS: NAMES };
+module.exports = { ueCollections, UBEREATS_DB_NAME, UBEREATS_COLLECTIONS: NAMES, ADDRESS_KEY_VERSION };

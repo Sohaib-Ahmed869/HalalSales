@@ -26,11 +26,126 @@ function uuidToStoreId(uuid) {
   return Buffer.from(uuid.replace(/-/g, ""), "hex").toString("base64url");
 }
 
+// ---------- legal info (disclaimerBadge) ----------
+// French store pages carry the merchant's legally required details in disclaimerBadge.text, e.g.
+//   <span>Business name\n10 rue Gomboust\n75001, PARIS\nCe commerçant certifie que ses produits sont
+//   conformes aux lois en vigueur.\nowner@example.com\n+33144825138\nChambre de Commerce et d'Industrie
+//   (CCI)\n98390368300024</span>
+// Lines before the "certifie" line are the legal name and address; after it come the email (often
+// missing), the phone, the registry and the registration number (SIRET = 14 digits, SIREN = 9).
+
+const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+const CERTIFY_RE = /certifie|certify|certifies/i;
+const REGISTRY_RE = /chambre|commerce|registre|r\.?c\.?s\b|\bcci\b|\bcma\b|r[ée]pertoire|m[ée]tiers|greffe|siret|siren|chamber|registry|register/i;
+const HTML_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+
+function legalLines(html) {
+  return String(html)
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) =>
+      e[0] === "#" ? String.fromCodePoint(e[1].toLowerCase() === "x" ? parseInt(e.slice(2), 16) : Number(e.slice(1))) : HTML_ENTITIES[e.toLowerCase()] ?? m
+    )
+    .split("\n")
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+}
+
+const digitsOf = (s) => s.replace(/\D/g, "");
+/** A phone: starts with + or is a 10-digit French number starting with 0. */
+const looksLikePhone = (s) => /^\+?[\d\s().-]{8,}$/.test(s) && (s.startsWith("+") || /^0\d{9}$/.test(digitsOf(s)));
+/** A registration number: 9 (SIREN) or 14 (SIRET) digits, possibly spaced, or another id with 6+ digits. */
+const looksLikeRegistration = (s) => !looksLikePhone(s) && !EMAIL_RE.test(s) && /^[A-Z]{0,6}[\s:.\-\d]*\d[\s.\-\dA-Z]*$/i.test(s) && digitsOf(s).length >= 6;
+
+/**
+ * disclaimerBadge.text -> { email, phone, name, address, postalCode, registry, registrationNumber, siren, text }.
+ * Fields that are not there are left out; {} when the store has no legal block.
+ */
+function parseLegal(html) {
+  if (!html) return {};
+  const lines = legalLines(html);
+  if (!lines.length) return {};
+  const ci = lines.findIndex((l) => CERTIFY_RE.test(l));
+  const head = ci > 0 ? lines.slice(0, ci) : [];
+  const tail = ci >= 0 ? lines.slice(ci + 1) : lines;
+  const out = { text: lines.join("\n") };
+  if (head.length) {
+    out.name = head[0];
+    if (head.length > 1) out.address = head.slice(1).join(", ");
+    out.postalCode = normalizePostalCode(out.address);
+  }
+  for (let i = 0; i < tail.length; i++) {
+    const l = tail[i];
+    const email = l.match(EMAIL_RE)?.[0];
+    if (email) {
+      out.email ??= email.toLowerCase();
+      continue;
+    }
+    if (REGISTRY_RE.test(l) && !looksLikeRegistration(l)) {
+      // "RCS Paris 123 456 789" carries the number on the same line.
+      const inline = l.match(/(\d[\d\s.]{7,}\d)/)?.[1];
+      if (inline && digitsOf(inline).length >= 9) {
+        out.registry ??= l.replace(inline, "").replace(/[\s:,-]+$/, "").trim();
+        out.registrationNumber ??= digitsOf(inline);
+      } else out.registry ??= l;
+      continue;
+    }
+    if (looksLikePhone(l)) {
+      out.phone ??= l;
+      continue;
+    }
+    if (looksLikeRegistration(l)) {
+      const d = digitsOf(l);
+      out.registrationNumber ??= d.length === 9 || d.length === 14 ? d : l;
+    }
+  }
+  const reg = out.registrationNumber;
+  if (reg && /^\d+$/.test(reg) && (reg.length === 9 || reg.length === 14)) out.siren = reg.slice(0, 9);
+  return Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined && v !== ""));
+}
+
+// ---------- same-address key (virtual brands) ----------
+// One kitchen often runs several Uber Eats brands from one address. They stay separate stores (one per
+// uuid); addressKey only lets the page show them together. Spelling differences seen in real data
+// ("42b" / "42bis", "av" / "avenue", "rue de roule" / "rue du roule") are smoothed out.
+
+const ADDRESS_WORDS = {
+  bd: "boulevard", bld: "boulevard", blvd: "boulevard", boul: "boulevard", av: "avenue", ave: "avenue",
+  pl: "place", fg: "faubourg", fbg: "faubourg", st: "saint", ste: "sainte", r: "rue", rte: "route",
+  imp: "impasse", sq: "square", qu: "quai", all: "allee", ch: "chemin", crs: "cours", pas: "passage",
+  bis: "b", ter: "t", quater: "q",
+};
+const ADDRESS_DROP = new Set(["de", "du", "des", "la", "le", "les", "l", "d", "et", "rdc", "france"]);
+
+/** "<postal code>|<normalised street>" for a store location; undefined without both. */
+function addressKey(loc) {
+  const pc = normalizePostalCode(loc?.postalCode);
+  if (!pc) return undefined;
+  let street = String(loc.streetAddress || String(loc.address || "").split(",")[0] || "");
+  // streetAddress often ends with "75001 Paris": keep only the street.
+  const at = street.indexOf(pc);
+  if (at > 0) street = street.slice(0, at);
+  const words = street
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/(\d)(bis|ter|quater)\b/g, "$1 $2")
+    .trim()
+    .split(" ")
+    .map((w) => ADDRESS_WORDS[w] ?? w)
+    .filter((w) => w && !ADDRESS_DROP.has(w));
+  const key = words.join(" ").replace(/\b(\d+) ([btq])\b/g, "$1$2");
+  return key ? `${pc}|${key}` : undefined;
+}
+
 /** Every field of a restaurant that comes from getStoreV1 (no bookkeeping fields). */
 function parseStore(d) {
   const loc = d.location || {};
   const merchantType = d.storeMerchantTypeInfo?.uberMerchantType?.type;
   const { sections, partial } = parseMenu(d);
+  // Always an object (possibly {}) once details are scraped: tells ingest the legal block was looked at.
+  const legal = parseLegal(d.disclaimerBadge?.text);
 
   return {
     uuid: d.uuid,
@@ -59,7 +174,13 @@ function parseStore(d) {
     ...(hasCoords(loc.latitude, loc.longitude)
       ? { geo: { type: "Point", coordinates: [loc.longitude, loc.latitude] }, geoSource: "ubereats" }
       : {}),
+    addressKey: addressKey(loc),
     phoneNumber: d.phoneNumber || undefined,
+    // From the legal block: the business email (the one to use for prospecting) and its registration.
+    email: legal.email,
+    registrationNumber: legal.registrationNumber,
+    siren: legal.siren,
+    legal: Object.fromEntries(Object.entries(legal).filter(([k]) => !["email", "registrationNumber", "siren"].includes(k))),
     rating: d.rating ? { value: d.rating.ratingValue, count: d.rating.reviewCount } : undefined,
     hours: (d.hours || []).map((h) => ({
       dayRange: h.dayRange,
@@ -157,4 +278,4 @@ function parseFeedStore(s) {
   };
 }
 
-module.exports = { parseStore, parseFeedStore, normalizePostalCode, hasCoords, uuidToStoreId };
+module.exports = { parseStore, parseFeedStore, parseLegal, addressKey, normalizePostalCode, hasCoords, uuidToStoreId };

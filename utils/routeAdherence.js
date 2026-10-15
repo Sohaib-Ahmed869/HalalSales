@@ -148,12 +148,26 @@ function analyzeRoute({ depot, departureMin, plannedReturnMin, plannedKm, stops,
     km: plannedKm,
     stops: stops.length,
   };
-  const stopRows = stops.map((s) => ({
+  // Which planned times come from customer hours: the plan waits at a stop
+  // until the shop opens (opening / preferred delivery time), which moves the
+  // allowance at that stop and every later arrival and the return. Flagged so
+  // a report can say which results depend on those hours (utils/openingHours.js).
+  let waitedSoFar = 0;
+  const waitedBefore = stops.map((s) => {
+    const before = waitedSoFar;
+    waitedSoFar += s.waitMin || 0;
+    return before;
+  });
+  const stopRows = stops.map((s, k) => ({
     docEntry: s.docEntry,
     name: s.name,
     seq: s.seq,
     plannedArrivalMin: Number.isFinite(s.etaMin) ? s.etaMin - (s.waitMin || 0) : null,
     allowanceMin: (s.serviceMin || 0) + (s.waitMin || 0),
+    // planned arrival moved by an earlier wait for opening hours
+    arrivalFromHours: waitedBefore[k] > 0,
+    // allowance here includes waiting for the shop to open
+    allowanceFromHours: (s.waitMin || 0) > 0,
     actualArrivalMin: null,
     actualLeaveMin: null,
     dwellMin: null,
@@ -263,6 +277,7 @@ function analyzeRoute({ depot, departureMin, plannedReturnMin, plannedKm, stops,
           docEntry: r.docEntry,
           delayMin: r.deltaMin,
           ...(trafficKnown ? { trafficMin: r.trafficMin } : {}),
+          ...(r.arrivalFromHours ? { dependsOnHours: true } : {}),
         });
       }
     } else {
@@ -272,6 +287,7 @@ function analyzeRoute({ depot, departureMin, plannedReturnMin, plannedKm, stops,
       add("long_stop", r.dwellMin > r.allowanceMin + 30 ? "high" : "medium", r.actualArrivalMin, `Stop ${r.seq} ${r.name}: stayed ${mins(r.dwellMin)}, allowance was ${mins(r.allowanceMin)}.`, {
         docEntry: r.docEntry,
         durationMin: r.dwellMin,
+        ...(r.allowanceFromHours ? { dependsOnHours: true } : {}),
       });
     }
   });
@@ -302,6 +318,7 @@ function analyzeRoute({ depot, departureMin, plannedReturnMin, plannedKm, stops,
   if (returned && actualReturn - plannedReturnMin > c.lateReturnMin) {
     add("late_return", actualReturn - plannedReturnMin > 60 ? "high" : "medium", actualReturn, `Back at the depot at ${fmt(actualReturn)}, ${mins(actualReturn - plannedReturnMin)} later than planned (${fmt(plannedReturnMin)}).`, {
       delayMin: Math.round(actualReturn - plannedReturnMin),
+      ...(waitedSoFar > 0 ? { dependsOnHours: true } : {}),
     });
   } else if (!returned && dayOver && Number.isFinite(nowMin) && nowMin - plannedReturnMin > 60) {
     add("not_returned", "high", plannedReturnMin, `Not back at the depot yet; planned return was ${fmt(plannedReturnMin)}.`);
@@ -425,6 +442,10 @@ function summarize(stopRows, deviations) {
     deviations: deviations.filter((d) => d.severity !== "low").length,
     high: deviations.filter((d) => d.severity === "high").length,
     traffic: deviations.filter((d) => d.severity === "low").length,
+    // Of those deviations, how many depend on customer opening / preferred hours.
+    fromHours: deviations.filter((d) => d.severity !== "low" && d.dependsOnHours).length,
+    // Stops whose planned time or allowance comes from those hours.
+    stopsFromHours: stopRows.filter((r) => r.arrivalFromHours || r.allowanceFromHours).length,
   };
 }
 

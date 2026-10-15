@@ -26,6 +26,8 @@ const OrderEntrySchema = new Schema(
       address: { type: Schema.Types.Mixed },
       totalWeight: { type: Number },
       weightUnit: { type: String },
+      // m³, from SAP's SalesUnitVolume x quantity (items without a volume count 0).
+      totalVolume: { type: Number },
       // "order" = sales order moved from Bulk Order Conversion (the normal
       // source); "deliveryNote" only with LOGISTICS_ORDER_SOURCE=delivery-notes.
       docType: { type: String },
@@ -33,6 +35,7 @@ const OrderEntrySchema = new Schema(
     sequenceNumber: { type: Number },
     assignedAt: { type: Date, default: Date.now },
     orderWeightKg: { type: Number, default: 0 },
+    orderVolumeM3: { type: Number, default: 0 },
     coordinates: {
       lat: { type: Number },
       lng: { type: Number },
@@ -107,6 +110,8 @@ const TruckRouteSchema = new Schema({
     default: "medium",
   },
   maxWeightKg: { type: Number, required: true },
+  // Load volume the truck takes, in m³. Unset = no volume limit (only kg is checked).
+  maxVolumeM3: { type: Number },
   // "HH:MM" the truck leaves the depot on this date (copied from the weekly
   // template at Initialize Date, editable per date). ETAs are measured from it.
   departureTime: { type: String, default: "08:00" },
@@ -122,6 +127,7 @@ const TruckRouteSchema = new Schema({
   // the truck card for this date only is not overwritten by an unchanged template.
   templateValues: {
     maxWeightKg: { type: Number },
+    maxVolumeM3: { type: Number },
     departureTime: { type: String },
     serviceMin: { type: Number },
   },
@@ -137,8 +143,11 @@ const TruckRouteSchema = new Schema({
   },
   orders: [OrderEntrySchema],
   totalWeightKg: { type: Number, default: 0 },
+  totalVolumeM3: { type: Number, default: 0 },
   totalOrders: { type: Number, default: 0 },
+  // Share of the weight capacity used; volumeUsedPercent the same for m³ (0 without a volume capacity).
   capacityUsedPercent: { type: Number, default: 0 },
+  volumeUsedPercent: { type: Number, default: 0 },
   totalDistanceKm: { type: Number, default: 0 },
   totalDurationMin: { type: Number, default: 0 },
   totalWaitMin: { type: Number, default: 0 },

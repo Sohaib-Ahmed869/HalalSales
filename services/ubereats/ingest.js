@@ -2,7 +2,7 @@
 // Saves scraped stores and records what changed (created / updated / missing).
 // Ported from ubereats-scraper-2-hfs/src/scraper/ingest.ts.
 const crypto = require("crypto");
-const { ueCollections } = require("../../utils/ubereatsDb");
+const { ueCollections, ADDRESS_KEY_VERSION } = require("../../utils/ubereatsDb");
 const { parseFeedStore } = require("./parse");
 
 /** Fields compared between scrapes. Volatile data (ETA, open/closed, distance) is left out. */
@@ -16,6 +16,8 @@ const TRACKED = [
   (r) => ["location.latitude", r.location?.latitude],
   (r) => ["location.longitude", r.location?.longitude],
   (r) => ["phoneNumber", r.phoneNumber],
+  (r) => ["email", r.email],
+  (r) => ["registrationNumber", r.registrationNumber],
   (r) => ["rating.value", r.rating?.value],
   (r) => ["rating.count", r.rating?.count],
   (r) => ["hours", r.hours],
@@ -24,6 +26,10 @@ const TRACKED = [
   (r) => ["supportedDiningModes", r.supportedDiningModes],
   (r) => ["menuItemCount", r.menuItemCount],
 ];
+
+// Legal-block fields: a store scraped before they existed (no `legal` yet) gets them silently, so the
+// first scrape after the update doesn't record thousands of "email: none -> x" changes.
+const LEGAL_FIELDS = ["email", "registrationNumber"];
 
 const menuSignature = (menu = []) => menu.flatMap((s) => s.items.map((i) => [s.title, i.uuid, i.title, i.price, i.description ?? ""]));
 
@@ -81,11 +87,11 @@ async function ingestStore(parsed, ctx) {
   else if (!existing.detailsScrapedAt) {
     // Previously only known from a feed card: the first full scrape counts as an update.
     type = "updated";
-    fields = diffFields(existing, parsed);
+    fields = diffFields(existing, parsed).filter((f) => existing.legal || !LEGAL_FIELDS.includes(f.field));
   } else if (existing.contentHash === hash) type = "unchanged";
   else {
     type = "updated";
-    fields = diffFields(existing, parsed);
+    fields = diffFields(existing, parsed).filter((f) => existing.legal || !LEGAL_FIELDS.includes(f.field));
     // Menus are only compared when both sides are complete; partial grocery catalogs churn.
     if (!parsed.menuPartial && !existing.menuPartial) menu = diffMenu(existing.menu, parsed.menu);
     if (!fields.length && !menu) type = "unchanged";
@@ -98,6 +104,7 @@ async function ingestStore(parsed, ctx) {
       $set: clean({
         ...set,
         contentHash: hash,
+        addressKeyVersion: ADDRESS_KEY_VERSION,
         detailsScrapedAt: now,
         lastSeenAt: now,
         lastJobId: ctx.jobId,

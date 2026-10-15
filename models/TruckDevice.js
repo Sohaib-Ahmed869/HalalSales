@@ -20,9 +20,10 @@ const TruckDeviceSchema = new Schema({
   licensePlate: { type: String, trim: true },
   vin: { type: String, trim: true },
   serialNumber: { type: String, trim: true },
-  // Set in the portal (Weekly Templates): payload in kg and usual departure
+  // Set in the portal (Weekly Templates): payload in kg (and m³) and usual departure
   // time, offered again whenever this vehicle is picked for a schedule.
   maxWeightKg: { type: Number },
+  maxVolumeM3: { type: Number },
   departureTime: { type: String },
   isActive: { type: Boolean, default: true },
   // Latest fix, kept on the device so "where is everyone" is one query.

@@ -5,6 +5,17 @@
 // customers with what they bought in the period, the leads and the scraped
 // prospects. Which document types count as "active" and who is shown are
 // switched on the page, so the answer always carries all of it.
+//
+// Prospects come from two sources while both exist:
+//   - the Uber Eats scraper (ubereats_restaurants): every store already has a
+//     map point and is placed by where it is LOCATED (postalCode), so no
+//     address lookups; this source is to replace the old one over time;
+//   - the old Postal Scraping data (restaurants, via ScrapedRestaurant), placed
+//     with address lookups as before (pins in ScrapedRestaurantGeo).
+// An old record of a store the new scraper also has is shown once, from the new
+// source (unless a lead is linked to the old record). A prospect that already is
+// a customer or a lead is not shown (utils/prospectMatch.js: name, phone, email
+// and address; a shared address alone is never enough).
 const Invoice = require("../models/Invoice");
 const SalesOrder = require("../models/SalesOrder");
 const Customer = require("../models/Customer");
@@ -15,8 +26,27 @@ const SalesLeadGeo = require("../models/SalesLeadGeo");
 const { geocodeCustomer, geocodeAddress, deliveryAddressOf } = require("../utils/geocodingService");
 const { haversineKm } = require("../utils/routeOptimizer");
 const { customerGeo, locateRestaurants, normName, usable, GEOCODE_PER_REQUEST } = require("./map.controller").helpers;
+const { ueCollections } = require("../utils/ubereatsDb");
+const { uuidToStoreId } = require("../services/ubereats/parse");
+const pm = require("../utils/prospectMatch");
+const { matchContext, linkedLeads, invalidate, ownerNames, withOwnerNames, ownerOfCandidate } = require("../utils/prospectContext");
+const mongoose = require("mongoose");
+const User = require("../models/User");
+const { assignStores, notifyAgent, agentName } = require("../services/ubereats/assign");
+const restaurantScraperController = require("./restaurantScraper.controller");
 
-const CUSTOMER_FIELDS = "CardCode CardName address deliveryAddress coordinates geo phoneNumber status";
+const CUSTOMER_FIELDS = "CardCode CardName address deliveryAddress coordinates geo phoneNumber status assignedTo";
+
+// ?agent=<userId> shows only what that agent owns (customers, leads, scraped restaurants that became
+// their leads); ?agent=none only what nobody owns. -> null | { none: true } | { id }
+function agentFilterOf(query) {
+  const v = String(query.agent || "").trim();
+  if (!v) return null;
+  if (v === "none") return { none: true };
+  return mongoose.isValidObjectId(v) ? { id: v } : null;
+}
+const ownedBy = (af, ownerId) => (af.none ? !ownerId : String(ownerId || "") === af.id);
+const ownerQuery = (af) => (af.none ? { assignedTo: { $in: [null] } } : { assignedTo: new mongoose.Types.ObjectId(af.id) });
 // Scraped restaurants read per request in a scoped view (own postal codes first).
 const MAX_SCRAPED = 20000;
 // Without a period, "active" means: bought in the last three months.
@@ -324,6 +354,7 @@ const leadRow = (l, geo, center) => ({
   status: l.status || "new",
   tags: l.tags || [],
   sourceType: l.sourceType || "manual",
+  ownerId: l.assignedTo ? String(l.assignedTo) : null,
   address: usable(l.address?.street),
   city: usable(l.address?.city),
   postalCode: String(l.address?.zipCode || "").trim(),
@@ -335,10 +366,11 @@ const leadRow = (l, geo, center) => ({
   distanceKm: center ? round2(haversineKm(center, geo)) : undefined,
 });
 
-async function manualLeadsFor(sc, lookups) {
+async function manualLeadsFor(sc, lookups, af = null) {
   const out = { manualLeads: [], leadsPending: 0, leadsUnlocated: 0, leadsOutside: 0, leadsNoPostalCode: 0 };
-  const open = { relatedRestaurant: null, status: { $ne: "converted" } };
-  const fields = "fullName company status tags sourceType address phoneNumber email";
+  // Leads made from a scraped store are drawn on that store's position (prospect rows), not here.
+  const open = { relatedRestaurant: null, relatedUberEatsUuid: null, status: { $ne: "converted" }, ...(af ? ownerQuery(af) : {}) };
+  const fields = "fullName company status tags sourceType address phoneNumber email assignedTo";
   let docs;
   let geoByLead;
   if (sc.scope === "all") {
@@ -387,15 +419,32 @@ async function manualLeadsFor(sc, lookups) {
   });
   if (sc.center) out.manualLeads.sort((a, b) => a.distanceKm - b.distanceKm);
   // Open leads that can never be matched to an area: no postal code at all.
-  out.leadsNoPostalCode = await SalesLead.countDocuments({ relatedRestaurant: null, status: { $nin: ["converted", "dead"] }, "address.zipCode": { $in: [null, ""] } });
+  out.leadsNoPostalCode = await SalesLead.countDocuments({ relatedRestaurant: null, relatedUberEatsUuid: null, status: { $nin: ["converted", "dead"] }, "address.zipCode": { $in: [null, ""] }, ...(af ? ownerQuery(af) : {}) });
   return out;
 }
 
-// ---------- scraped prospects ----------
+// Matching context (customers / leads indexed, shared contacts): utils/prospectContext.js.
 
-const leadOf = (lead) => (lead ? { id: String(lead._id), name: lead.fullName, status: lead.status || "new", tags: lead.tags || [] } : null);
+// ---------- scraped prospects (old Postal Scraping source) ----------
 
-async function prospectsFor(sc, lookups, customerNames) {
+const leadOf = (lead) =>
+  lead ? { id: String(lead._id), name: lead.fullName, status: lead.status || "new", tags: lead.tags || [], ownerId: lead.assignedTo ? String(lead.assignedTo) : null } : null;
+
+// Is this old record hidden: also in the Uber Eats source, or already a customer / lead?
+// -> "newSource" | "customers" | "leads" | null
+function oldHiddenAs(r, lead, customerNames, ctx) {
+  // The new source shows this store (its true location); the old record stays
+  // only while a lead is linked to it.
+  if (!lead && ctx?.shared.ueStoreIds.has(pm.storeIdFromUrl(r.url))) return "newSource";
+  if (customerNames.has(normName(r.name))) return "customers";
+  if (!ctx) return null;
+  const same = pm.matchProspect(pm.oldProspectKeys(r), ctx.index, ctx.shared.old).same;
+  if (!same) return null;
+  if (same.type === "lead") return lead && same.id === String(lead._id) ? null : "leads";
+  return "customers";
+}
+
+async function prospectsFor(sc, lookups, customerNames, ctx) {
   const out = { prospects: [], prospectsByPostalCode: [], prospectsPending: 0, prospectsUnlocated: 0, scrapedLeadsTotal: 0, leadsPending: 0, leadsUnlocated: 0, leadsOutside: 0 };
 
   if (sc.scope === "all") {
@@ -408,20 +457,21 @@ async function prospectsFor(sc, lookups, customerNames) {
     ]);
     const ids = pins.map((g) => g.restaurantId);
     const [docs, leadDocs] = await Promise.all([
-      ids.length > 0 ? ScrapedRestaurant.find({ _id: { $in: ids } }).select("name postal_code status").lean() : [],
-      SalesLead.find({ relatedRestaurant: { $ne: null }, status: { $ne: "converted" } }).select("fullName status tags relatedRestaurant").lean(),
+      ids.length > 0 ? ScrapedRestaurant.find({ _id: { $in: ids } }).select("name postal_code status url contact_info").lean() : [],
+      SalesLead.find({ relatedRestaurant: { $ne: null }, status: { $ne: "converted" } }).select("fullName status tags relatedRestaurant assignedTo").lean(),
     ]);
     const byId = new Map(docs.map((r) => [String(r._id), r]));
     const leadByRestaurant = new Map(leadDocs.map((l) => [String(l.relatedRestaurant), l]));
-    let sameName = 0;
+    const hidden = { customers: 0, leads: 0, newSource: 0 };
     pins.forEach((g) => {
       const r = byId.get(String(g.restaurantId));
       if (!r || r.status === "failed") return;
-      if (customerNames.has(normName(r.name))) return sameName++;
       const lead = leadByRestaurant.get(String(r._id));
+      const as = oldHiddenAs(r, lead, customerNames, ctx);
+      if (as) return hidden[as]++;
       if (lead) out.scrapedLeadsTotal++;
       // Kept small: there can be 20,000 of them (details come from /map/prospect/:id).
-      const row = { id: String(r._id), name: r.name, postalCode: r.postal_code, lat: g.lat, lng: g.lng };
+      const row = { id: String(r._id), source: "scraped", name: r.name, postalCode: r.postal_code, lat: g.lat, lng: g.lng };
       if (g.confidence === "low") row.approximate = true;
       if (lead) row.lead = leadOf(lead);
       out.prospects.push(row);
@@ -429,7 +479,7 @@ async function prospectsFor(sc, lookups, customerNames) {
     out.prospectsUnlocated = failedPins;
     out.prospectsPending = Math.max(0, scraped - pins.length - failedPins);
     out.prospectsCompact = true;
-    out.prospectStats = { scraped, shown: out.prospects.length, outside: 0, customers: sameName, unlocated: failedPins, pending: out.prospectsPending, failed: 0 };
+    out.prospectStats = { scraped, shown: out.prospects.length, outside: 0, customers: hidden.customers, leads: hidden.leads, newSource: hidden.newSource, unlocated: failedPins, pending: out.prospectsPending, failed: 0 };
     return out;
   }
 
@@ -447,7 +497,7 @@ async function prospectsFor(sc, lookups, customerNames) {
   // became a customer is left out: that customer is on the map already).
   const leadDocs =
     scraped.length > 0
-      ? await SalesLead.find({ relatedRestaurant: { $in: scraped.map((r) => r._id) }, status: { $ne: "converted" } }).select("fullName status tags relatedRestaurant").lean()
+      ? await SalesLead.find({ relatedRestaurant: { $in: scraped.map((r) => r._id) }, status: { $ne: "converted" } }).select("fullName status tags relatedRestaurant assignedTo").lean()
       : [];
   const leadByRestaurant = new Map(leadDocs.map((l) => [String(l.relatedRestaurant), l]));
   // Located in this order: the leads, the scope's own postal codes, the rest.
@@ -458,7 +508,7 @@ async function prospectsFor(sc, lookups, customerNames) {
   const perZip = new Map();
   const count = (r, field) => {
     const zip = String(r.postal_code || "");
-    if (!perZip.has(zip)) perZip.set(zip, { postalCode: zip, own: sc.ownZips.has(zip), scraped: 0, shown: 0, outside: 0, customers: 0, unlocated: 0, pending: 0, failed: 0 });
+    if (!perZip.has(zip)) perZip.set(zip, { postalCode: zip, own: sc.ownZips.has(zip), scraped: 0, shown: 0, outside: 0, customers: 0, leads: 0, newSource: 0, unlocated: 0, pending: 0, failed: 0 });
     const row = perZip.get(zip);
     row.scraped++;
     row[field]++;
@@ -467,6 +517,9 @@ async function prospectsFor(sc, lookups, customerNames) {
     if (r.status === "failed") return count(r, "failed");
     const geo = geoById.get(String(r._id));
     const lead = leadByRestaurant.get(String(r._id));
+    // In the new source (shown from there), or already a customer / lead.
+    const as = oldHiddenAs(r, lead, customerNames, ctx);
+    if (as === "newSource" || as === "leads") return count(r, as);
     if (!geo) {
       out.prospectsPending++;
       if (lead) out.leadsPending++;
@@ -477,8 +530,7 @@ async function prospectsFor(sc, lookups, customerNames) {
       if (lead) out.leadsUnlocated++;
       return count(r, "unlocated");
     }
-    // A scraped place with the same name as a customer here is that customer.
-    if (customerNames.has(normName(r.name))) return count(r, "customers");
+    if (as === "customers") return count(r, "customers");
     if (!sc.inScope(geo, r.postal_code)) {
       if (lead) out.leadsOutside++;
       return count(r, "outside");
@@ -487,6 +539,7 @@ async function prospectsFor(sc, lookups, customerNames) {
     if (lead) out.scrapedLeadsTotal++;
     out.prospects.push({
       id: String(r._id),
+      source: "scraped",
       name: r.name,
       postalCode: r.postal_code,
       lat: geo.lat,
@@ -504,9 +557,112 @@ async function prospectsFor(sc, lookups, customerNames) {
   if (sc.center) out.prospects.sort((a, b) => a.distanceKm - b.distanceKm);
   out.prospectsByPostalCode = [...perZip.values()].sort((a, b) => b.own - a.own || b.scraped - a.scraped || a.postalCode.localeCompare(b.postalCode));
   const sum = (field) => out.prospectsByPostalCode.reduce((n, z) => n + z[field], 0);
-  out.prospectStats = { scraped: sum("scraped"), shown: sum("shown"), outside: sum("outside"), customers: sum("customers"), unlocated: sum("unlocated"), pending: sum("pending"), failed: sum("failed") };
+  out.prospectStats = {
+    scraped: sum("scraped"),
+    shown: sum("shown"),
+    outside: sum("outside"),
+    customers: sum("customers"),
+    leads: sum("leads"),
+    newSource: sum("newSource"),
+    unlocated: sum("unlocated"),
+    pending: sum("pending"),
+    failed: sum("failed"),
+  };
   // Still to place in the scope's own postal codes: the page keeps loading for these.
   out.ownPending = out.prospectsByPostalCode.filter((z) => z.own).reduce((n, z) => n + z.pending, 0);
+  return out;
+}
+
+// ---------- Uber Eats scraper prospects (new source) ----------
+
+const UE_LIST_FIELDS = {
+  _id: 0,
+  uuid: 1,
+  title: 1,
+  postalCode: 1,
+  geo: 1,
+  "location.streetAddress": 1,
+  "location.address": 1,
+  "location.city": 1,
+  addressKey: 1,
+  phoneNumber: 1,
+  email: 1,
+  registrationNumber: 1,
+  "legal.phone": 1,
+  "legal.name": 1,
+  categories: 1,
+  "rating.value": 1,
+  "rating.count": 1,
+  menuItemCount: 1,
+  isRestaurant: 1,
+  url: 1,
+};
+
+const ueRow = (s, sc, compact) => {
+  const [lng, lat] = s.geo.coordinates;
+  const row = { id: `ue:${s.uuid}`, source: "ubereats", name: s.title, postalCode: s.postalCode || "", lat, lng };
+  if (compact) return row;
+  return {
+    ...row,
+    address: s.location?.streetAddress || s.location?.address || "",
+    city: s.location?.city || "",
+    phone: s.phoneNumber || "",
+    email: s.email || "",
+    registrationNumber: s.registrationNumber || "",
+    cuisine: (s.categories || []).slice(0, 3),
+    rating: s.rating?.value ?? null,
+    menuItems: s.menuItemCount || 0,
+    url: s.url,
+    distanceKm: sc.center ? round2(haversineKm(sc.center, { lat, lng })) : undefined,
+  };
+};
+
+/**
+ * Stores of the Uber Eats scraper in the scope, by where they are LOCATED
+ * (postalCode), or inside the circle. Stores without a map point (feed-card
+ * only) can't be drawn and are left out.
+ */
+async function ueProspectsFor(sc, ctx, oldLeadStoreIds) {
+  const out = { prospects: [], stats: { scraped: 0, shown: 0, outside: 0, customers: 0, leads: 0, newSource: 0, unlocated: 0, pending: 0, failed: 0 }, byZip: new Map() };
+  if (!ctx?.shared.ueAvailable) return out;
+  const c = await ueCollections();
+  let query = { geo: { $exists: true } };
+  if (sc.scope !== "all") {
+    const or = [];
+    if (sc.zips.size > 0) or.push({ postalCode: { $in: [...sc.zips] } });
+    if (sc.matcher?.zipTest) or.push({ postalCode: new RegExp(`^${sc.matcher.value}`) });
+    if (sc.matcher?.type === "city") or.push({ "location.city": new RegExp(`^\\s*${escapeRegex(sc.matcher.value)}`, "i") });
+    if (sc.center && sc.radiusKm > 0) or.push({ geo: { $geoWithin: { $centerSphere: [[sc.center.lng, sc.center.lat], sc.radiusKm / 6378.1] } } });
+    if (or.length === 0) return out;
+    query = { geo: { $exists: true }, $or: or };
+  }
+  const stores = await c.restaurants.find(query, { projection: UE_LIST_FIELDS }).limit(MAX_SCRAPED).toArray();
+  const compact = sc.scope === "all";
+  // Stores assigned to an agent from the scraper page: shown as their lead (purple).
+  const assignedLeads = await linkedLeads(stores.map((s) => s.uuid));
+  stores.forEach((s) => {
+    const zip = s.postalCode || "";
+    const z = out.byZip.get(zip) || { postalCode: zip, own: sc.ownZips.has(zip), scraped: 0, shown: 0, outside: 0, customers: 0, leads: 0, newSource: 0, unlocated: 0, pending: 0, failed: 0 };
+    out.byZip.set(zip, z);
+    const count = (field) => {
+      z.scraped++;
+      z[field]++;
+      out.stats.scraped++;
+      out.stats[field]++;
+    };
+    // An old record with a linked lead already shows this store (as that lead).
+    if (oldLeadStoreIds.has(uuidToStoreId(s.uuid))) return count("leads");
+    const [lng, lat] = s.geo.coordinates;
+    if (!sc.inScope({ lat, lng }, zip) && !(sc.matcher?.type === "city" && sc.radiusKm === 0)) return count("outside");
+    const own = assignedLeads.get(s.uuid);
+    const { same, related } = own ? { same: null, related: [] } : pm.matchProspect(pm.ueProspectKeys(s), ctx.index, ctx.shared.ue);
+    if (same) return count(same.type === "lead" ? "leads" : "customers");
+    count("shown");
+    const row = ueRow(s, sc, compact);
+    if (own && own.status !== "converted") row.lead = { id: own.id, name: own.name, status: own.status, tags: [], ownerId: own.agentId };
+    if (!compact && related.length > 0) row.related = related;
+    out.prospects.push(row);
+  });
   return out;
 }
 
@@ -521,7 +677,19 @@ exports.getSalesMap = async (req, res) => {
     const sc = await resolveScope(req, lookups);
     if (sc.status) return res.status(sc.status).json({ message: sc.message });
 
-    const codes = sc.scope === "all" ? null : [...sc.customers.map((c) => c.CardCode), ...sc.unpinnedCodes];
+    // One agent's accounts only (or only what nobody owns).
+    const af = agentFilterOf(req.query);
+    let agentName = null;
+    if (af) {
+      sc.customers = sc.customers.filter((c) => ownedBy(af, c.assignedTo));
+      sc.unpinnedCodes = [];
+      const unpinned = { ...ownerQuery(af), $nor: [numeric("coordinates"), numeric("geo")] };
+      sc.customersWithoutPin = sc.scope === "all" ? await Customer.countDocuments(unpinned) : 0;
+      sc.customersInScope = sc.customers.length + sc.customersWithoutPin;
+      if (af.id) agentName = (await ownerNames([af.id])).get(af.id) || null;
+    }
+
+    const codes = sc.scope === "all" && !af ? null : [...sc.customers.map((c) => c.CardCode), ...sc.unpinnedCodes];
     const [invoices, orders, quotations, last] = await Promise.all([
       activityByCustomer(Invoice, period.range, codes),
       activityByCustomer(SalesOrder, period.range, codes),
@@ -559,8 +727,54 @@ exports.getSalesMap = async (req, res) => {
 
     const wantOthers = req.query.potential !== "false";
     const customerNames = new Set(sc.customers.map((c) => normName(c.CardName)).filter(Boolean));
-    const leads = wantOthers ? await manualLeadsFor(sc, lookups) : { manualLeads: [], leadsPending: 0, leadsUnlocated: 0, leadsOutside: 0, leadsNoPostalCode: 0 };
-    const pros = wantOthers ? await prospectsFor(sc, lookups, customerNames) : { prospects: [], prospectsByPostalCode: [], prospectsPending: 0, prospectsUnlocated: 0, scrapedLeadsTotal: 0, leadsPending: 0, leadsUnlocated: 0, leadsOutside: 0 };
+    const leads = wantOthers ? await manualLeadsFor(sc, lookups, af) : { manualLeads: [], leadsPending: 0, leadsUnlocated: 0, leadsOutside: 0, leadsNoPostalCode: 0 };
+    const ctx = wantOthers ? await matchContext() : null;
+    const pros = wantOthers ? await prospectsFor(sc, lookups, customerNames, ctx) : { prospects: [], prospectsByPostalCode: [], prospectsPending: 0, prospectsUnlocated: 0, scrapedLeadsTotal: 0, leadsPending: 0, leadsUnlocated: 0, leadsOutside: 0 };
+    // The new source, next to the old one.
+    const oldLeadStoreIds = wantOthers ? await linkedLeadStoreIds() : new Set();
+    const ue = wantOthers ? await ueProspectsFor(sc, ctx, oldLeadStoreIds).catch((error) => {
+      console.error("[salesMap] Uber Eats prospects failed:", error.message);
+      return { prospects: [], stats: null, byZip: new Map() };
+    }) : { prospects: [], stats: null, byZip: new Map() };
+    const prospectSources = {
+      ubereats: ue.stats,
+      scraped: pros.prospectStats || null,
+    };
+    if (ue.prospects.length > 0) {
+      pros.prospects = [...ue.prospects, ...pros.prospects];
+      if (sc.center) pros.prospects.sort((a, b) => a.distanceKm - b.distanceKm);
+    }
+    if (ue.stats) {
+      const base = pros.prospectStats || { scraped: 0, shown: 0, outside: 0, customers: 0, leads: 0, newSource: 0, unlocated: 0, pending: 0, failed: 0 };
+      pros.prospectStats = Object.fromEntries(Object.keys(ue.stats).map((k) => [k, (base[k] || 0) + ue.stats[k]]));
+      if (sc.scope !== "all") {
+        const rows = new Map((pros.prospectsByPostalCode || []).map((z) => [z.postalCode, { ...z }]));
+        ue.byZip.forEach((z, zip) => {
+          const row = rows.get(zip);
+          if (!row) return rows.set(zip, z);
+          Object.keys(ue.stats).forEach((k) => (row[k] = (row[k] || 0) + z[k]));
+        });
+        pros.prospectsByPostalCode = [...rows.values()].sort((a, b) => b.own - a.own || b.scraped - a.scraped || a.postalCode.localeCompare(b.postalCode));
+      }
+    }
+
+    if (af) {
+      // A scraped restaurant belongs to an agent once it is their lead; "none" keeps the unowned ones.
+      pros.prospects = pros.prospects.filter((p) => (af.none ? !(p.lead && p.lead.ownerId) : p.lead?.ownerId === af.id));
+      if (af.id) {
+        pros.prospectStats = null;
+        prospectSources.ubereats = null;
+        prospectSources.scraped = null;
+        pros.prospectsByPostalCode = [];
+      }
+    }
+
+    // "assigned to …" for every lead in the answer (one lookup).
+    const owned = [...pros.prospects.map((p) => p.lead).filter(Boolean), ...leads.manualLeads];
+    const names = await ownerNames(owned.map((x) => x.ownerId));
+    owned.forEach((x) => {
+      if (x.ownerId) x.ownerName = names.get(x.ownerId) || null;
+    });
 
     const sum = (m, field) => [...m.values()].reduce((n, r) => n + r[field], 0);
     const onMap = new Set(customers.map((c) => c.cardCode));
@@ -605,6 +819,9 @@ exports.getSalesMap = async (req, res) => {
       prospectsPending: pros.prospectsPending,
       prospectsUnlocated: pros.prospectsUnlocated,
       prospectStats: pros.prospectStats || null,
+      // The same figures per source while both exist.
+      prospectSources,
+      agent: af ? { id: af.id || "none", name: af.none ? "Not assigned to anyone" : agentName } : null,
       prospectsByPostalCode: pros.prospectsByPostalCode,
       ownPending: pros.ownPending || 0,
     });
@@ -614,25 +831,253 @@ exports.getSalesMap = async (req, res) => {
   }
 };
 
-// GET /api/map/prospect/:id - the details of one scraped restaurant (the
-// whole-map view only carries name and position).
+// Store ids (Uber Eats URL id) of old records that a lead is linked to.
+async function linkedLeadStoreIds() {
+  const leads = await SalesLead.find({ relatedRestaurant: { $ne: null }, status: { $ne: "converted" } }).select("relatedRestaurant").lean();
+  if (leads.length === 0) return new Set();
+  const olds = await ScrapedRestaurant.find({ _id: { $in: leads.map((l) => l.relatedRestaurant) } }).select("url").lean();
+  return new Set(olds.map((r) => pm.storeIdFromUrl(r.url)).filter(Boolean));
+}
+
+// ---------- one prospect, everything about it (shared detail panel) ----------
+
+const euroCents = (text) => {
+  // "11,12 €" -> 1112
+  const m = String(text || "").replace(/\s/g, "").match(/(\d+)(?:[.,](\d{1,2}))?/);
+  return m ? Number(m[1]) * 100 + Number((m[2] || "0").padEnd(2, "0")) : null;
+};
+
+/** Customers / leads this prospect is, or shares a phone / address with. */
+async function matchesOf(keys, shared) {
+  const ctx = await matchContext();
+  if (!ctx) return { same: null, related: [] };
+  const m = pm.matchProspect(keys, ctx.index, shared === "ue" ? ctx.shared.ue : ctx.shared.old);
+  // Who the customer / lead is assigned to.
+  const withOwner = async (x) => (x ? { ...x, ownerId: x.ownerId || (await ownerOfCandidate(x.type, x.id)) } : x);
+  const [same, ...related] = await withOwnerNames(await Promise.all([withOwner(m.same), ...m.related.map(withOwner)]));
+  return { same, related };
+}
+
+async function ueDetail(uuid) {
+  const c = await ueCollections();
+  const s = await c.restaurants.findOne({ uuid }, { projection: { raw: 0 } });
+  if (!s) return null;
+  const [sameAddress, matches] = await Promise.all([
+    s.addressKey
+      ? c.restaurants
+          .find({ addressKey: s.addressKey, uuid: { $ne: uuid } }, { projection: { _id: 0, uuid: 1, title: 1, categories: { $slice: 2 } } })
+          .sort({ title: 1 })
+          .limit(30)
+          .toArray()
+      : [],
+    matchesOf(pm.ueProspectKeys(s), "ue"),
+  ]);
+  const loc = s.location || {};
+  return {
+    id: `ue:${s.uuid}`,
+    source: "ubereats",
+    name: s.title,
+    url: s.url,
+    imageUrl: s.imageUrls?.[0] || null,
+    address: {
+      street: loc.streetAddress || "",
+      postalCode: s.postalCode || loc.postalCode || "",
+      city: loc.city || "",
+      full: loc.address || [loc.streetAddress, s.postalCode, loc.city].filter(Boolean).join(", "),
+    },
+    lat: s.geo?.coordinates?.[1] ?? null,
+    lng: s.geo?.coordinates?.[0] ?? null,
+    phone: s.phoneNumber || "",
+    email: s.email || "",
+    emailChecked: Boolean(s.legal),
+    registrationNumber: s.registrationNumber || "",
+    siren: s.siren || "",
+    registry: s.legal?.registry || "",
+    legalName: s.legal?.name || "",
+    legalAddress: s.legal?.address || "",
+    legalPhone: s.legal?.phone && pm.normPhone(s.legal.phone) !== pm.normPhone(s.phoneNumber) ? s.legal.phone : "",
+    cuisine: s.categories || [],
+    rating: s.rating?.value != null ? { value: s.rating.value, count: s.rating.count ?? null } : null,
+    priceBucket: s.priceBucket || "",
+    hours: s.hours || [],
+    menu: (s.menu || []).map((sec) => ({
+      title: sec.title,
+      items: (sec.items || []).map((it) => ({ title: it.title, description: it.description || "", price: it.price ?? null, priceText: it.priceText || "", imageUrl: it.imageUrl || null })),
+    })),
+    menuItems: s.menuItemCount || 0,
+    menuPartial: Boolean(s.menuPartial),
+    scrapedAt: s.detailsScrapedAt || s.lastSeenAt || null,
+    sameAddress: sameAddress.map((b) => ({ id: `ue:${b.uuid}`, name: b.title, cuisine: b.categories || [] })),
+    isCustomerOrLead: matches.same,
+    related: matches.related,
+    // Assigned to an agent from the Uber Eats Scraper page (the lead is on the Leads page).
+    assignedTo: s.assignment?.agentId ? { name: s.assignment.agentName, at: s.assignment.assignedAt, leadId: s.assignment.leadId ? String(s.assignment.leadId) : null } : null,
+  };
+}
+
+async function oldDetail(id) {
+  const r = await ScrapedRestaurant.findById(id).lean();
+  if (!r) return null;
+  const [geo, matches] = await Promise.all([ScrapedRestaurantGeo.findOne({ restaurantId: r._id, status: "ok" }).lean(), matchesOf(pm.oldProspectKeys(r), "old")]);
+  return {
+    id: String(r._id),
+    source: "scraped",
+    name: r.name,
+    url: r.url,
+    imageUrl: null,
+    address: { street: "", postalCode: r.postal_code || "", city: "", full: usable(r.contact_info?.address) },
+    // postal_code of the old data is the searched postal code, not always where the restaurant is.
+    postalCodeIsSearched: true,
+    lat: geo?.lat ?? null,
+    lng: geo?.lng ?? null,
+    phone: usable(r.contact_info?.phone),
+    email: usable(r.contact_info?.email),
+    emailChecked: false,
+    registrationNumber: "",
+    cuisine: [],
+    rating: null,
+    hours: [],
+    menu: (r.menu_items || []).length
+      ? [
+          {
+            title: "Menu",
+            items: r.menu_items.map((it) => ({
+              title: it.title,
+              description: usable(it.description),
+              price: euroCents(it.price),
+              priceText: usable(it.price),
+              imageUrl: null,
+            })),
+          },
+        ]
+      : [],
+    menuItems: r.menu_items_count || (r.menu_items || []).length,
+    scrapedAt: r.scraped_at || r.last_updated || null,
+    sameAddress: [],
+    isCustomerOrLead: matches.same,
+    related: matches.related,
+  };
+}
+
+/** The richest record for an id: "ue:<uuid>" (new source) or an old restaurants _id. */
+async function prospectDetail(id) {
+  if (String(id).startsWith("ue:")) return ueDetail(String(id).slice(3));
+  const old = await oldDetail(id);
+  if (!old) return null;
+  // The same store in the new source: shown from there (richer), the old id kept.
+  const storeId = pm.storeIdFromUrl(old.url);
+  if (storeId) {
+    try {
+      const c = await ueCollections();
+      const uuidHex = Buffer.from(storeId, "base64url").toString("hex");
+      const uuid = uuidHex.length === 32 ? `${uuidHex.slice(0, 8)}-${uuidHex.slice(8, 12)}-${uuidHex.slice(12, 16)}-${uuidHex.slice(16, 20)}-${uuidHex.slice(20)}` : null;
+      if (uuid && (await c.restaurants.countDocuments({ uuid }, { limit: 1 }))) {
+        const fresh = await ueDetail(uuid);
+        if (fresh) return { ...fresh, oldId: old.id, oldMenuItems: old.menuItems, phone: fresh.phone || old.phone, email: fresh.email || old.email };
+      }
+    } catch (error) {
+      console.warn("[salesMap] Uber Eats record of an old prospect unavailable:", error.message);
+    }
+  }
+  return old;
+}
+
+// GET /api/map/prospect/:id - everything about one prospect, for the detail
+// panel shared by the Sales Map and the Leads page: name, address, phone,
+// email, registration number, cuisine, rating, menu. id = "ue:<uuid>" for the
+// Uber Eats scraper, or an old restaurants _id.
+// GET /api/map/agents -> the people the Sales Map "Agent" filter offers: active sales agents and
+// managers, plus anyone else who still owns customers or open leads (deactivated agents included).
+exports.getAgents = async (req, res) => {
+  try {
+    const [customerOwners, leadOwners] = await Promise.all([
+      Customer.distinct("assignedTo", { assignedTo: { $ne: null } }),
+      SalesLead.distinct("assignedTo", { assignedTo: { $ne: null }, status: { $ne: "converted" } }),
+    ]);
+    const owners = [...customerOwners, ...leadOwners].filter((id) => mongoose.isValidObjectId(id));
+    const users = await User.find({
+      $or: [{ role: { $in: ["sales_agent", "sales_manager"] }, deactivated: { $ne: true } }, { _id: { $in: owners } }],
+    })
+      .select("firstName lastName email role deactivated")
+      .lean();
+    const nameOf = (u) => [u.firstName, u.lastName].filter(Boolean).join(" ").trim() || u.email || "Unnamed";
+    // Two accounts can carry the same name ("Ali kamal" / "Ali KAMAL"): those also show their email.
+    const seen = new Map();
+    users.forEach((u) => seen.set(nameOf(u).toLowerCase(), (seen.get(nameOf(u).toLowerCase()) || 0) + 1));
+    const list = users
+      .map((u) => {
+        const name = nameOf(u);
+        const twin = seen.get(name.toLowerCase()) > 1 && u.email;
+        return { id: String(u._id), name: twin ? `${name} (${u.email})` : name, role: u.role, deactivated: Boolean(u.deactivated) };
+      })
+      .sort((a, b) => Number(a.deactivated) - Number(b.deactivated) || a.name.localeCompare(b.name));
+    res.json(list);
+  } catch (error) {
+    console.error("Sales map agents error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
 exports.getProspect = async (req, res) => {
   try {
-    const r = await ScrapedRestaurant.findById(req.params.id).select("name url postal_code menu_items_count contact_info scraped_at").lean();
-    if (!r) return res.status(404).json({ message: "Not found" });
-    res.json({
-      id: String(r._id),
-      name: r.name,
-      postalCode: r.postal_code,
-      address: usable(r.contact_info?.address),
-      phone: usable(r.contact_info?.phone),
-      email: usable(r.contact_info?.email),
-      url: r.url,
-      menuItems: r.menu_items_count || 0,
-      scrapedAt: r.scraped_at,
-    });
+    const detail = await prospectDetail(req.params.id);
+    if (!detail) return res.status(404).json({ message: "Not found" });
+    res.json(detail);
   } catch (error) {
-    res.status(error.name === "CastError" ? 404 : 500).json({ message: error.name === "CastError" ? "Not found" : "Server error" });
+    res.status(error.name === "CastError" || error.name === "BSONError" ? 404 : 500).json({ message: error.name === "CastError" || error.name === "BSONError" ? "Not found" : "Server error" });
+  }
+};
+
+// GET /api/map/prospect-for-lead/:leadId - the same panel for a lead: the
+// restaurant it was made from (old data, or the same store in the Uber Eats
+// scraper), or the Uber Eats store that matches the lead's phone / email /
+// name and address. Always returns the lead itself; prospect = null when no
+// restaurant is known for it.
+exports.getProspectForLead = async (req, res) => {
+  try {
+    const lead = await SalesLead.findById(req.params.leadId).select("fullName company status phoneNumber email address relatedRestaurant relatedUberEatsUuid restaurantData assignedTo").lean();
+    if (!lead) return res.status(404).json({ message: "Lead not found" });
+    const leadInfo = {
+      id: String(lead._id),
+      name: lead.company || lead.fullName,
+      contactName: lead.company && lead.fullName && lead.company !== lead.fullName ? lead.fullName : "",
+      status: lead.status || "new",
+      phone: usable(lead.phoneNumber),
+      email: usable(lead.email),
+      ownerName: lead.assignedTo ? (await ownerNames([String(lead.assignedTo)])).get(String(lead.assignedTo)) || null : null,
+    };
+    let prospect = null;
+    let matchedBy = null;
+    if (lead.relatedUberEatsUuid) {
+      prospect = await ueDetail(lead.relatedUberEatsUuid);
+      matchedBy = prospect ? "linked" : null;
+    }
+    if (!prospect && lead.relatedRestaurant) {
+      prospect = await prospectDetail(String(lead.relatedRestaurant));
+      matchedBy = prospect ? "linked" : null;
+    }
+    if (!prospect) {
+      // A lead typed by hand: the Uber Eats store with its phone / email, or its name at its address.
+      try {
+        const keys = pm.candidateFromLead(lead);
+        const c = await ueCollections();
+        const or = [];
+        if (keys.zip) or.push({ postalCode: keys.zip });
+        const stores = or.length ? await c.restaurants.find({ $or: or }, { projection: UE_LIST_FIELDS }).limit(5000).toArray() : [];
+        const ctx = await matchContext();
+        const one = pm.indexCandidates([keys]);
+        const hit = stores.find((s) => pm.matchProspect(pm.ueProspectKeys(s), one, ctx ? ctx.shared.ue : undefined).same);
+        if (hit) {
+          prospect = await ueDetail(hit.uuid);
+          matchedBy = "match";
+        }
+      } catch (error) {
+        console.warn("[salesMap] lead -> Uber Eats match unavailable:", error.message);
+      }
+    }
+    res.json({ lead: leadInfo, prospect, matchedBy });
+  } catch (error) {
+    res.status(error.name === "CastError" || error.name === "BSONError" ? 404 : 500).json({ message: error.name === "CastError" ? "Lead not found" : "Server error" });
   }
 };
 
@@ -669,6 +1114,56 @@ exports.searchAreas = async (req, res) => {
     res.json({ areas });
   } catch (error) {
     console.error("Search areas error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// POST /api/map/prospects/assign { ids[], agentId, priority }  (admin / sales_manager)
+// Assign prospects picked on the Sales Map (ticked in the list, or every one shown
+// for the area / radius / filter) to an agent, the same way as the other screens:
+// Uber Eats stores ("ue:<uuid>") through services/ubereats/assign.js (as on the Uber
+// Eats Scraper page), old Postal Scraping records through the old page's assign
+// (RestaurantAssignment + Lead, unchanged). Each prospect becomes a lead on the
+// Leads page; anything already assigned, a customer or a lead is skipped with the reason.
+exports.assignProspects = async (req, res) => {
+  try {
+    const { ids, agentId, priority = "medium" } = req.body || {};
+    const list = [...new Set((Array.isArray(ids) ? ids : []).map(String))].slice(0, 1000);
+    if (!list.length) return res.status(400).json({ message: "Select at least one prospect" });
+    const agent = mongoose.isValidObjectId(agentId) ? await User.findById(agentId).select("firstName lastName email role deactivated").lean() : null;
+    if (!agent || !["sales_agent", "sales_manager"].includes(agent.role) || agent.deactivated) {
+      return res.status(400).json({ message: "Choose an active sales agent or sales manager" });
+    }
+    const assigned = [];
+    const skipped = [];
+
+    const ueIds = list.filter((id) => id.startsWith("ue:")).map((id) => id.slice(3));
+    if (ueIds.length) {
+      const c = await ueCollections();
+      const r = await assignStores(c, { uuids: ueIds, agent, by: req.user, priority, source: "the Sales Map", notify: false });
+      r.assigned.forEach((x) => assigned.push({ id: `ue:${x.uuid}`, name: x.title, leadId: x.leadId }));
+      r.skipped.forEach((x) => skipped.push({ id: `ue:${x.uuid}`, name: x.title, reason: x.reason }));
+      if (r.assigned.length && (req.user?._id || req.user?.id)) await notifyAgent(agent, req.user._id || req.user.id, r.assigned.length);
+    }
+
+    const oldIds = list.filter((id) => !id.startsWith("ue:"));
+    const validOld = oldIds.filter((id) => mongoose.isValidObjectId(id));
+    oldIds.filter((id) => !mongoose.isValidObjectId(id)).forEach((id) => skipped.push({ id, name: "", reason: "not found" }));
+    if (validOld.length) {
+      const names = new Map((await ScrapedRestaurant.find({ _id: { $in: validOld } }).select("name").lean()).map((r) => [String(r._id), r.name]));
+      const captured = { statusCode: 200, body: null };
+      const fake = { status: (code) => ((captured.statusCode = code), fake), json: (body) => ((captured.body = body), fake) };
+      await restaurantScraperController.assignRestaurants({ body: { restaurantIds: validOld, agentId: String(agent._id), priority }, user: req.user }, fake);
+      const data = captured.body?.data || {};
+      (data.assignments || []).forEach((a) => assigned.push({ id: String(a.restaurant), name: names.get(String(a.restaurant)) || "" }));
+      (data.errors || []).forEach((e) => skipped.push({ id: String(e.restaurantId), name: names.get(String(e.restaurantId)) || "", reason: e.error === "Already assigned" ? "already assigned" : e.error }));
+      if (captured.statusCode >= 400) validOld.forEach((id) => skipped.push({ id, name: names.get(id) || "", reason: captured.body?.message || "could not assign" }));
+    }
+
+    invalidate();
+    res.json({ assigned: assigned.length, items: assigned, skipped, agent: { id: String(agent._id), name: agentName(agent) } });
+  } catch (error) {
+    console.error("Assign prospects error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
   }
 };

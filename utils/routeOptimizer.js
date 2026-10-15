@@ -202,17 +202,59 @@ function stopWindow(hours = {}) {
   return { windowOpen, windowClose, shopClose: shop.windowClose, hasPreferred: true };
 }
 
+// ---------- Load: weight and volume ----------
+// A stop carries weightKg and, when SAP has the items' volumes, volumeM3. A
+// truck carries capacityKg and optionally capacityM3. Both limits must hold.
+// A truck without a volume capacity has no volume limit, so nothing changes
+// until volumes are entered; a stop without a volume takes no room.
+const kgOf = (s) => (s && s.weightKg) || 0;
+const m3Of = (s) => (s && s.volumeM3) || 0;
+const VOLUME_EPS = 1e-9; // m³ sums like 0.1 + 0.2
+const hasVolumeLimit = (capacityM3) => Number.isFinite(capacityM3) && capacityM3 > 0;
+
+/** { kg, m3 } carried by a list of stops. */
+function loadOf(stops) {
+  let kg = 0;
+  let m3 = 0;
+  for (const s of stops) {
+    kg += kgOf(s);
+    m3 += m3Of(s);
+  }
+  return { kg, m3 };
+}
+
+/** Does `stop` still fit next to `used` ({ kg, m3 }) on a truck of capacityKg / capacityM3? */
+function fitsLoad(used, stop, capacityKg, capacityM3) {
+  if (used.kg + kgOf(stop) > capacityKg) return false;
+  return !hasVolumeLimit(capacityM3) || used.m3 + m3Of(stop) <= capacityM3 + VOLUME_EPS;
+}
+
+/**
+ * Which limit keeps a load out of every truck: "weight", "volume" or "both"
+ * (each limit alone has a truck with room, but no truck has room for both).
+ * @param {Array} rooms - [{ kg, m3 }] room left per truck (m3 Infinity = no volume limit)
+ */
+function blockingLimit(rooms, load) {
+  const kgOk = rooms.some((r) => r.kg >= load.kg);
+  const m3Ok = rooms.some((r) => r.m3 + VOLUME_EPS >= load.m3);
+  if (!kgOk && m3Ok) return "weight";
+  if (kgOk && !m3Ok) return "volume";
+  return "both";
+}
+
 /**
  * Sweep-clusters stops by polar angle around the depot, splitting whenever
- * adding the next stop would exceed the given capacity. Produces the fewest
- * geographically-coherent clusters that fit within capacity.
+ * adding the next stop would exceed the given capacity (kg, and m³ when
+ * capacityM3 is given). Produces the fewest geographically-coherent clusters
+ * that fit within capacity.
  *
- * @param {Array} stops - [{ id, coordinates: {lat,lng}, weightKg }]
+ * @param {Array} stops - [{ id, coordinates: {lat,lng}, weightKg, volumeM3 }]
  * @param {Object} depot - { lat, lng }
  * @param {number} capacityKg
+ * @param {number} [capacityM3] - no volume limit when not a positive number
  * @returns {Array<Array>} clusters of stops
  */
-function sweepCluster(stops, depot, capacityKg) {
+function sweepCluster(stops, depot, capacityKg, capacityM3) {
   const withAngle = stops
     .filter((s) => s.coordinates && Number.isFinite(s.coordinates.lat) && Number.isFinite(s.coordinates.lng))
     .map((s) => {
@@ -226,17 +268,17 @@ function sweepCluster(stops, depot, capacityKg) {
 
   const clusters = [];
   let current = [];
-  let currentWeight = 0;
+  let load = { kg: 0, m3: 0 };
 
   for (const stop of withAngle) {
-    const stopWeight = stop.weightKg || 0;
-    if (current.length > 0 && currentWeight + stopWeight > capacityKg) {
+    if (current.length > 0 && !fitsLoad(load, stop, capacityKg, capacityM3)) {
       clusters.push(current);
       current = [];
-      currentWeight = 0;
+      load = { kg: 0, m3: 0 };
     }
     current.push(stop);
-    currentWeight += stopWeight;
+    load.kg += kgOf(stop);
+    load.m3 += m3Of(stop);
   }
   if (current.length > 0) clusters.push(current);
 
@@ -259,12 +301,13 @@ function sweepCluster(stops, depot, capacityKg) {
  * however use a truck more, since compact patches do not divide by weight as
  * neatly as an angle sweep does.
  *
- * @param {Array} stops - [{ id, coordinates: {lat,lng}, weightKg }]
+ * @param {Array} stops - [{ id, coordinates: {lat,lng}, weightKg, volumeM3 }]
  * @param {Object} depot - { lat, lng }
  * @param {number} capacityKg
+ * @param {number} [capacityM3] - as in sweepCluster
  * @returns {Array<Array>} clusters of stops (same shape as sweepCluster)
  */
-function proximityCluster(stops, depot, capacityKg) {
+function proximityCluster(stops, depot, capacityKg, capacityM3) {
   const pool = stops.filter(
     (s) => s.coordinates && Number.isFinite(s.coordinates.lat) && Number.isFinite(s.coordinates.lng)
   );
@@ -283,7 +326,7 @@ function proximityCluster(stops, depot, capacityKg) {
     }
     const seed = pool.splice(seedIdx, 1)[0];
     const cluster = [seed];
-    let weight = seed.weightKg || 0;
+    const load = { kg: kgOf(seed), m3: m3Of(seed) };
     let sumLat = seed.coordinates.lat;
     let sumLng = seed.coordinates.lng;
 
@@ -293,7 +336,7 @@ function proximityCluster(stops, depot, capacityKg) {
       let bestIdx = -1;
       let bestDist = Infinity;
       for (let i = 0; i < pool.length; i++) {
-        if (weight + (pool[i].weightKg || 0) > capacityKg) continue;
+        if (!fitsLoad(load, pool[i], capacityKg, capacityM3)) continue;
         const d = haversineKm(centre, pool[i].coordinates);
         if (d < bestDist) {
           bestDist = d;
@@ -303,7 +346,8 @@ function proximityCluster(stops, depot, capacityKg) {
       if (bestIdx === -1) break;
       const next = pool.splice(bestIdx, 1)[0];
       cluster.push(next);
-      weight += next.weightKg || 0;
+      load.kg += kgOf(next);
+      load.m3 += m3Of(next);
       sumLat += next.coordinates.lat;
       sumLng += next.coordinates.lng;
     }
@@ -539,12 +583,14 @@ function sequenceRoute(stops, depot, departureMin = DEFAULT_DEPARTURE_MIN, speed
 }
 
 /**
- * Picks the smallest truck (by maxWeightKg) able to carry the given weight,
- * from a list of candidate trucks. Returns null if none fits.
+ * Picks the smallest truck (by maxWeightKg, then maxVolumeM3) able to carry
+ * the given weight and volume, from a list of candidate trucks. A truck
+ * without maxVolumeM3 has no volume limit. Returns null if none fits.
  */
-function pickSmallestFittingTruck(trucks, weightKg) {
-  const sorted = [...trucks].sort((a, b) => a.maxWeightKg - b.maxWeightKg);
-  return sorted.find((t) => t.maxWeightKg >= weightKg) || null;
+function pickSmallestFittingTruck(trucks, weightKg, volumeM3 = 0) {
+  const m3 = (t) => (hasVolumeLimit(t.maxVolumeM3) ? t.maxVolumeM3 : Infinity);
+  const sorted = [...trucks].sort((a, b) => a.maxWeightKg - b.maxWeightKg || m3(a) - m3(b));
+  return sorted.find((t) => t.maxWeightKg >= weightKg && m3(t) + VOLUME_EPS >= volumeM3) || null;
 }
 
 /**
@@ -560,7 +606,7 @@ function pickSmallestFittingTruck(trucks, weightKg) {
  * capacity and the stop's time window still hold, until no such move helps
  * or `maxPasses` is reached.
  *
- * @param {Array} trucks - [{ id, capacityKg, stops: [{ id, coordinates, windowOpen, windowClose, weightKg, locked, ...anything else to carry through }] }]
+ * @param {Array} trucks - [{ id, capacityKg, capacityM3?, stops: [{ id, coordinates, windowOpen, windowClose, weightKg, volumeM3?, locked, ...anything else to carry through }] }]
  * @param {Object} depot
  * @param {number} speedKmh
  * @param {number} maxPasses
@@ -698,8 +744,7 @@ async function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, ma
             if (j === i) continue;
             const to = working[j];
             if (!mayReceive(to)) continue;
-            const usedWeight = to.stops.reduce((sum, o) => sum + (o.weightKg || 0), 0);
-            if (usedWeight + (stop.weightKg || 0) > to.capacityKg) continue;
+            if (!fitsLoad(loadOf(to.stops), stop, to.capacityKg, to.capacityM3)) continue;
 
             const dep = to.departureMin ?? DEFAULT_DEPARTURE_MIN;
             const toOrder = orderOf(to);
@@ -771,8 +816,9 @@ async function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, ma
     const seqY = orderOf(Y);
     const baseX = orderMetrics(seqX, depX);
     const baseY = orderMetrics(seqY, depY);
-    const wX = weightOfStops(X.stops);
-    const wY = weightOfStops(Y.stops);
+    const lX = loadOf(X.stops);
+    const lY = loadOf(Y.stops);
+    const without = (l, s) => ({ kg: l.kg - kgOf(s), m3: l.m3 - m3Of(s) });
     const slack = EPSILON * 4;
 
     // Cheapest place for `stop` in `order`, or null if it would make a stop late.
@@ -796,8 +842,8 @@ async function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, ma
       for (const b of Y.stops) {
         if (timeUp()) return false;
         if (b.locked || !routable(b)) continue;
-        if (wX - (a.weightKg || 0) + (b.weightKg || 0) > X.capacityKg) continue;
-        if (wY - (b.weightKg || 0) + (a.weightKg || 0) > Y.capacityKg) continue;
+        if (!fitsLoad(without(lX, a), b, X.capacityKg, X.capacityM3)) continue;
+        if (!fitsLoad(without(lY, b), a, Y.capacityKg, Y.capacityM3)) continue;
         const inX = bestInsert(xWithoutA, b, depX, baseX.late);
         if (!inX) continue;
         const yWithoutB = seqY.filter((s) => s.id !== b.id);
@@ -896,12 +942,10 @@ async function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, ma
       const seq = orderOf(src);
       for (const target of targets) {
         const moved = [];
-        let room = target.capacityKg;
         for (let i = seq.length - 1; i >= 0 && src.stops.length - moved.length > 1; i--) {
           const s = src.stops.find((x) => x.id === seq[i].id);
-          if (!s || s.locked || (s.weightKg || 0) > room) continue;
+          if (!s || s.locked || !fitsLoad(loadOf(moved), s, target.capacityKg, target.capacityM3)) continue;
           moved.push(s);
-          room -= s.weightKg || 0;
           const rest = evalStops(src.stops.filter((x) => !moved.includes(x)), src.departureMin);
           if (lateOf(rest) === 0 && overOf(src, elapsed(rest)) <= OVER_TOL) break;
         }
@@ -938,7 +982,7 @@ async function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, ma
       let best = null;
       for (const to of targets) {
         const cur = stopsNow(to);
-        if (weightOfStops(cur) + (stop.weightKg || 0) > to.capacityKg) continue;
+        if (!fitsLoad(loadOf(cur), stop, to.capacityKg, to.capacityM3)) continue;
         const dep = to.departureMin ?? DEFAULT_DEPARTURE_MIN;
         const order = evalStops(cur, to.departureMin).sequence;
         const base = orderMetrics(order, dep);
@@ -1025,11 +1069,13 @@ async function crossRouteImprove(trucks, depot, speedKmh = DEFAULT_SPEED_KMH, ma
  * One number-set describing how good a set of truck routes is, so two plans
  * can be compared. `improved` is crossRouteImprove's result.
  */
-function summarizePlan(improved, unassignedKg = 0) {
+function summarizePlan(improved, unassignedKg = 0, unassignedOrders = null) {
   const used = improved.filter((t) => t.sequence.length > 0);
   const overtime = (t) => (Number.isFinite(t.maxDurationMin) ? Math.max(0, t.totalDurationMin - t.maxDurationMin) : 0);
   return {
     unassignedKg,
+    // Orders left out (an order kept out by its volume can weigh 0 kg in SAP).
+    unassignedOrders,
     trucks: used.length, // runs with stops
     // Vehicles that go out (a vehicle doing two runs counts once).
     vehicles: new Set(improved.filter((t) => t.sequence.length > 0 || t.inUseElsewhere).map((t) => t.vehicleId ?? t.id)).size,
@@ -1054,6 +1100,9 @@ function summarizePlan(improved, unassignedKg = 0) {
  * the alternative is actually better.
  */
 function isBetterPlan(a, b, strategy = "shortest") {
+  if (a.unassignedOrders != null && b.unassignedOrders != null && a.unassignedOrders !== b.unassignedOrders) {
+    return a.unassignedOrders < b.unassignedOrders;
+  }
   if (Math.abs(a.unassignedKg - b.unassignedKg) > 0.01) return a.unassignedKg < b.unassignedKg;
   if (a.late !== b.late) return a.late < b.late;
   const overA = a.overtimeMin || 0;
@@ -1084,9 +1133,9 @@ function isBetterPlan(a, b, strategy = "shortest") {
  * taken when nothing else is placeable. Stops no truck has room for are
  * returned as unassigned groups. Mutates `state` (each truck's stops/remaining).
  *
- * @param {Array} state - trucks: { departureMin, remaining, stops }
+ * @param {Array} state - trucks: { departureMin, remaining (kg), remainingM3 (Infinity = no volume limit), stops }
  * @param {Array} pool - new stops (copies)
- * @returns {Array<{stops, weightKg}>} stops that could not be placed
+ * @returns {Array<{stops, weightKg, volumeM3, limit}>} stops that could not be placed
  */
 function timelineAssign(state, pool, depot, matrix, strategy = "least_wait") {
   const legs = makeLegs(matrix, DEFAULT_SPEED_KMH);
@@ -1108,7 +1157,7 @@ function timelineAssign(state, pool, depot, matrix, strategy = "least_wait") {
       if (t.remaining <= 0) continue;
       for (let si = 0; si < remaining.length; si++) {
         const s = remaining[si];
-        if ((s.weightKg || 0) > t.remaining) continue;
+        if (!fitsRoom(t, s)) continue;
         const arrive = cursors[ti].clock + legs.min(cursors[ti].pos, s.coordinates);
         const start = s.windowOpen != null ? Math.max(arrive, s.windowOpen) : arrive;
         const late = s.windowClose != null && start > s.windowClose;
@@ -1123,11 +1172,24 @@ function timelineAssign(state, pool, depot, matrix, strategy = "least_wait") {
     const [stop] = remaining.splice(best.si, 1);
     const t = state[best.ti];
     t.stops.push(stop);
-    t.remaining -= stop.weightKg || 0;
+    takeRoom(t, stop);
     cursors[best.ti] = { clock: best.start + serviceOf(stop), pos: stop.coordinates };
   }
 
-  return remaining.map((s) => ({ stops: [s], weightKg: s.weightKg || 0 }));
+  return remaining.map((s) => unplacedGroup(state, [s]));
+}
+
+// Room left on a planning truck: remaining (kg) and remainingM3 (Infinity = no volume limit).
+const roomM3 = (t) => (typeof t.remainingM3 === "number" ? t.remainingM3 : Infinity);
+const fitsRoom = (t, s) => kgOf(s) <= t.remaining && m3Of(s) <= roomM3(t) + VOLUME_EPS;
+function takeRoom(t, s) {
+  t.remaining -= kgOf(s);
+  if (Number.isFinite(t.remainingM3)) t.remainingM3 -= m3Of(s);
+}
+// Stops no truck could take, with their load and which limit kept them out.
+function unplacedGroup(state, stops) {
+  const load = loadOf(stops);
+  return { stops, weightKg: load.kg, volumeM3: load.m3, limit: blockingLimit(state.map((t) => ({ kg: t.remaining, m3: roomM3(t) })), load) };
 }
 
 /**
@@ -1138,8 +1200,9 @@ function timelineAssign(state, pool, depot, matrix, strategy = "least_wait") {
  * the region (existing stops included). Pure - the caller applies the result.
  *
  * @param {Object} args
- * @param {Array}  args.poolStops - new orders: [{ id, coordinates, weightKg, windowOpen, windowClose, ...anything to carry through }]
- * @param {Array}  args.trucks - [{ id, capacityKg, remainingKg, departureMin, stops: [existing stops] }]
+ * @param {Array}  args.poolStops - new orders: [{ id, coordinates, weightKg, volumeM3?, windowOpen, windowClose, ...anything to carry through }]
+ * @param {Array}  args.trucks - [{ id, capacityKg, remainingKg, capacityM3?, remainingM3?, departureMin, stops: [existing stops] }]
+ *   (no capacityM3 = no volume limit for that truck)
  * @param {Object} args.depot
  * @param {"shortest"|"least_wait"} args.strategy
  * @param {Object|null} args.matrix - road distance matrix covering depot + existing + new stops
@@ -1152,8 +1215,13 @@ function timelineAssign(state, pool, depot, matrix, strategy = "least_wait") {
  * crossRouteImprove); the summary then counts vehicles and overtime.
  */
 async function planRegionAssignment({ poolStops, trucks, depot, strategy, matrix, method, maxMs, minimizeVehicles = true }) {
-  const state = trucks.map((t) => ({ ...t, stops: t.stops.map((s) => ({ ...s })), remaining: t.remainingKg }));
-  const open = state.filter((t) => t.remaining > 0);
+  const state = trucks.map((t) => ({
+    ...t,
+    stops: t.stops.map((s) => ({ ...s })),
+    remaining: t.remainingKg,
+    remainingM3: hasVolumeLimit(t.capacityM3) ? (Number.isFinite(t.remainingM3) ? t.remainingM3 : t.capacityM3) : Infinity,
+  }));
+  const open = state.filter((t) => t.remaining > 0 && t.remainingM3 > VOLUME_EPS);
   const weightOf = (cl) => cl.reduce((sum, o) => sum + (o.weightKg || 0), 0);
 
   const unassigned = [];
@@ -1168,7 +1236,9 @@ async function planRegionAssignment({ poolStops, trucks, depot, strategy, matrix
   } else {
     const groupFn = method === "proximity" ? proximityCluster : sweepCluster;
     const largest = open.length > 0 ? Math.max(...open.map((t) => t.remaining)) : 0;
-    const clusters = groupFn(poolStops.map((s) => ({ ...s })), depot, largest);
+    // Infinity (some truck has no volume limit) = groups are not cut by volume.
+    const largestM3 = open.length > 0 ? Math.max(...open.map((t) => t.remainingM3)) : 0;
+    const clusters = groupFn(poolStops.map((s) => ({ ...s })), depot, largest, largestM3);
     // Biggest groups first - otherwise a large group can be left with only
     // small trucks even though a big truck was free at the start.
     clusters.sort((a, b) => weightOf(b) - weightOf(a));
@@ -1176,20 +1246,20 @@ async function planRegionAssignment({ poolStops, trucks, depot, strategy, matrix
     // Is this truck's vehicle already going out (on this run or another)?
     const out = (t) => state.some((x) => (x.vehicleId ?? x.id) === (t.vehicleId ?? t.id) && (x.stops.length > 0 || x.inUseElsewhere));
     for (const cluster of clusters) {
-      const w = weightOf(cluster);
+      const { kg: w, m3: v } = loadOf(cluster);
       // Among trucks with the same room, one whose vehicle is already out first.
       const candidates = open
         .filter((t) => t.remaining > 0)
-        .map((t) => ({ maxWeightKg: t.remaining, _ref: t, _out: out(t) ? 0 : 1 }))
+        .map((t) => ({ maxWeightKg: t.remaining, maxVolumeM3: t.remainingM3, _ref: t, _out: out(t) ? 0 : 1 }))
         .sort((a, b) => a._out - b._out);
-      const fit = pickSmallestFittingTruck(candidates, w);
+      const fit = pickSmallestFittingTruck(candidates, w, v);
       if (!fit) {
-        unassigned.push({ stops: cluster, weightKg: w });
+        unassigned.push({ stops: cluster, weightKg: w, volumeM3: v });
         unassignedKg += w;
         continue;
       }
       fit._ref.stops.push(...cluster);
-      fit._ref.remaining -= w;
+      cluster.forEach((s) => takeRoom(fit._ref, s));
     }
 
     // The groups are cut to the size of the biggest truck, so with trucks of
@@ -1214,18 +1284,18 @@ async function planRegionAssignment({ poolStops, trucks, depot, strategy, matrix
         const w = stop.weightKg || 0;
         let best = null;
         for (const t of state) {
-          if (t.remaining <= 0 || t.remaining < w) continue;
+          if (t.remaining <= 0 || !fitsRoom(t, stop)) continue;
           const unused = out(t) ? 0 : 1;
           const km = haversineKm(centreOf(t), stop.coordinates);
           if (!best || unused < best.unused || (unused === best.unused && km < best.km)) best = { t, unused, km };
         }
         if (!best) {
-          unassigned.push({ stops: [stop], weightKg: w });
+          unassigned.push(unplacedGroup(state, [stop]));
           unassignedKg += w;
           continue;
         }
         best.t.stops.push(stop);
-        best.t.remaining -= w;
+        takeRoom(best.t, stop);
       }
     }
   }
@@ -1237,6 +1307,7 @@ async function planRegionAssignment({ poolStops, trucks, depot, strategy, matrix
       maxDurationMin: t.maxDurationMin,
       inUseElsewhere: t.inUseElsewhere,
       capacityKg: t.capacityKg,
+      capacityM3: t.capacityM3,
       departureMin: t.departureMin,
       stops: t.stops,
     })),
@@ -1247,7 +1318,8 @@ async function planRegionAssignment({ poolStops, trucks, depot, strategy, matrix
     matrix,
     { maxMs, minimizeVehicles }
   );
-  return { method, improved, unassigned, summary: summarizePlan(improved, unassignedKg) };
+  const unassignedOrders = unassigned.reduce((n, g) => n + g.stops.length, 0);
+  return { method, improved, unassigned, summary: summarizePlan(improved, unassignedKg, unassignedOrders) };
 }
 
 /**
@@ -1341,6 +1413,9 @@ module.exports = {
   isBetterPlan,
   sequenceRoute,
   pickSmallestFittingTruck,
+  fitsLoad,
+  loadOf,
+  blockingLimit,
   crossRouteImprove,
   evaluateFixedRoute,
   maxRunDurationMin,

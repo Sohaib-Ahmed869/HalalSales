@@ -12,6 +12,8 @@ const SalesLeadSchema = new Schema(
     tags: [String],
     sourceType: String,
     relatedRestaurant: Schema.Types.ObjectId, // _id in `restaurants`
+    relatedUberEatsUuid: String, // uuid in `ubereats_restaurants` (assigned from the Uber Eats Scraper page)
+    assignedTo: Schema.Types.ObjectId,
   },
   { collection: "leads", strict: false }
 );

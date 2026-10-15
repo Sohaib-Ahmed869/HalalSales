@@ -1,7 +1,7 @@
 // routes/map.routes.js
 const express = require("express");
 const router = express.Router();
-const { auth } = require("../middleware/auth");
+const { auth, checkRole } = require("../middleware/auth");
 const controller = require("../controllers/map.controller");
 const salesMap = require("../controllers/salesMap.controller");
 const tiles = require("../controllers/mapTiles.controller");
@@ -22,7 +22,11 @@ router.get("/nearby", controller.getNearby);
 router.get("/overview", controller.getOverview);
 router.get("/sales", salesMap.getSalesMap);
 router.get("/search-areas", salesMap.searchAreas);
+router.get("/agents", salesMap.getAgents);
 router.get("/prospect/:id", salesMap.getProspect);
+router.get("/prospect-for-lead/:leadId", salesMap.getProspectForLead);
+// Bulk assign prospects picked on the Sales Map (each becomes a lead), admins and sales managers.
+router.post("/prospects/assign", checkRole(["admin", "sales_manager"]), salesMap.assignProspects);
 router.get("/geocoding/stats", controller.getGeocodingStats);
 router.post("/geocoding/batch", controller.batchGeocode);
 router.put("/customer/:cardCode/coordinates", controller.setCustomerCoordinates);
