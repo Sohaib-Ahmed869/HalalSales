@@ -96,6 +96,13 @@ const LeadSchema = new Schema({
     type: Schema.Types.ObjectId,
     ref: "RestaurantAssignment",
   },
+  // The Uber Eats store (ubereats_restaurants.uuid) this lead was made from,
+  // when assigned to an agent from the Uber Eats Scraper page.
+  relatedUberEatsUuid: {
+    type: String,
+    index: true,
+    sparse: true,
+  },
   restaurantData: {
     name: String,
     postalCode: String,
@@ -106,6 +113,9 @@ const LeadSchema = new Schema({
       address: String,
     },
     url: String,
+    // Uber Eats store only: SIRET / SIREN and the registry, from the store's legal info.
+    registrationNumber: String,
+    registry: String,
   },
 
   // Timeline tracking

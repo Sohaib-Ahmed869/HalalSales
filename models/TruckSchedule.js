@@ -34,6 +34,8 @@ const TruckScheduleSchema = new Schema({
       geotabId: { type: String },
       truckName: { type: String, trim: true },
       maxWeightKg: { type: Number, required: true },
+      // m³ the truck takes; unset = no volume limit.
+      maxVolumeM3: { type: Number },
       truckType: {
         type: String,
         enum: ["small", "medium", "large", "xlarge", "custom"],

@@ -8,6 +8,8 @@ const TruckPosition = require("../models/TruckPosition");
 const geotab = require("../utils/geotabClient");
 const geotabSync = require("../services/geotabSync");
 const adherence = require("../services/adherenceService");
+const { vehicleDay } = require("../services/vehicleDay");
+const { placeholderNotice } = require("../utils/openingHours");
 
 const TENANTS = ["halal-food-sales", "pqf", "data-tech", "ms-foods"];
 
@@ -76,6 +78,7 @@ exports.listGeotabVehicles = async (req, res) => {
             serialNumber: v.serialNumber || "",
             truckNumber: mine ? mine.truckNumber : null,
             maxWeightKg: mine ? mine.maxWeightKg ?? null : null,
+            maxVolumeM3: mine ? mine.maxVolumeM3 ?? null : null,
             departureTime: mine ? mine.departureTime || null : null,
             deviceDocId: mine ? mine._id : null,
             lastSeenAt: mine ? mine.lastSeenAt : null,
@@ -194,6 +197,24 @@ exports.getFleet = async (req, res) => {
   }
 };
 
+// GET /api/tracking/vehicle-day?geotabId=b12&date=YYYY-MM-DD[&fresh=true]
+// What one vehicle did that day (route, stops with times and addresses, drives,
+// events, fill-ups, matched with the portal's plan), read from MyGeotab.
+exports.getVehicleDay = async (req, res) => {
+  if (!geotab.isConfigured()) {
+    return res.json({ configured: false, message: "MyGeotab is not set up on the server yet." });
+  }
+  const geotabId = String(req.query.geotabId || "").trim();
+  if (!geotabId || !isDay(req.query.date)) return res.status(400).json({ message: "geotabId and date (YYYY-MM-DD) are required" });
+  try {
+    const data = await vehicleDay({ geotabId, date: req.query.date, tenant: tenantFromReq(req), fresh: req.query.fresh === "true" });
+    res.json({ configured: true, ...data });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ message: error.message });
+    res.status(502).json({ message: `MyGeotab: ${error.message}` });
+  }
+};
+
 // GET /api/tracking/adherence?date=YYYY-MM-DD[&refresh=true]
 // The planned-vs-actual report of every truck that day. Computed when asked
 // to (refresh) or when nothing is stored for the day yet.
@@ -203,7 +224,12 @@ exports.getAdherence = async (req, res) => {
     const tenant = tenantFromReq(req);
     let reports = req.query.refresh === "true" ? null : await adherence.getForDate(req.query.date, tenant);
     if (!reports || reports.length === 0) reports = await adherence.runForDate(req.query.date, tenant);
-    res.json({ date: req.query.date, geotab: geotabSync.status(), reports });
+    // Says which results depend on the (placeholder) customer opening / preferred hours.
+    const hours = placeholderNotice({
+      deviations: reports.reduce((n, r) => n + (r.summary?.fromHours || 0), 0),
+      stops: reports.reduce((n, r) => n + (r.summary?.stopsFromHours || 0), 0),
+    });
+    res.json({ date: req.query.date, geotab: geotabSync.status(), reports, placeholderHours: hours });
   } catch (error) {
     console.error("Adherence error:", error);
     res.status(500).json({ message: "Failed to build the planned vs actual report", error: error.message });

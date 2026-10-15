@@ -14,6 +14,7 @@ router.get("/devices", controller.listDevices);
 router.get("/trail/:truckNumber", controller.getTrail);
 router.get("/geotab/vehicles", controller.listGeotabVehicles);
 router.get("/fleet", controller.getFleet);
+router.get("/vehicle-day", controller.getVehicleDay);
 router.get("/adherence", controller.getAdherence);
 router.post("/devices", checkRole(["admin", "sales_manager"]), controller.assignDevice);
 router.delete("/devices/:id", checkRole(["admin", "sales_manager"]), controller.deleteDevice);

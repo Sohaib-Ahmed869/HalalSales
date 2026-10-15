@@ -33,9 +33,15 @@ router.post("/jobs/:id/pause", canManage, controller.pauseJob);
 router.post("/jobs/:id/continue", canManage, controller.continueJob);
 router.post("/jobs/:id/retry", canManage, controller.retryJob);
 
+// Assign to an agent (creates the lead on the Leads page), admins and sales managers.
+router.get("/agents", controller.listAgents);
+router.post("/restaurants/assign", checkRole(["admin", "sales_manager"]), controller.assignRestaurants);
+router.post("/restaurants/unassign", checkRole(["admin", "sales_manager"]), controller.unassignRestaurants);
+
 router.get("/restaurants", controller.listRestaurants);
 router.get("/restaurants/filters", controller.getRestaurantFilters);
 router.get("/restaurants/export", controller.exportRestaurants);
+router.get("/restaurants/addresses", controller.listAddressGroups);
 router.get("/restaurants/:uuid", controller.getRestaurant);
 
 router.get("/changes", controller.listChanges);

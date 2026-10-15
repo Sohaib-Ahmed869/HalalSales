@@ -18,6 +18,7 @@ const {
   isBetterPlan,
   maxRunDurationMin,
 } = require("../utils/routeOptimizer");
+const { placeholderNotice } = require("../utils/openingHours");
 const { getWarehouse, regionForAddress } = require("../utils/regions");
 const { geocodeCustomer, deliveryPoint } = require("../utils/geocodingService");
 const { getMatrix, getRouteGeometry, saveRouteGeometry } = require("../utils/roadDistanceService");
@@ -73,11 +74,20 @@ async function resolveScheduleTrucks(trucks, { tenant, dayOfWeek, scheduleId }) 
       truck.truckName = device.label || device.licensePlate || `Truck ${device.truckNumber}`;
       truck.truckType = "custom";
       device.maxWeightKg = truck.maxWeightKg;
+      device.maxVolumeM3 = volumeCapacityOf(truck);
       device.departureTime = truck.departureTime;
       await device.save();
     }
   }
   if (trucks.some((t) => !(Number(t.maxWeightKg) > 0))) return "Enter the capacity (kg) of every truck.";
+  // Volume capacity is optional (empty = no volume limit), but when typed it must be a real size.
+  for (const truck of trucks) {
+    const raw = truck.maxVolumeM3;
+    if (raw !== undefined && raw !== null && raw !== "" && !(Number(raw) > 0)) {
+      return `${truck.truckName || `Truck ${truck.truckNumber}`}: the volume capacity (m³) must be a number above 0, or left empty.`;
+    }
+    truck.maxVolumeM3 = volumeCapacityOf(truck) ?? undefined;
+  }
   // Further runs of a vehicle that day: a real time each, later than the run before.
   for (const truck of trucks) {
     const extra = (truck.extraRuns || []).filter((r) => r && r.departureTime);
@@ -199,6 +209,7 @@ const sameList = (a = [], b = []) => a.length === b.length && a.every((v, i) => 
 async function applyTemplateToRoute(route, schedule, truck, departureTime = truck.departureTime || "08:00") {
   const template = {
     maxWeightKg: truck.maxWeightKg,
+    maxVolumeM3: volumeCapacityOf(truck),
     departureTime,
     serviceMin: truck.serviceMin ?? null,
   };
@@ -229,6 +240,16 @@ async function applyTemplateToRoute(route, schedule, truck, departureTime = truc
       changed = true;
     }
   }
+  let volumeKept = false;
+  if (edited("maxVolumeM3")) {
+    if (loaded && template.maxVolumeM3 != null && template.maxVolumeM3 < (route.totalVolumeM3 || 0)) {
+      kept.push("volume capacity");
+      volumeKept = true;
+    } else {
+      route.maxVolumeM3 = template.maxVolumeM3 ?? undefined;
+      changed = true;
+    }
+  }
   if (edited("departureTime")) {
     route.departureTime = template.departureTime;
     changed = retime = true;
@@ -252,6 +273,7 @@ async function applyTemplateToRoute(route, schedule, truck, departureTime = truc
 
   route.templateValues = {
     maxWeightKg: capacityKept ? last.maxWeightKg : template.maxWeightKg,
+    maxVolumeM3: volumeKept ? last.maxVolumeM3 : template.maxVolumeM3 ?? undefined,
     departureTime: template.departureTime,
     serviceMin: template.serviceMin ?? undefined,
   };
@@ -325,9 +347,10 @@ async function syncTrucksFor(date, tenant) {
             truckName: truck.truckName || `Truck ${truck.truckNumber}`,
             truckType: truck.truckType,
             maxWeightKg: truck.maxWeightKg,
+            maxVolumeM3: volumeCapacityOf(truck) ?? undefined,
             departureTime: departures[i],
             serviceMin: truck.serviceMin,
-            templateValues: { maxWeightKg: truck.maxWeightKg, departureTime: departures[i], serviceMin: truck.serviceMin },
+            templateValues: { maxWeightKg: truck.maxWeightKg, maxVolumeM3: volumeCapacityOf(truck) ?? undefined, departureTime: departures[i], serviceMin: truck.serviceMin },
             region: schedule.region,
             departments: schedule.departments,
             cities: schedule.cities,
@@ -415,7 +438,7 @@ exports.getRoutesByDate = async (req, res) => {
     // How many orders were sent to Logistics for this day, whatever the date:
     // the page offers "Remove these trucks" only when it is none.
     const ordersSent = USE_DELIVERY_NOTES() ? null : await LogisticsOrder.countDocuments({ tenant, deliveryDate: { $gte: dayStart, $lte: dayEnd } });
-    res.json({ routes, ordersSent });
+    res.json({ routes, ordersSent, placeholderHours: hoursNotice(routes) });
   } catch (error) {
     console.error("Get routes by date error:", error);
     res.status(500).json({ message: "Server error", error: error.message });
@@ -504,6 +527,7 @@ exports.addRun = async (req, res) => {
       truckName: route.truckName,
       truckType: route.truckType,
       maxWeightKg: route.maxWeightKg,
+      maxVolumeM3: route.maxVolumeM3,
       departureTime,
       serviceMin: route.serviceMin,
       strategy: route.strategy,
@@ -623,15 +647,19 @@ async function buildDeliverableOrder(deliveryNote, customersByCode, tenant) {
   await ensureGeocoded(customer);
 
   let totalWeight = 0;
+  let totalVolume = 0;
   const itemCodes = (deliveryNote.DocumentLines || []).map((l) => l.ItemCode).filter(Boolean);
   if (itemCodes.length > 0) {
     const items = await Item.find({ ItemCode: { $in: itemCodes } });
     const weightByCode = new Map(items.map((it) => [it.ItemCode, it.SalesUnitWeight || 0]));
+    const volumeByCode = new Map(items.map((it) => [it.ItemCode, itemVolumeM3(it)]));
     totalWeight = (deliveryNote.DocumentLines || []).reduce((sum, line) => {
       const w = weightByCode.get(line.ItemCode) || 0;
       return sum + w * (line.Quantity || 0);
     }, 0);
     totalWeight = Math.round(totalWeight * 100) / 100; // avoid 57.099999999999994 style floats
+    totalVolume = (deliveryNote.DocumentLines || []).reduce((sum, line) => sum + (volumeByCode.get(line.ItemCode) || 0) * (line.Quantity || 0), 0);
+    totalVolume = Math.round(totalVolume * 10000) / 10000;
   }
 
   // customer.coordinates is a pre-existing field, populated for real
@@ -662,6 +690,7 @@ async function buildDeliverableOrder(deliveryNote, customersByCode, tenant) {
     address,
     totalWeight,
     weightUnit: "kg",
+    totalVolume,
     coordinates: geoSource ? { lat: geoSource.lat, lng: geoSource.lng } : null,
     openingTime: customer ? customer.openingTime : undefined,
     closingTime: customer ? customer.closingTime : undefined,
@@ -918,9 +947,65 @@ exports.getAvailableOrders = async (req, res) => {
 function recalcTotals(route) {
   route.totalOrders = route.orders.length;
   route.totalWeightKg = route.orders.reduce((sum, o) => sum + (o.orderWeightKg || 0), 0);
+  route.totalVolumeM3 = Math.round(route.orders.reduce((sum, o) => sum + (o.orderVolumeM3 || 0), 0) * 10000) / 10000;
   route.capacityUsedPercent = route.maxWeightKg
     ? Math.round((route.totalWeightKg / route.maxWeightKg) * 10000) / 100
     : 0;
+  route.volumeUsedPercent = route.maxVolumeM3 > 0 ? Math.round((route.totalVolumeM3 / route.maxVolumeM3) * 10000) / 100 : 0;
+}
+
+// The stop flags that come from customer opening / preferred hours, which are
+// placeholder data for now (utils/openingHours.js): counted so the page can say
+// which results depend on them. The flags themselves are unchanged.
+function hoursNotice(routes) {
+  const orders = routes.flatMap((r) => r.orders || []);
+  return placeholderNotice({
+    timeWindowIssues: orders.filter((o) => o.status === "infeasible").length,
+    preferredMissed: orders.filter((o) => o.preferredMissed).length,
+    waitingStops: orders.filter((o) => (o.waitMin || 0) > 0).length,
+  });
+}
+
+// ---------- Load: weight and volume ----------
+
+// SAP volume unit codes (SalesVolumeUnit) -> m³. This company's SAP uses 4 for
+// every item (checked 2026-10-15: e.g. a 0.39 x 0.30 x 0.16 m carton is 0.02);
+// 4 is SAP's m³, 1-3 its cm³ / dm³ (litre) / mm³ ... are converted too in case
+// some items get another unit. Unknown codes count as no volume.
+const VOLUME_UNIT_M3 = { 1: 1e-6, 2: 1e-3, 3: 1e-9, 4: 1 };
+function itemVolumeM3(item) {
+  const v = Number(item?.SalesUnitVolume);
+  if (!(v > 0)) return 0;
+  const unit = Number(item.SalesVolumeUnit ?? 4);
+  return VOLUME_UNIT_M3[unit] ? v * VOLUME_UNIT_M3[unit] : 0;
+}
+
+// The m³ capacity typed for a template truck; null when left empty (= no volume limit).
+function volumeCapacityOf(truck) {
+  const v = Number(truck?.maxVolumeM3);
+  return truck?.maxVolumeM3 !== "" && truck?.maxVolumeM3 != null && v > 0 ? v : null;
+}
+
+const round1 = (n) => Math.round(n * 10) / 10;
+const round2 = (n) => Math.round(n * 100) / 100;
+// "12.5 kg" or "12.5 kg, 0.42 m³".
+const loadText = (kg, m3) => (m3 > 0 ? `${round1(kg)} kg, ${round2(m3)} m³` : `${round1(kg)} kg`);
+
+/**
+ * Why an order does not fit on a route, or null when it fits. Checks the
+ * weight capacity and, when the truck has one, the volume capacity.
+ */
+function capacityProblem(route, kg, m3) {
+  const freeKg = (route.maxWeightKg || 0) - (route.totalWeightKg || 0);
+  const hasVolume = route.maxVolumeM3 > 0;
+  const freeM3 = hasVolume ? route.maxVolumeM3 - (route.totalVolumeM3 || 0) : Infinity;
+  const overKg = kg > freeKg;
+  const overM3 = hasVolume && m3 > freeM3 + 1e-9;
+  if (!overKg && !overM3) return null;
+  const parts = [];
+  if (overKg) parts.push(`weight ${round1((route.totalWeightKg || 0) + kg)} / ${route.maxWeightKg} kg (${round1(Math.max(0, freeKg))} kg free)`);
+  if (overM3) parts.push(`volume ${round2((route.totalVolumeM3 || 0) + m3)} / ${route.maxVolumeM3} m³ (${round2(Math.max(0, freeM3))} m³ free)`);
+  return { overKg, overM3, text: parts.join(" and ") };
 }
 
 exports.assignOrderToTruck = async (req, res) => {
@@ -948,10 +1033,11 @@ exports.assignOrderToTruck = async (req, res) => {
       });
     }
 
-    const projectedWeight = route.totalWeightKg + (built.totalWeight || 0);
-    if (projectedWeight > route.maxWeightKg) {
+    const problem = capacityProblem(route, built.totalWeight || 0, built.totalVolume || 0);
+    if (problem) {
       return res.status(400).json({
-        message: `Adding this order would put the truck over capacity (${projectedWeight.toFixed(1)} / ${route.maxWeightKg} kg). Remove another stop first, or assign it to a truck with more room.`,
+        message: `Doesn't fit: this order (${loadText(built.totalWeight || 0, built.totalVolume || 0)}) would put the truck over its ${problem.overKg && problem.overM3 ? "weight and volume capacity" : problem.overM3 ? "volume capacity" : "weight capacity"}: ${problem.text}. Remove another stop first, or assign it to a truck with more room.`,
+        limit: problem.overKg && problem.overM3 ? "both" : problem.overM3 ? "volume" : "weight",
       });
     }
 
@@ -966,10 +1052,12 @@ exports.assignOrderToTruck = async (req, res) => {
         address: built.address,
         totalWeight: built.totalWeight,
         weightUnit: built.weightUnit,
+        totalVolume: built.totalVolume,
         docType: built.docType,
       },
       sequenceNumber: sequenceNumber || route.orders.length + 1,
       orderWeightKg: built.totalWeight,
+      orderVolumeM3: built.totalVolume || 0,
       coordinates: built.coordinates,
       storeHours: storeHoursOf(built),
       // A caller that explicitly asked for a specific position meant it —
@@ -1126,12 +1214,16 @@ exports.updateStopStatus = async (req, res) => {
 
 exports.updateCapacity = async (req, res) => {
   try {
-    const { maxWeightKg } = req.body;
-    const route = await TruckRoute.findByIdAndUpdate(
-      req.params.routeId,
-      { maxWeightKg },
-      { new: true, runValidators: true }
-    );
+    const { maxWeightKg, maxVolumeM3 } = req.body;
+    const update = {};
+    if (maxWeightKg !== undefined) update.maxWeightKg = maxWeightKg;
+    // null / "" clears the volume limit.
+    if (maxVolumeM3 !== undefined) {
+      if (maxVolumeM3 === null || maxVolumeM3 === "") update.$unset = { maxVolumeM3: "" };
+      else if (Number(maxVolumeM3) > 0) update.maxVolumeM3 = Number(maxVolumeM3);
+      else return res.status(400).json({ message: "maxVolumeM3 must be a number above 0, or empty" });
+    }
+    const route = await TruckRoute.findByIdAndUpdate(req.params.routeId, update, { new: true, runValidators: true });
     if (!route) return res.status(404).json({ message: "Route not found" });
     recalcTotals(route);
     await route.save();
@@ -1182,6 +1274,7 @@ function toOptimizerStop(orderEntry, serviceMin) {
     windowOpen,
     windowClose,
     weightKg: orderEntry.orderWeightKg || 0,
+    volumeM3: orderEntry.orderVolumeM3 || 0,
   };
   if (Number.isFinite(serviceMin)) stop.serviceMin = serviceMin;
   return stop;
@@ -1430,7 +1523,6 @@ exports.generateRoute = async (req, res) => {
     const customers = await Customer.find({ CardCode: { $in: cardCodes } }).lean();
     const customersByCode = new Map(customers.map((c) => [c.CardCode, c]));
 
-    let remainingCapacity = route.maxWeightKg - route.totalWeightKg;
     let ordersAdded = 0;
 
     for (const deliveryNote of deliveryNotes) {
@@ -1444,7 +1536,7 @@ exports.generateRoute = async (req, res) => {
       // here (never guessed into the wrong truck); it still shows up in
       // "available orders" for manual assignment.
       if (route.region && built.region !== route.region) continue;
-      if (!built.totalWeight || built.totalWeight > remainingCapacity) continue;
+      if (!built.totalWeight || capacityProblem(route, built.totalWeight, built.totalVolume || 0)) continue;
       if (!built.coordinates) continue; // ungeocoded — surfaced separately, not auto-assigned
 
       route.orders.push({
@@ -1458,14 +1550,15 @@ exports.generateRoute = async (req, res) => {
           address: built.address,
           totalWeight: built.totalWeight,
           weightUnit: built.weightUnit,
+          totalVolume: built.totalVolume,
         },
         sequenceNumber: route.orders.length + 1,
         orderWeightKg: built.totalWeight,
+        orderVolumeM3: built.totalVolume || 0,
         coordinates: built.coordinates,
         storeHours: storeHoursOf(built),
       });
-
-      remainingCapacity -= built.totalWeight;
+      recalcTotals(route);
       assigned.add(deliveryNote.DocEntry);
       ordersAdded++;
     }
@@ -1601,9 +1694,9 @@ exports.autoFillAllTrucks = async (req, res) => {
         continue;
       }
 
-      const availableTrucks = regionRoutes
-        .map((route) => ({ route, remaining: route.maxWeightKg - route.totalWeightKg }))
-        .filter((t) => t.remaining > 0);
+      const availableTrucks = regionRoutes.filter(
+        (route) => route.maxWeightKg - route.totalWeightKg > 0 && !(route.maxVolumeM3 > 0 && route.maxVolumeM3 - (route.totalVolumeM3 || 0) <= 1e-9)
+      );
 
       if (availableTrucks.length === 0) {
         pool.forEach((o) =>
@@ -1623,6 +1716,9 @@ exports.autoFillAllTrucks = async (req, res) => {
         departureMin: departureMinOf(route),
         capacityKg: route.maxWeightKg,
         remainingKg: route.maxWeightKg - route.totalWeightKg,
+        // No volume capacity entered = no volume limit.
+        capacityM3: route.maxVolumeM3 > 0 ? route.maxVolumeM3 : undefined,
+        remainingM3: route.maxVolumeM3 > 0 ? route.maxVolumeM3 - (route.totalVolumeM3 || 0) : undefined,
         stops: route.orders.map((o) => ({
           ...toOptimizerStop(o, route.serviceMin),
           locked: o.locked,
@@ -1634,7 +1730,7 @@ exports.autoFillAllTrucks = async (req, res) => {
       const regionServiceMin = regionRoutes.find((r) => Number.isFinite(r.serviceMin))?.serviceMin;
       const poolStops = pool.map((o) => ({
         ...toOptimizerStop(
-          { _id: `new:${o.DocEntry}`, coordinates: o.coordinates, storeHours: storeHoursOf(o), orderWeightKg: o.totalWeight },
+          { _id: `new:${o.DocEntry}`, coordinates: o.coordinates, storeHours: storeHoursOf(o), orderWeightKg: o.totalWeight, orderVolumeM3: o.totalVolume || 0 },
           regionServiceMin
         ),
         _built: o,
@@ -1683,18 +1779,26 @@ exports.autoFillAllTrucks = async (req, res) => {
           vehiclesUsed: c.summary.vehicles,
           overtimeMin: Math.round(c.summary.overtimeMin),
           unassignedKg: Math.round(c.summary.unassignedKg * 10) / 10,
+          unassignedOrders: c.summary.unassignedOrders,
         })),
       });
 
-      chosen.unassigned.forEach(({ stops: cluster, weightKg }) =>
+      // Which limit kept an order out: weight, volume, or both (no single truck has room for both).
+      const LIMIT_TEXT = {
+        weight: "not enough weight capacity (kg) left",
+        volume: "not enough volume (m³) left",
+        both: "no truck has enough weight and volume left at the same time",
+      };
+      chosen.unassigned.forEach(({ stops: cluster, weightKg, volumeM3, limit }) =>
         cluster.forEach((s) =>
           unassignable.push({
             docEntry: s._built.DocEntry,
             cardName: s._built.CardName,
+            limit: limit || "weight",
             reason:
               cluster.length === 1
-                ? `no truck for "${region}" has ${Math.round(weightKg * 10) / 10} kg of room left on this date (add a truck or a run, or raise a capacity)`
-                : `region "${region}" under-resourced for this date (a ${weightKg}kg group exceeds every available truck's remaining capacity)`,
+                ? `doesn't fit: no truck for "${region}" has room for this order (${loadText(weightKg, volumeM3 || 0)}) on this date, ${LIMIT_TEXT[limit || "weight"]} (add a truck or a run, or raise a capacity)`
+                : `region "${region}" under-resourced for this date (a group of ${loadText(weightKg, volumeM3 || 0)} exceeds every available truck's remaining capacity)`,
           })
         )
       );
@@ -1724,9 +1828,11 @@ exports.autoFillAllTrucks = async (req, res) => {
                 address: built.address,
                 totalWeight: built.totalWeight,
                 weightUnit: built.weightUnit,
+                totalVolume: built.totalVolume,
                 docType: built.docType,
               },
               orderWeightKg: built.totalWeight,
+              orderVolumeM3: built.totalVolume || 0,
               coordinates: built.coordinates,
               storeHours: storeHoursOf(built),
             };
@@ -1801,6 +1907,7 @@ exports.autoFillAllTrucks = async (req, res) => {
       });
 
     res.json({
+      placeholderHours: hoursNotice(routes),
       message: `Auto-filled ${totalAdded} order(s) across ${touchedRoutes.size} truck(s), using ${vehiclesUsed} of ${vehiclesAvailable} vehicle(s)`,
       totalAdded,
       vehiclesUsed,
