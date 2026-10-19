@@ -237,6 +237,7 @@ app.use("/api/menu", menuRoutes); // Menu routes
 app.use("/api/quotations", QuotationRoutes); // Quotation routes
 app.use("/api/leads", leadRoutes); // Lead routes
 app.use("/api/leads2", lead2Routes); // Lead2 routes
+app.use("/api/ai-outreach", require("./routes/aiOutreach.routes")); // AI WhatsApp outreach (hfs-intelligence)
 app.use("/api/tasks", taskRoutes); // Task routes
 app.use("/api/sales-agent-journey", salesAgentJourneyRoutes); // Sales agent journey routes
 app.use("/api/application-usage", applicationUsageRoutes); // Application usage routes

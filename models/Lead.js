@@ -75,8 +75,29 @@ const LeadSchema = new Schema({
 
   // What the AI agent hands over with an ai_generated lead.
   aiHandoff: {
-    reason: String, // ready_to_order | gave_prices | negotiation | conversation | no_price_sheet | reopened
+    // ready_to_order | callback | complaint | gave_prices | negotiation | question
+    // | warm_no_reply | negotiation_no_reply | missed_window | no_price_sheet
+    // | reopened | conversation — or, with outcome "closed", business_closed | wrong_number
+    reason: String,
     reasonLabel: String,
+    outcome: { type: String, enum: ["handoff", "closed"], default: "handoff" },
+    priority: { type: String, enum: ["high", "medium", "low"] },
+    intent: String,
+    complaintTopic: String, // credit_refund | delivery | quality | invoice | service | other
+    products: [String],
+    silent: Boolean, // the customer was NOT told a colleague would contact them
+    salesStage: String,
+    campaignId: String,
+    campaignName: String,
+    priceSheet: [{ _id: false, itemCode: String, name: String, price: Number, orders: Number }],
+    account: {
+      orderCount: Number,
+      lifetimeValue: Number,
+      lastOrderDate: Date,
+      daysSinceLastOrder: Number,
+      segment: String,
+      topItems: [String],
+    },
     threadId: String, // CustomerThread id in hfs-intelligence
     summary: String,
     conversation: [
@@ -84,9 +105,11 @@ const LeadSchema = new Schema({
         direction: { type: String, enum: ["inbound", "outbound"] },
         text: String,
         at: Date,
+        author: String,
       },
     ],
     handedOffAt: Date,
+    taskId: { type: Schema.Types.ObjectId, ref: "Task" },
   },
   relatedRestaurant: {
     type: Schema.Types.ObjectId,

@@ -49,6 +49,9 @@ const upload = multer({
 
 // AI WhatsApp agent hand-off (hfs-intelligence). Service key, not a user JWT.
 router.post("/ai-handoff", serviceAuth, leadController.upsertAiHandoffLead);
+// AI catalogue campaign (hfs-intelligence): prospects who replied, and the stores to leave out.
+router.post("/ai-prospect-handoff", serviceAuth, leadController.upsertAiProspectLead);
+router.get("/ai-prospect-exclusions", serviceAuth, leadController.getAiProspectExclusions);
 
 // Lead CRUD Operations
 router.get("/", auth, leadController.getLeads);

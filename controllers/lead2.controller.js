@@ -1946,13 +1946,58 @@ exports.mergeDuplicateLeads = async (req, res) => {
 // AI WhatsApp agent hand-off (called by hfs-intelligence with a service key).
 //
 // The agent reopened a conversation with an existing customer and it has
-// reached the point where a person must take over (they want to order, or are
-// negotiating price). This lands it on the leads screen as an "ai_generated"
-// lead linked to the customer's SAP account, so it is followed up and tracked
-// rather than lost in the inbox — and it is never converted into a duplicate.
+// reached the point where a person must take over: they want to order, asked
+// for a call, have a complaint (credit note, refund, delivery, quality), are
+// negotiating price, or engaged and then went quiet. This lands it on the
+// leads screen as an "ai_generated" lead linked to the customer's SAP
+// account, with a follow-up task and a notification for the account's agent
+// (admins/managers when nobody owns the account) — so it is worked, not lost
+// in the inbox — and it is never converted into a duplicate.
+//
+// `outcome: "closed"` records a closure instead (business closed, wrong
+// number): a dead lead with the reason, so the account is filtered out of
+// future lists. No task, no notification.
 //
 // Idempotent per conversation: a second hand-off on the same thread (or the
 // same open customer) updates the lead instead of creating another.
+const AI_PRIORITY_TAGS = { high: "hot", medium: "warm", low: "cold" };
+
+const systemSenderFor = async (fallbackId) => {
+  if (process.env.SYSTEM_USER_ID) return process.env.SYSTEM_USER_ID;
+  const admin = await User.findOne({ role: "admin", deactivated: { $ne: true } }).select("_id").lean();
+  return admin?._id || fallbackId;
+};
+
+const notifyAiHandoff = async (lead, task, { reasonLabel, priority, name }) => {
+  try {
+    const NotificationService = require("../utils/notificationService");
+    const recipients = lead.assignedTo
+      ? [lead.assignedTo]
+      : (
+          await User.find({ role: { $in: ["admin", "sales_manager"] }, deactivated: { $ne: true } })
+            .select("_id")
+            .lean()
+        ).map((u) => u._id);
+    if (!recipients.length) return;
+    const sender = await systemSenderFor(recipients[0]);
+    const urgent = priority === "high" ? "🔴 " : "";
+    for (const recipient of recipients) {
+      await NotificationService.createNotification({
+        recipient,
+        sender,
+        type: "lead_assigned",
+        title: `${urgent}AI lead: ${name}`,
+        message: `${reasonLabel}${lead.assignedTo ? "" : " — nobody owns this account, please assign it."}`,
+        relatedLead: lead._id,
+        relatedTask: task?._id || null,
+        allowSelfNotify: true,
+      });
+    }
+  } catch (err) {
+    console.warn("[ai-handoff] notification failed:", err.message);
+  }
+};
+
 exports.upsertAiHandoffLead = async (req, res) => {
   try {
     const {
@@ -1960,8 +2005,19 @@ exports.upsertAiHandoffLead = async (req, res) => {
       name,
       phoneNumber,
       email,
+      outcome = "handoff",
       reason,
       reasonLabel,
+      priority = "medium",
+      intent,
+      complaintTopic,
+      products,
+      silent,
+      salesStage,
+      campaignId,
+      campaignName,
+      priceSheet,
+      account,
       summary,
       conversation,
       threadId,
@@ -1971,6 +2027,7 @@ exports.upsertAiHandoffLead = async (req, res) => {
     if (!name && !cardCode) {
       return res.status(400).json({ success: false, message: "name or cardCode is required" });
     }
+    const isClosure = outcome === "closed";
 
     // Resolve the existing account: by CardCode first, then by phone.
     let customer = null;
@@ -2000,12 +2057,13 @@ exports.upsertAiHandoffLead = async (req, res) => {
           direction: m.direction === "inbound" ? "inbound" : "outbound",
           text: String(m.text || "").slice(0, 2000),
           at: m.at ? new Date(m.at) : undefined,
+          author: m.author ? String(m.author).slice(0, 20) : undefined,
         }))
       : [];
 
     const stamp = at.toLocaleString("fr-FR", { timeZone: "Europe/Paris" });
     const noteEntry =
-      `[${stamp}] AI agent hand-off — ${reasonLabel || reason || "needs a person"}` +
+      `[${stamp}] ${isClosure ? "AI agent closed the conversation" : "AI agent hand-off"} — ${reasonLabel || reason || "needs a person"}` +
       (summary ? `\n${summary}` : "");
 
     const openQuery = {
@@ -2025,38 +2083,105 @@ exports.upsertAiHandoffLead = async (req, res) => {
         company: customer?.CardName || name,
         email: (email || customer?.Email || "").toLowerCase() || undefined,
         phoneNumber: phoneNumber || customer?.phoneNumber,
-        status: "qualified",
+        status: isClosure ? "dead" : "qualified",
         sourceType: "ai_generated",
         assignedTo: customer?.assignedTo || undefined,
         notes: noteEntry,
       });
     } else {
       lead.notes = lead.notes ? `${noteEntry}\n\n${lead.notes}` : noteEntry;
+      if (isClosure) lead.status = "dead";
+      if (!lead.assignedTo && customer?.assignedTo) lead.assignedTo = customer.assignedTo;
     }
 
     lead.sapCardCode = sapCardCode;
     if (customer?._id) lead.existingCustomer = customer._id;
-    lead.tags = [...new Set([...(lead.tags || []), reason === "ready_to_order" ? "hot" : "warm"])];
+    if (!isClosure) {
+      const tags = new Set([...(lead.tags || [])].filter((t) => !["hot", "warm", "cold"].includes(t)));
+      tags.add(AI_PRIORITY_TAGS[priority] || "warm");
+      if (reason === "complaint") tags.add("priority");
+      lead.tags = [...tags];
+    }
     lead.aiHandoff = {
       reason,
       reasonLabel,
+      outcome: isClosure ? "closed" : "handoff",
+      priority: isClosure ? "low" : priority,
+      intent,
+      complaintTopic,
+      products: Array.isArray(products) ? products.slice(0, 10).map(String) : [],
+      silent: Boolean(silent),
+      salesStage,
+      campaignId,
+      campaignName,
+      priceSheet: Array.isArray(priceSheet) ? priceSheet.slice(0, 15) : [],
+      account: account || undefined,
       threadId: threadId ? String(threadId) : lead.aiHandoff?.threadId,
       summary,
       conversation: convo,
       handedOffAt: at,
+      taskId: lead.aiHandoff?.taskId,
     };
-    lead.nextFollowUp = lead.nextFollowUp || at;
+    if (!isClosure) {
+      // Pull the follow-up forward to now; never push an earlier one back.
+      lead.nextFollowUp = lead.nextFollowUp && lead.nextFollowUp < at ? lead.nextFollowUp : at;
+    }
 
     await lead.save();
+
+    // A task for whoever owns the account: complaints and orders are due now,
+    // the rest within the working day.
+    let task = null;
+    if (!isClosure && lead.assignedTo) {
+      const existing = lead.aiHandoff.taskId
+        ? await Task.findOne({ _id: lead.aiHandoff.taskId, status: { $in: ["pending", "pending_approval"] } })
+        : null;
+      const due = priority === "high" ? at : new Date(at.getTime() + 4 * 3600 * 1000);
+      const title = `AI lead — ${reasonLabel || reason}: ${lead.company || lead.fullName}`.slice(0, 200);
+      const description = summary || reasonLabel || "";
+      if (existing) {
+        existing.title = title;
+        existing.description = description;
+        existing.priority = priority;
+        existing.dueDate = due;
+        await existing.save();
+        task = existing;
+      } else {
+        task = await Task.create({
+          title,
+          description,
+          leadId: lead._id,
+          priority,
+          type: ["callback", "warm_no_reply", "negotiation_no_reply", "missed_window"].includes(reason) ? "call" : "follow-up",
+          dueDate: due,
+          assignedTo: lead.assignedTo,
+          createdBy: await systemSenderFor(lead.assignedTo),
+          relatedCustomer: customer?._id,
+        });
+        lead.tasks = [...(lead.tasks || []), task._id];
+        lead.aiHandoff.taskId = task._id;
+        await lead.save();
+      }
+    }
+
+    if (!isClosure) {
+      await notifyAiHandoff(lead, task, {
+        reasonLabel: reasonLabel || reason || "Needs a person",
+        priority,
+        name: lead.company || lead.fullName,
+      });
+    }
 
     res.status(created ? 201 : 200).json({
       success: true,
       data: {
         leadId: lead._id,
         created,
+        status: lead.status,
         sapCardCode: lead.sapCardCode,
         existingCustomer: Boolean(customer),
         assignedTo: lead.assignedTo || null,
+        taskId: task?._id || null,
       },
     });
   } catch (error) {
@@ -2066,6 +2191,212 @@ exports.upsertAiHandoffLead = async (req, res) => {
       message: "Error creating AI hand-off lead",
       error: error.message,
     });
+  }
+};
+
+// Uber Eats stores HalalSales already knows — for hfs-intelligence, so the
+// catalogue campaign never emails an existing customer or lead. Uses the same
+// matching as the Uber Eats Scraper page (utils/prospectContext), plus every
+// customer and lead email. Service key.
+exports.getAiProspectExclusions = async (req, res) => {
+  try {
+    const { existingUeMatches } = require("../utils/prospectContext");
+    const { ueCollections } = require("../utils/ubereatsDb");
+    const matched = [...(await existingUeMatches()).keys()];
+    let assigned = [];
+    try {
+      const c = await ueCollections();
+      assigned = await c.restaurants.distinct("uuid", { "assignment.agentId": { $exists: true } });
+    } catch (err) {
+      console.warn("[ai-prospect-exclusions] Uber Eats stores unavailable:", err.message);
+    }
+    const [customerEmails, leadEmails] = await Promise.all([
+      Customer.distinct("Email", { Email: { $nin: [null, ""] } }),
+      Lead.distinct("email", { email: { $nin: [null, ""] } }),
+    ]);
+    const emails = [...new Set([...customerEmails, ...leadEmails].map((e) => String(e).trim().toLowerCase()).filter((e) => e.includes("@")))];
+    res.json({ success: true, data: { uuids: [...new Set([...matched, ...assigned])], emails } });
+  } catch (error) {
+    console.error("Error computing AI prospect exclusions:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// A prospect (an Uber Eats restaurant) answered the AI's catalogue email:
+// a lead for the agent who covers their postcode (the Uber Eats Scraper's
+// "Assign postal codes"), linked to the store(s) exactly like the scraper's
+// own assign — so the page shows them as taken and never duplicates the lead
+// — with the conversation, a task and a notification. Service key.
+exports.upsertAiProspectLead = async (req, res) => {
+  try {
+    const {
+      name, email, phoneNumber, uberEatsUuids = [], brands = [], categories = [], postalCode, address,
+      registrationNumber, channel, reason, reasonLabel, priority = "medium", intent, products,
+      campaignId, campaignName, summary, conversation, threadId, handedOffAt,
+    } = req.body || {};
+    if (!name && !email) return res.status(400).json({ success: false, message: "name or email is required" });
+
+    const { ueCollections } = require("../utils/ubereatsDb");
+    let c = null;
+    let stores = [];
+    try {
+      c = await ueCollections();
+      stores = uberEatsUuids.length
+        ? await c.restaurants.find({ uuid: { $in: uberEatsUuids } }, { projection: { uuid: 1, title: 1, url: 1, assignment: 1, menuItemCount: 1, legal: 1 } }).toArray()
+        : [];
+    } catch (err) {
+      console.warn("[ai-prospect-handoff] Uber Eats stores unavailable:", err.message);
+    }
+
+    // Who follows it up: whoever already has the store, else the agent whose
+    // postal codes cover it.
+    let agentId = stores.find((s) => s.assignment?.agentId)?.assignment.agentId || null;
+    if (!agentId && postalCode) {
+      const agent = await User.findOne({
+        role: { $in: ["sales_agent", "sales_manager"] },
+        deactivated: { $ne: true },
+        assignedPostalCodes: String(postalCode),
+      })
+        .sort({ role: -1, firstName: 1 }) // sales_agent before sales_manager
+        .select("_id")
+        .lean();
+      agentId = agent?._id || null;
+    }
+
+    const at = handedOffAt ? new Date(handedOffAt) : new Date();
+    const convo = Array.isArray(conversation)
+      ? conversation.slice(-30).map((m) => ({
+          direction: m.direction === "inbound" ? "inbound" : "outbound",
+          text: String(m.text || "").slice(0, 2000),
+          at: m.at ? new Date(m.at) : undefined,
+          author: m.author ? String(m.author).slice(0, 20) : undefined,
+        }))
+      : [];
+    const stamp = at.toLocaleString("fr-FR", { timeZone: "Europe/Paris" });
+    const noteEntry = `[${stamp}] AI catalogue reply (${channel || "email"}) — ${reasonLabel || reason || "replied"}${summary ? `\n${summary}` : ""}`;
+
+    let lead = await Lead.findOne({
+      status: { $nin: ["converted", "dead"] },
+      $or: [
+        ...(uberEatsUuids.length ? [{ relatedUberEatsUuid: { $in: uberEatsUuids } }] : []),
+        ...(threadId ? [{ "aiHandoff.threadId": String(threadId) }] : []),
+      ],
+    });
+    const created = !lead;
+    const first = stores[0] || {};
+    const brandList = brands.length ? brands : [name];
+    if (!lead) {
+      lead = new Lead({
+        fullName: name || brandList[0],
+        company: brandList[0],
+        email: (email || "").toLowerCase() || undefined,
+        phoneNumber: phoneNumber || undefined,
+        status: "qualified",
+        sourceType: "ai_generated",
+        assignedTo: agentId || undefined,
+        relatedUberEatsUuid: uberEatsUuids[0],
+        restaurantData: {
+          name: brandList[0],
+          postalCode: postalCode || "",
+          menuItemsCount: first.menuItemCount || 0,
+          contactInfo: { email: email || "", phone: phoneNumber || "", address: address || "" },
+          url: first.url,
+          registrationNumber: registrationNumber || undefined,
+          registry: first.legal?.registry || undefined,
+        },
+        notes: noteEntry,
+      });
+    } else {
+      lead.notes = lead.notes ? `${noteEntry}\n\n${lead.notes}` : noteEntry;
+      if (!lead.assignedTo && agentId) lead.assignedTo = agentId;
+      if (lead.sourceType !== "ai_generated" && lead.status === "new") lead.status = "qualified";
+    }
+    const tags = new Set([...(lead.tags || [])].filter((t) => !["hot", "warm", "cold"].includes(t)));
+    tags.add(AI_PRIORITY_TAGS[priority] || "warm");
+    lead.tags = [...tags];
+    lead.aiHandoff = {
+      reason,
+      reasonLabel,
+      outcome: "handoff",
+      priority,
+      intent,
+      products: Array.isArray(products) ? products.slice(0, 10).map(String) : [],
+      silent: false,
+      salesStage: "prospect_replied",
+      campaignId,
+      campaignName,
+      threadId: threadId ? String(threadId) : lead.aiHandoff?.threadId,
+      summary: [summary, brandList.length > 1 ? `Brands: ${brandList.join(", ")}` : "", categories.length ? `Cuisine: ${categories.join(", ")}` : ""]
+        .filter(Boolean)
+        .join("\n"),
+      conversation: convo,
+      handedOffAt: at,
+      taskId: lead.aiHandoff?.taskId,
+    };
+    lead.nextFollowUp = lead.nextFollowUp && lead.nextFollowUp < at ? lead.nextFollowUp : at;
+    await lead.save();
+
+    // Mark the store(s) as taken on the Uber Eats Scraper page, as its own assign does.
+    if (c && agentId) {
+      const agent = await User.findById(agentId).select("firstName lastName email").lean();
+      const agentName = `${agent?.firstName || ""} ${agent?.lastName || ""}`.trim() || agent?.email || "Agent";
+      await c.restaurants.updateMany(
+        { uuid: { $in: uberEatsUuids }, "assignment.agentId": { $exists: false } },
+        { $set: { assignment: { agentId, agentName, assignedByName: "AI catalogue reply", assignedAt: at, priority, leadId: lead._id } } }
+      );
+      try {
+        require("../utils/prospectContext").invalidate?.();
+      } catch {
+        /* cache refreshes on its own */
+      }
+    }
+
+    let task = null;
+    if (lead.assignedTo) {
+      const existing = lead.aiHandoff.taskId
+        ? await Task.findOne({ _id: lead.aiHandoff.taskId, status: { $in: ["pending", "pending_approval"] } })
+        : null;
+      const due = priority === "high" ? at : new Date(at.getTime() + 4 * 3600 * 1000);
+      const title = `AI catalogue reply — ${reasonLabel || reason}: ${brandList[0]}`.slice(0, 200);
+      if (existing) {
+        Object.assign(existing, { title, description: lead.aiHandoff.summary, priority, dueDate: due });
+        await existing.save();
+        task = existing;
+      } else {
+        task = await Task.create({
+          title,
+          description: lead.aiHandoff.summary,
+          leadId: lead._id,
+          priority,
+          type: "call",
+          dueDate: due,
+          assignedTo: lead.assignedTo,
+          createdBy: await systemSenderFor(lead.assignedTo),
+        });
+        lead.tasks = [...(lead.tasks || []), task._id];
+        lead.aiHandoff.taskId = task._id;
+        await lead.save();
+      }
+    }
+
+    await notifyAiHandoff(lead, task, {
+      reasonLabel: `${reasonLabel || "Replied to the catalogue"}${postalCode ? ` (${postalCode})` : ""}`,
+      priority,
+      name: brandList[0],
+    });
+
+    let assignedToName = null;
+    if (lead.assignedTo) {
+      const u = await User.findById(lead.assignedTo).select("firstName lastName").lean();
+      assignedToName = `${u?.firstName || ""} ${u?.lastName || ""}`.trim() || null;
+    }
+    res.status(created ? 201 : 200).json({
+      success: true,
+      data: { leadId: lead._id, created, assignedTo: lead.assignedTo || null, assignedToName, taskId: task?._id || null },
+    });
+  } catch (error) {
+    console.error("Error upserting AI prospect lead:", error);
+    res.status(500).json({ success: false, message: "Error creating AI prospect lead", error: error.message });
   }
 };
 

@@ -26,6 +26,7 @@ const NotificationSchema = new Schema({
       "rfq_needs_attention",    // AI bot flagged an RFQ for admin approval
       "rfq_stalled",            // Negotiation stalled — human intervention needed
       "rfq_accepted",           // Admin accepted a vendor quotation
+      "lead_assigned",          // A lead (e.g. an AI WhatsApp hand-off) needs this agent
     ],
     required: true,
   },
