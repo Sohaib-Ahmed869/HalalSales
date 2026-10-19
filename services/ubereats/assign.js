@@ -130,15 +130,16 @@ async function assignStores(c, { uuids, agent, by, priority = "medium", source =
   return { assigned, skipped };
 }
 
-/** One notification to the agent, same wording as the old Postal Scraping assign. */
-async function notifyAgent(agent, byId, count) {
+/** One notification to the agent, same wording as the old Postal Scraping assign (kind "auto" = auto-assign). */
+async function notifyAgent(agent, byId, count, kind = "manual") {
+  const auto = kind === "auto";
   try {
     await Notification.create({
       recipient: agent._id,
       sender: byId,
       type: "restaurant_assigned",
-      title: "New Restaurants Assigned",
-      message: `${count} restaurant${count > 1 ? "s have" : " has"} been assigned to you. Please go to the Leads Management screen to view and manage these leads.`,
+      title: auto ? "New Restaurants Auto-Assigned" : "New Restaurants Assigned",
+      message: `${count} restaurant${count > 1 ? "s have" : " has"} been ${auto ? "auto-assigned" : "assigned"} to you. Please go to the Leads Management screen to view and manage these leads.`,
     });
   } catch (error) {
     console.warn("[assign] notification failed:", error.message);

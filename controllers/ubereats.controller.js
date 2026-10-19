@@ -13,7 +13,7 @@ const mongoose = require("mongoose");
 const { ueCollections, UBEREATS_DB_NAME } = require("../utils/ubereatsDb");
 const { DEFAULT_JOB_OPTIONS, MODES, BUSY_STATUSES, parsePostalCodes, jobOptionsFrom, toInt, enqueueJob } = require("../services/ubereats/queue");
 const { existingUeMatches, invalidate } = require("../utils/prospectContext");
-const { assignStores, dropStaleAssignments, agentName } = require("../services/ubereats/assign");
+const { assignStores, dropStaleAssignments, notifyAgent, agentName } = require("../services/ubereats/assign");
 const User = require("../models/User");
 const Lead = require("../models/Lead");
 
@@ -521,6 +521,135 @@ exports.assignRestaurants = handle(async (req, res, c) => {
   }
   const { assigned, skipped } = await assignStores(c, { uuids: list, agent, by: req.user, priority, source: "the Uber Eats Scraper" });
   res.json({ assigned: assigned.length, leads: assigned, skipped, agent: { id: String(agent._id), name: agentName(agent) } });
+});
+
+// ---------- agents' postal codes + auto-assign (as on the old Postal Scraping page) ----------
+// An agent's postal codes are User.assignedPostalCodes, the same field the old Postal Scraping page
+// writes, so both pages show the same codes. Codes are "located in" codes (where the store is).
+
+const POSTAL_RE = /^\d{5}$/;
+const AUTO_ASSIGN_MAX = 200;
+
+/** Stores that can be given to an agent: located in `codes`, not assigned, not already a customer or a lead. */
+async function prospectFilter(codes) {
+  const existing = [...(await existingUeMatches()).keys()];
+  return { postalCode: { $in: codes }, "assignment.agentId": { $exists: false }, uuid: { $nin: existing } };
+}
+
+/**
+ * GET /api/ubereats/agent-postal-codes
+ * Active agents and sales managers with their postal codes, plus per located postal code how many
+ * stores are still free to assign (not assigned, not a customer or a lead).
+ */
+exports.listAgentPostalCodes = handle(async (req, res, c) => {
+  const users = await User.find({ role: { $in: ["sales_agent", "sales_manager"] }, deactivated: { $ne: true } })
+    .select("firstName lastName email role assignedPostalCodes lastPostalCodeAssignment lastAutoAssignment")
+    .sort({ firstName: 1, lastName: 1 })
+    .lean();
+  // Assigned stores were dropped when their lead was deleted on the Leads page: count them as free again.
+  const assigned = await c.restaurants.find({ "assignment.agentId": { $exists: true } }, { projection: { uuid: 1, assignment: 1 } }).toArray();
+  if ((await dropStaleAssignments(c, assigned)).length) invalidate();
+  const existing = [...(await existingUeMatches()).keys()];
+  const counts = await c.restaurants
+    .aggregate([
+      { $match: { postalCode: { $exists: true }, uuid: { $nin: existing } } },
+      { $group: { _id: "$postalCode", stores: { $sum: 1 }, free: { $sum: { $cond: [{ $ifNull: ["$assignment.agentId", false] }, 0, 1] } } } },
+      { $sort: { _id: 1 } },
+    ])
+    .toArray();
+  const searched = await c.postalCodes.find({}, { projection: { code: 1 } }).toArray();
+  res.json({
+    agents: users.map((u) => ({
+      id: String(u._id),
+      name: agentName(u),
+      email: u.email,
+      role: u.role,
+      postalCodes: (u.assignedPostalCodes || []).filter(Boolean),
+      lastPostalCodeAssignment: u.lastPostalCodeAssignment || null,
+      lastAutoAssignment: u.lastAutoAssignment || null,
+    })),
+    codes: counts.map((r) => ({ code: r._id, prospects: r.stores, free: r.free })),
+    searched: searched.map((p) => p.code).sort(),
+  });
+});
+
+/**
+ * PUT /api/ubereats/agent-postal-codes/:agentId { postalCodes[] }  (admin / sales_manager)
+ * Replaces the agent's postal codes (an empty list removes them all), like the old page's assign.
+ */
+exports.setAgentPostalCodes = handle(async (req, res) => {
+  const { agentId } = req.params;
+  const raw = Array.isArray(req.body?.postalCodes) ? req.body.postalCodes : [];
+  const codes = [...new Set(raw.map((x) => String(x).trim()))];
+  const invalid = codes.filter((x) => !POSTAL_RE.test(x));
+  if (invalid.length) return res.status(400).json({ message: `Not a 5-digit postal code: ${invalid.join(", ")}` });
+  const agent = mongoose.isValidObjectId(agentId) ? await User.findById(agentId).select("firstName lastName email role deactivated").lean() : null;
+  if (!agent || !["sales_agent", "sales_manager"].includes(agent.role) || agent.deactivated) {
+    return res.status(400).json({ message: "Choose an active sales agent or sales manager" });
+  }
+  codes.sort();
+  await User.updateOne({ _id: agent._id }, { $set: { assignedPostalCodes: codes, lastPostalCodeAssignment: new Date() } });
+  res.json({ agent: { id: String(agent._id), name: agentName(agent) }, postalCodes: codes });
+});
+
+/**
+ * POST /api/ubereats/restaurants/auto-assign { perAgent, priority }  (admin / sales_manager)
+ * Like the old page's auto-assign: every agent with postal codes gets up to `perAgent` free stores
+ * located in those codes, most recently seen first. Each one is assigned exactly like "Assign to agent"
+ * (a lead on the Leads page, one notification per agent). Agents sharing a code never get the same store.
+ */
+exports.autoAssignRestaurants = handle(async (req, res, c) => {
+  const perAgent = Number.parseInt(req.body?.perAgent, 10);
+  if (!Number.isFinite(perAgent) || perAgent < 1 || perAgent > AUTO_ASSIGN_MAX) {
+    return res.status(400).json({ message: `Restaurants per agent must be between 1 and ${AUTO_ASSIGN_MAX}` });
+  }
+  const priority = req.body?.priority || "medium";
+  const agents = await User.find({
+    role: { $in: ["sales_agent", "sales_manager"] },
+    deactivated: { $ne: true },
+    assignedPostalCodes: { $exists: true, $ne: [] },
+  })
+    .select("firstName lastName email role assignedPostalCodes")
+    .sort({ firstName: 1, lastName: 1 })
+    .lean();
+  if (!agents.length) return res.status(400).json({ message: "No agent has postal codes yet: assign postal codes first" });
+
+  const results = [];
+  for (const agent of agents) {
+    const codes = (agent.assignedPostalCodes || []).filter((x) => POSTAL_RE.test(String(x)));
+    const done = [];
+    const skipped = [];
+    const tried = new Set();
+    // assignStores may skip a store (taken a moment ago, lead failed): top up from the next ones.
+    while (done.length < perAgent) {
+      const filter = await prospectFilter(codes);
+      if (tried.size) filter.uuid.$nin = [...filter.uuid.$nin, ...tried];
+      const batch = await c.restaurants
+        .find(filter, { projection: { uuid: 1 } })
+        .sort({ lastSeenAt: -1, uuid: 1 })
+        .limit(perAgent - done.length)
+        .toArray();
+      if (!batch.length) break;
+      batch.forEach((s) => tried.add(s.uuid));
+      const r = await assignStores(c, { uuids: batch.map((s) => s.uuid), agent, by: req.user, priority, source: "the Uber Eats Scraper (auto-assign)", notify: false });
+      done.push(...r.assigned);
+      skipped.push(...r.skipped);
+    }
+    if (done.length) {
+      await notifyAgent(agent, req.user?._id || req.user?.id, done.length, "auto");
+      await User.updateOne({ _id: agent._id }, { $set: { lastAutoAssignment: new Date() } });
+    }
+    results.push({
+      agentId: String(agent._id),
+      agentName: agentName(agent),
+      postalCodes: codes,
+      assigned: done.length,
+      stores: done,
+      skipped,
+      note: done.length ? "" : "No free restaurants left in this agent's postal codes",
+    });
+  }
+  res.json({ agents: results.length, assigned: results.reduce((n, r) => n + r.assigned, 0), results });
 });
 
 /** The agent has done something with the lead: moved its status, added a task or a follow-up date. */
