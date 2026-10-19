@@ -37,6 +37,11 @@ router.post("/jobs/:id/retry", canManage, controller.retryJob);
 router.get("/agents", controller.listAgents);
 router.post("/restaurants/assign", checkRole(["admin", "sales_manager"]), controller.assignRestaurants);
 router.post("/restaurants/unassign", checkRole(["admin", "sales_manager"]), controller.unassignRestaurants);
+// Agents' postal codes (User.assignedPostalCodes, shared with the old Postal Scraping page) and
+// auto-assign: each agent gets N free stores located in their codes, as leads.
+router.get("/agent-postal-codes", controller.listAgentPostalCodes);
+router.put("/agent-postal-codes/:agentId", checkRole(["admin", "sales_manager"]), controller.setAgentPostalCodes);
+router.post("/restaurants/auto-assign", checkRole(["admin", "sales_manager"]), controller.autoAssignRestaurants);
 
 router.get("/restaurants", controller.listRestaurants);
 router.get("/restaurants/filters", controller.getRestaurantFilters);
