@@ -2,11 +2,23 @@
 const SalesOrder = require("../models/SalesOrder");
 const Quotation = require("../models/Quotation");
 const Invoice = require("../models/Invoice");
+const CreditNote = require("../models/CreditNotes");
 const Item = require("../models/item");
 const User = require("../models/User");
 const Customer = require("../models/Customer");
 const Lead = require("../models/Lead");
 const mongoose = require("mongoose");
+
+// Credit notes are deducted from invoiced sales, as SAP does (Idris, 23 Oct:
+// 1-21 Oct SAP = invoices 1,103,132 - 17 credit notes 6,783 = 1,096,349).
+const NET = { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] };
+async function creditNoteTotals(match) {
+    const [r] = await CreditNote.aggregate([
+        { $match: match },
+        { $group: { _id: null, count: { $sum: 1 }, totalValue: { $sum: NET }, totalVat: { $sum: { $ifNull: ["$VatSum", 0] } } } },
+    ]);
+    return r || { count: 0, totalValue: 0, totalVat: 0 };
+}
 
 // Helper: Get date range from query params (defaults to this week)
 // IMPORTANT: parses YYYY-MM-DD strings explicitly as UTC to avoid timezone
@@ -302,6 +314,7 @@ exports.getSummary = async (req, res) => {
             Invoice.distinct("CardCode", invMatch),
             Invoice.distinct("CardCode", invPrevMatch),
         ]);
+        const [creditNotes, prevCreditNotes] = await Promise.all([creditNoteTotals(invMatch), creditNoteTotals(invPrevMatch)]);
 
         const cur = {
             orders: orderStats[0] || { count: 0, totalValue: 0, avgOrderValue: 0, totalVat: 0, openOrders: 0, closedOrders: 0, syncedCount: 0, unsyncedCount: 0 },
@@ -313,6 +326,16 @@ exports.getSummary = async (req, res) => {
             invoices: prevInvoiceStats[0] || { count: 0, totalValue: 0 },
             quotations: prevQuotationStats[0] || { count: 0, totalValue: 0 },
         };
+        // Invoiced sales net of credit notes; the gross figure and the credit
+        // notes are returned alongside so the card can show both.
+        const outstandingAmount = (cur.invoices.totalValue || 0) - (cur.invoices.totalPaid || 0);
+        cur.invoices.grossValue = cur.invoices.totalValue || 0;
+        cur.invoices.creditNotes = { count: creditNotes.count, totalValue: Math.round(creditNotes.totalValue * 100) / 100 };
+        cur.invoices.totalValue = cur.invoices.grossValue - creditNotes.totalValue;
+        cur.invoices.totalVat = (cur.invoices.totalVat || 0) - creditNotes.totalVat;
+        cur.invoices.documentCount = cur.invoices.count + creditNotes.count;
+        cur.invoices.avgInvoiceValue = cur.invoices.count ? cur.invoices.totalValue / cur.invoices.count : 0;
+        prev.invoices.totalValue = (prev.invoices.totalValue || 0) - prevCreditNotes.totalValue;
 
         res.status(200).json({
             success: true,
@@ -328,7 +351,7 @@ exports.getSummary = async (req, res) => {
                 },
                 invoices: {
                     ...cur.invoices,
-                    outstandingAmount: (cur.invoices.totalValue || 0) - (cur.invoices.totalPaid || 0),
+                    outstandingAmount,
                     change: {
                         count: pctChange(cur.invoices.count, prev.invoices.count),
                         value: pctChange(cur.invoices.totalValue, prev.invoices.totalValue),
@@ -373,7 +396,7 @@ exports.getSalesChart = async (req, res) => {
         const orderMatch = { ...dateMatch, ...agentMatch(scope) };
         const invMatch = { ...dateMatch, ...invoiceAgentMatch(scope) };
 
-        const [ordersByDay, invoicesByDay] = await Promise.all([
+        const [ordersByDay, invoicesByDay, creditNotesByDay] = await Promise.all([
             SalesOrder.aggregate([
                 { $match: orderMatch },
                 {
@@ -396,6 +419,16 @@ exports.getSalesChart = async (req, res) => {
                 },
                 { $sort: { _id: 1 } },
             ]),
+            CreditNote.aggregate([
+                { $match: invMatch },
+                {
+                    $group: {
+                        _id: { $dateToString: { format: "%Y-%m-%d", date: "$DocDate", timezone: "UTC" } },
+                        creditNoteCount: { $sum: 1 },
+                        creditNoteValue: { $sum: NET },
+                    },
+                },
+            ]),
         ]);
 
         // Merge into a unified daily dataset
@@ -403,7 +436,7 @@ exports.getSalesChart = async (req, res) => {
         const current = new Date(fromDate);
         while (current <= toDate) {
             const key = current.toISOString().split("T")[0];
-            dayMap[key] = { date: key, orderCount: 0, orderValue: 0, invoiceCount: 0, invoiceValue: 0 };
+            dayMap[key] = { date: key, orderCount: 0, orderValue: 0, invoiceCount: 0, invoiceValue: 0, creditNoteCount: 0, creditNoteValue: 0 };
             current.setDate(current.getDate() + 1);
         }
         ordersByDay.forEach((d) => {
@@ -415,7 +448,15 @@ exports.getSalesChart = async (req, res) => {
         invoicesByDay.forEach((d) => {
             if (dayMap[d._id]) {
                 dayMap[d._id].invoiceCount = d.invoiceCount;
-                dayMap[d._id].invoiceValue = d.invoiceValue;
+                dayMap[d._id].invoiceValue += d.invoiceValue;
+            }
+        });
+        // invoiceValue is net of that day's credit notes.
+        creditNotesByDay.forEach((d) => {
+            if (dayMap[d._id]) {
+                dayMap[d._id].creditNoteCount = d.creditNoteCount;
+                dayMap[d._id].creditNoteValue = d.creditNoteValue;
+                dayMap[d._id].invoiceValue -= d.creditNoteValue;
             }
         });
 
@@ -443,8 +484,15 @@ exports.getTopCustomers = async (req, res) => {
             return res.status(403).json({ success: false, message: "Access denied" });
         }
 
-        const topCustomers = await Invoice.aggregate([
-            { $match: { DocDate: { $gte: fromDate, $lte: toDate }, ...invoiceAgentMatch(scope) } },
+        const custMatch = { DocDate: { $gte: fromDate, $lte: toDate }, ...invoiceAgentMatch(scope) };
+        const creditByCustomer = new Map(
+            (await CreditNote.aggregate([
+                { $match: custMatch },
+                { $group: { _id: "$CardCode", cardName: { $first: "$CardName" }, value: { $sum: NET }, count: { $sum: 1 } } },
+            ])).map((c) => [c._id, c])
+        );
+        const ranked = await Invoice.aggregate([
+            { $match: custMatch },
             {
                 $addFields: {
                     netTotal: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] },
@@ -460,8 +508,6 @@ exports.getTopCustomers = async (req, res) => {
                     lastInvoiceDate: { $max: "$DocDate" },
                 },
             },
-            { $sort: { totalRevenue: -1 } },
-            { $limit: limit },
             {
                 $project: {
                     _id: 0,
@@ -477,6 +523,15 @@ exports.getTopCustomers = async (req, res) => {
                 },
             },
         ]);
+        const round2 = (n) => Math.round(n * 100) / 100;
+        const topCustomers = ranked
+            .map((c) => {
+                const cn = creditByCustomer.get(c.cardCode);
+                if (!cn) return c;
+                return { ...c, grossRevenue: c.totalRevenue, creditNotes: round2(cn.value), creditNoteCount: cn.count, totalRevenue: round2(c.totalRevenue - cn.value) };
+            })
+            .sort((a, b) => b.totalRevenue - a.totalRevenue)
+            .slice(0, limit);
 
         res.status(200).json({ success: true, data: topCustomers });
     } catch (error) {
@@ -542,10 +597,40 @@ exports.getTopItems = async (req, res) => {
                 },
             },
             { $sort: { totalRevenue: -1 } },
-            { $limit: limit },
+            ...(source === "orders" ? [{ $limit: limit }] : []),
         ]);
 
-        res.status(200).json({ success: true, data: topItems });
+        if (source === "orders") return res.status(200).json({ success: true, data: topItems });
+
+        const credited = new Map(
+            (await CreditNote.aggregate([
+                { $match: { DocDate: { $gte: fromDate, $lte: toDate }, ...scopedMatch } },
+                { $unwind: "$DocumentLines" },
+                {
+                    $group: {
+                        _id: "$DocumentLines.ItemCode",
+                        quantity: { $sum: { $ifNull: ["$DocumentLines.Quantity", 0] } },
+                        revenue: { $sum: { $ifNull: ["$DocumentLines.LineTotal", 0] } },
+                    },
+                },
+            ])).map((c) => [c._id, c])
+        );
+        const netItems = topItems
+            .map((it) => {
+                const cn = credited.get(it.itemCode);
+                if (!cn) return it;
+                return {
+                    ...it,
+                    totalQuantity: it.totalQuantity - cn.quantity,
+                    totalRevenue: Math.round((it.totalRevenue - cn.revenue) * 100) / 100,
+                    creditedQuantity: cn.quantity,
+                    creditedRevenue: Math.round(cn.revenue * 100) / 100,
+                };
+            })
+            .sort((a, b) => b.totalRevenue - a.totalRevenue)
+            .slice(0, limit);
+
+        res.status(200).json({ success: true, data: netItems });
     } catch (error) {
         console.error("Error in getTopItems:", error);
         res.status(500).json({ success: false, message: "Error fetching top items", error: error.message });
