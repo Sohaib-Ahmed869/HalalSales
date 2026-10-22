@@ -316,18 +316,36 @@ exports.getNextDocNumFromSeries = async (seriesCode = null) => {
   }
 };
 
+// SAP B1 document Comments hold 254 characters. A longer comment (delivery
+// instructions, 23 Oct: quotation 3422 had 289) keeps its first 254 in
+// Comments and the rest goes at the front of U_Notes, so nothing is lost.
+const SAP_COMMENTS_MAX = 254;
+function splitComments(comments, notes) {
+  const text = String(comments || "");
+  if (text.length <= SAP_COMMENTS_MAX) return { Comments: text, U_Notes: notes || "" };
+  const cut = text.lastIndexOf(" ", SAP_COMMENTS_MAX - 4);
+  const at = cut > SAP_COMMENTS_MAX - 60 ? cut : SAP_COMMENTS_MAX - 4;
+  const rest = text.slice(at).trim();
+  return {
+    Comments: `${text.slice(0, at).trim()} ...`,
+    U_Notes: `Comments (suite): ${rest}${notes ? ` | ${notes}` : ""}`.slice(0, SAP_COMMENTS_MAX),
+  };
+}
+exports.splitComments = splitComments;
+
 // Format order data specifically for UPDATES (much more restrictive)
 exports.formatOrderForSAPUpdate = async (order) => {
   // For updates, ONLY send fields that SAP B1 allows updating
   // CRITICAL: Never include CardCode in updates - SAP doesn't allow changing customer
+  const split = splitComments(order.Comments, order.U_Notes);
   const sapUpdateData = {
-    Comments: order.Comments || "",
+    Comments: split.Comments,
     DocumentLines: []
   };
 
   // ✅ ADD: Only include U_Notes if it exists
-  if (order.U_Notes) {
-    sapUpdateData.U_Notes = order.U_Notes;
+  if (split.U_Notes) {
+    sapUpdateData.U_Notes = split.U_Notes;
   }
 
   // Process document lines with ONLY updateable fields
@@ -360,8 +378,7 @@ exports.formatOrderForSAP = async (order) => {
     CardCode: order.CardCode,
     DocDate: order.DocDate || today,
     DocDueDate: order.DocDueDate || today,
-    Comments: order.Comments || "",
-    U_Notes: order.U_Notes || "",
+    ...splitComments(order.Comments, order.U_Notes),
     RequriedDate: order.RequriedDate || order.StartDeliveryDate || today,
 
 
@@ -1661,6 +1678,19 @@ exports.formatCreditNoteForSAP = async (creditNote) => {
   });
 
   return sapCreditNote;
+};
+
+// Only the remarks of an order already in SAP (comments edited after the
+// quotation was converted). No lines are sent, so nothing else changes.
+exports.updateSalesOrderCommentsInSAP = async (sapDocEntry, comments, notes) => {
+  if (!ENABLE_SAP_SYNC) return { simulated: true };
+  const sessionId = await getSessionId();
+  const body = splitComments(comments, notes);
+  if (!notes && !body.U_Notes) delete body.U_Notes;
+  await axios.patch(`${SAP_CONFIG.serviceLayerUrl}/Orders(${sapDocEntry})`, body, {
+    headers: { "Content-Type": "application/json", Cookie: `B1SESSION=${sessionId}` },
+  });
+  return { success: true, ...body };
 };
 
 exports.updateSalesOrderInSAP = async (docNum, orderData) => {

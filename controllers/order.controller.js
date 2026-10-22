@@ -2349,7 +2349,7 @@ exports.updateOrderNotes = async (req, res) => {
       });
     }
 
-    // Update the U_Notes field
+    // U_Notes is what the delivery PDF prints; Comments is SAP's remarks.
     order.U_Notes = notes || "";
     order.Comments = notes || "";
     order.Remarks = notes || "";
@@ -2357,14 +2357,32 @@ exports.updateOrderNotes = async (req, res) => {
 
     await order.save();
 
+    // Already in SAP and still open there: send the new comments too
+    // (before 23 Oct they only changed in HalalSales).
+    let sap = null;
+    if (order.SAPDocEntry && order.SyncedWithSAP) {
+      try {
+        const { updateSalesOrderCommentsInSAP } = require("../utils/sapB1Integration");
+        sap = await updateSalesOrderCommentsInSAP(order.SAPDocEntry, order.Comments, order.U_Notes);
+      } catch (e) {
+        const msg = e.response?.data?.error?.message?.value || e.message;
+        console.error(`SAP comments update failed for order ${docNum}:`, msg);
+        sap = { success: false, error: msg };
+      }
+    }
+
     console.log(`✅ Notes updated successfully for order ${docNum}`);
 
     res.status(200).json({
       success: true,
-      message: "Order notes updated successfully",
+      message: sap && sap.success === false
+        ? `Notes saved in HalalSales, but SAP refused them (${sap.error})`
+        : "Order notes updated successfully",
       data: {
         DocNum: order.DocNum,
         U_Notes: order.U_Notes,
+        Comments: order.Comments,
+        sap,
       },
     });
   } catch (error) {
