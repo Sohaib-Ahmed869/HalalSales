@@ -190,6 +190,9 @@ mongoose
     geotabSync.start();
     adherenceService.startCron();
 
+    // End-of-day leads follow-up report email (LEAD_REPORT_CRON, default 18:30 Paris, Mon-Sat).
+    require("./services/leadFollowUp").startCron();
+
     // Uber Eats scraper: a separate worker process runs the jobs queued from the Uber Eats Scraper page
     // (one in total across backend copies; off with UBEREATS_WORKER_ENABLED=false). See services/ubereats/supervisor.js.
     require("./services/ubereats/supervisor").start();

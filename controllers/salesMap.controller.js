@@ -736,9 +736,19 @@ exports.getSalesMap = async (req, res) => {
       console.error("[salesMap] Uber Eats prospects failed:", error.message);
       return { prospects: [], stats: null, byZip: new Map() };
     }) : { prospects: [], stats: null, byZip: new Map() };
+    // Idris, 22 Oct: prospects come from the new Uber Eats scraper now. The old
+    // Postal Scraping records stay on the map only where a lead is linked to
+    // one (so nobody's work disappears); ?prospectSource=all shows both again.
+    const prospectSource = (req.query.prospectSource || process.env.SALES_MAP_PROSPECT_SOURCE || "ubereats") === "all" ? "all" : "ubereats";
+    if (prospectSource === "ubereats" && ue.stats) {
+      pros.prospects = (pros.prospects || []).filter((p) => p.lead);
+      pros.prospectStats = null;
+      pros.prospectsByPostalCode = [];
+    }
     const prospectSources = {
       ubereats: ue.stats,
       scraped: pros.prospectStats || null,
+      source: prospectSource,
     };
     if (ue.prospects.length > 0) {
       pros.prospects = [...ue.prospects, ...pros.prospects];

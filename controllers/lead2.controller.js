@@ -561,10 +561,13 @@ exports.assignLead = async (req, res) => {
       });
     }
 
+    const before = await Lead.findById(id).select("assignedTo").lean();
+    const reassigned = String(before?.assignedTo || "") !== String(assignedTo);
     const lead = await Lead.findByIdAndUpdate(
       id,
       {
         assignedTo,
+        ...(reassigned ? { assignedAt: new Date() } : {}),
         updatedAt: new Date(),
       },
       { new: true }
@@ -577,6 +580,11 @@ exports.assignLead = async (req, res) => {
         success: false,
         message: "Lead not found",
       });
+    }
+
+    // In-app notification + WhatsApp to the agent (not awaited: never slows the click).
+    if (reassigned) {
+      require("../services/leadFollowUp").onAssigned(lead, assignedTo, { byUserId: req.user?._id });
     }
 
     res.json({
@@ -617,6 +625,9 @@ exports.bulkAssignLeads = async (req, res) => {
       });
     }
 
+    const changing = await Lead.find({ _id: { $in: leadIds }, assignedTo: { $ne: assignedTo } })
+      .select("_id fullName company sourceType aiHandoff.reasonLabel")
+      .lean();
     const result = await Lead.updateMany(
       { _id: { $in: leadIds } },
       {
@@ -624,6 +635,10 @@ exports.bulkAssignLeads = async (req, res) => {
         updatedAt: new Date(),
       }
     );
+    if (changing.length) {
+      await Lead.updateMany({ _id: { $in: changing.map((l) => l._id) } }, { assignedAt: new Date() });
+      require("../services/leadFollowUp").onAssigned(changing, assignedTo, { byUserId: req.user?._id });
+    }
 
     res.json({
       success: true,
@@ -2093,6 +2108,14 @@ exports.upsertAiHandoffLead = async (req, res) => {
       if (isClosure) lead.status = "dead";
       if (!lead.assignedTo && customer?.assignedTo) lead.assignedTo = customer.assignedTo;
     }
+    // Nobody owns the account: the agent with the fewest open AI leads gets it.
+    const leadFollowUp = require("../services/leadFollowUp");
+    if (!isClosure && !lead.assignedTo) {
+      const agent = await leadFollowUp.pickAgentForAiLead();
+      if (agent) lead.assignedTo = agent._id;
+    }
+    const newlyAssigned = Boolean(lead.assignedTo) && (lead.isNew || lead.isModified("assignedTo"));
+    if (newlyAssigned) lead.assignedAt = new Date();
 
     lead.sapCardCode = sapCardCode;
     if (customer?._id) lead.existingCustomer = customer._id;
@@ -2170,6 +2193,10 @@ exports.upsertAiHandoffLead = async (req, res) => {
         priority,
         name: lead.company || lead.fullName,
       });
+      // WhatsApp the agent: on a new assignment, and on every urgent hand-off.
+      if (lead.assignedTo && (newlyAssigned || priority === "high")) {
+        await leadFollowUp.onAssigned(lead, lead.assignedTo, { inApp: false, reasonLabel: reasonLabel || reason });
+      }
     }
 
     res.status(created ? 201 : 200).json({
@@ -2262,6 +2289,8 @@ exports.upsertAiProspectLead = async (req, res) => {
         .lean();
       agentId = agent?._id || null;
     }
+    const leadFollowUp = require("../services/leadFollowUp");
+    if (!agentId) agentId = (await leadFollowUp.pickAgentForAiLead())?._id || null;
 
     const at = handedOffAt ? new Date(handedOffAt) : new Date();
     const convo = Array.isArray(conversation)
@@ -2334,6 +2363,8 @@ exports.upsertAiProspectLead = async (req, res) => {
       taskId: lead.aiHandoff?.taskId,
     };
     lead.nextFollowUp = lead.nextFollowUp && lead.nextFollowUp < at ? lead.nextFollowUp : at;
+    const newlyAssigned = Boolean(lead.assignedTo) && (lead.isNew || lead.isModified("assignedTo"));
+    if (newlyAssigned) lead.assignedAt = at;
     await lead.save();
 
     // Mark the store(s) as taken on the Uber Eats Scraper page, as its own assign does.
@@ -2384,6 +2415,12 @@ exports.upsertAiProspectLead = async (req, res) => {
       priority,
       name: brandList[0],
     });
+    if (lead.assignedTo && (newlyAssigned || priority === "high")) {
+      await leadFollowUp.onAssigned(lead, lead.assignedTo, {
+        inApp: false,
+        reasonLabel: `${reasonLabel || "Replied to the catalogue"}${postalCode ? ` (${postalCode})` : ""}`,
+      });
+    }
 
     let assignedToName = null;
     if (lead.assignedTo) {
@@ -2518,5 +2555,91 @@ exports.getLeadChatHistory = async (req, res) => {
       message: "Error fetching chat history",
       error: error.message,
     });
+  }
+};
+
+
+// ── Lead follow-up (services/leadFollowUp.js) ───────────────────────
+
+// Log a call / message on a lead. A call nobody answered needs the next
+// follow-up time; a conversation needs a note of what was said.
+exports.logLeadContact = async (req, res) => {
+  const leadFollowUp = require("../services/leadFollowUp");
+  try {
+    const query = { _id: req.params.id };
+    if (req.user.role === "sales_agent") query.assignedTo = req.user._id;
+    const lead = await Lead.findOne(query);
+    if (!lead) return res.status(404).json({ success: false, message: "Lead not found or not yours" });
+    await leadFollowUp.logContact(lead, req.user, req.body || {});
+    const populated = await Lead.findById(lead._id).populate("assignedTo", "firstName lastName email").populate("tasks");
+    res.json({ success: true, message: "Logged", data: populated });
+  } catch (error) {
+    if (error instanceof leadFollowUp.LogError) return res.status(400).json({ success: false, message: error.message });
+    console.error("Error logging lead contact:", error);
+    res.status(500).json({ success: false, message: "Error logging the call", error: error.message });
+  }
+};
+
+// End-of-day follow-up report: ?date=YYYY-MM-DD (Paris day, default today).
+// Agents see only their own row.
+exports.getLeadDailyReport = async (req, res) => {
+  try {
+    const { dailyReport } = require("../services/leadFollowUp");
+    const report = await dailyReport(req.query.date);
+    if (req.user.role === "sales_agent") report.agents = report.agents.filter((a) => a.agentId === String(req.user._id));
+    res.json({ success: true, data: report });
+  } catch (error) {
+    console.error("Error building lead report:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Email the report now (managers), e.g. to check it before the evening run.
+exports.sendLeadDailyReport = async (req, res) => {
+  try {
+    const { sendDailyReport } = require("../services/leadFollowUp");
+    const r = await sendDailyReport(req.body?.date || req.query.date);
+    res.json({ success: true, data: { sent: r.sent, reason: r.reason, to: r.to } });
+  } catch (error) {
+    console.error("Error sending lead report:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// Give every open AI lead nobody owns to an agent (same rule as new ones).
+// ?dryRun=true lists who would get what without changing anything.
+exports.autoAssignAiLeads = async (req, res) => {
+  try {
+    const leadFollowUp = require("../services/leadFollowUp");
+    const dryRun = String(req.query.dryRun ?? req.body?.dryRun) === "true";
+    const leads = await Lead.find({
+      sourceType: "ai_generated",
+      status: { $nin: ["converted", "dead"] },
+      $or: [{ assignedTo: { $exists: false } }, { assignedTo: null }],
+    }).sort({ createdAt: 1 });
+    const pool = await leadFollowUp.agentPool();
+    const planned = new Map(); // dry run: spread as the real run would
+    const out = [];
+    for (const lead of leads) {
+      let agent;
+      if (dryRun) {
+        agent = pool.map((u) => ({ u, n: planned.get(String(u._id)) || 0 })).sort((a, b) => a.n - b.n)[0]?.u;
+        if (agent) planned.set(String(agent._id), (planned.get(String(agent._id)) || 0) + 1);
+      } else {
+        agent = await leadFollowUp.pickAgentForAiLead();
+      }
+      if (!agent) break;
+      out.push({ leadId: lead._id, lead: lead.company || lead.fullName, agentId: agent._id, agent: `${agent.firstName || ""} ${agent.lastName || ""}`.trim() });
+      if (dryRun) continue;
+      lead.assignedTo = agent._id;
+      lead.assignedAt = new Date();
+      await lead.save();
+      if (lead.aiHandoff?.taskId) await Task.updateOne({ _id: lead.aiHandoff.taskId }, { assignedTo: agent._id }).catch(() => {});
+      await leadFollowUp.onAssigned(lead, agent._id, { byUserId: req.user?._id });
+    }
+    res.json({ success: true, dryRun, count: out.length, data: out });
+  } catch (error) {
+    console.error("Error auto-assigning AI leads:", error);
+    res.status(500).json({ success: false, message: error.message });
   }
 };

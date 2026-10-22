@@ -153,6 +153,29 @@ const LeadSchema = new Schema({
   nextFollowUp: {
     type: Date,
   },
+
+  // When the current owner got it (end-of-day lead report, services/leadFollowUp.js).
+  assignedAt: Date,
+  // Every attempt to reach the lead, logged by the agent. A call nobody
+  // answered must come with the next follow-up; a conversation with what was said.
+  contactLog: [
+    {
+      _id: false,
+      at: { type: Date, default: Date.now },
+      by: { type: Schema.Types.ObjectId, ref: "User" },
+      byName: String,
+      channel: { type: String, enum: ["call", "whatsapp", "email", "visit"], default: "call" },
+      outcome: {
+        type: String,
+        enum: ["spoke", "no_answer", "voicemail", "busy", "wrong_number", "message_sent"],
+        required: true,
+      },
+      note: String,
+      nextFollowUp: Date,
+    },
+  ],
+  lastContactAt: Date,
+  lastContactOutcome: String,
 });
 
 // Update timestamps before saving

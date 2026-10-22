@@ -67,6 +67,10 @@ router.get(
   checkRole(["admin", "sales_manager", "sales_agent"]),
   leadController.getUnassignedLeads
 );
+// Lead follow-up: end-of-day report and sharing out unassigned AI leads.
+router.get("/reports/daily", auth, leadController.getLeadDailyReport);
+router.post("/reports/daily/send", auth, checkRole(["admin", "sales_manager"]), leadController.sendLeadDailyReport);
+router.post("/ai-leads/auto-assign", auth, checkRole(["admin", "sales_manager"]), leadController.autoAssignAiLeads);
 router.get("/:id", auth, leadController.getLeadById);
 router.get("/:id/chat-history", auth, leadController.getLeadChatHistory);
 
@@ -120,6 +124,7 @@ router.get(
 // Lead Activities and Notes
 router.post("/:id/notes", auth, leadController.addLeadNote);
 router.put("/:id/follow-up", auth, leadController.setNextFollowUp);
+router.post("/:id/contact-log", auth, leadController.logLeadContact);
 
 // Lead Import/Export
 router.post(

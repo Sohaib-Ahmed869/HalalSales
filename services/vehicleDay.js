@@ -107,7 +107,7 @@ async function vehicleDay({ geotabId, date, tenant = "halal-food-sales", fresh =
     to: until,
     generatedAt: now,
   };
-  if (from >= now) return { ...base, future: true, summary: null, stops: [], drives: [], trail: [], events: [], fillUps: [], planned: [] };
+  if (from >= now) return { ...base, future: true, summary: null, stops: [], drives: [], trail: [], trailTimes: [], events: [], fillUps: [], planned: [] };
 
   const search = (typeName) => geotab.get(typeName, { deviceSearch: { id: geotabId }, fromDate: from.toISOString(), toDate: until.toISOString() });
   const [tripsRaw, logs, events, fills, rules] = await Promise.all([
@@ -123,13 +123,15 @@ async function vehicleDay({ geotabId, date, tenant = "halal-food-sales", fresh =
     .filter((t) => new Date(t.stop) > from && new Date(t.start) < until)
     .sort((a, b) => new Date(a.start) - new Date(b.start));
 
-  const trail = thin(
+  const fixes = thin(
     (logs || [])
       .filter((r) => validFix(r.latitude, r.longitude))
-      .sort((a, b) => new Date(a.dateTime) - new Date(b.dateTime))
-      .map((r) => [Math.round(r.latitude * 1e5) / 1e5, Math.round(r.longitude * 1e5) / 1e5]),
+      .sort((a, b) => new Date(a.dateTime) - new Date(b.dateTime)),
     MAX_TRAIL_POINTS
   );
+  const trail = fixes.map((r) => [Math.round(r.latitude * 1e5) / 1e5, Math.round(r.longitude * 1e5) / 1e5]);
+  // When the truck was at each trail point (epoch ms), for the route replay on the map.
+  const trailTimes = fixes.map((r) => new Date(r.dateTime).getTime());
 
   // What the portal planned for this truck that day: every run's customer stops.
   let routes = [];
@@ -288,6 +290,7 @@ async function vehicleDay({ geotabId, date, tenant = "halal-food-sales", fresh =
     stops,
     drives,
     trail,
+    trailTimes,
     events: eventRows,
     fillUps,
     planned: routes.map((r) => ({
