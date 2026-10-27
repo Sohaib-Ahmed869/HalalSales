@@ -157,6 +157,17 @@ const CustomerSchema = new Schema({
     enum: ["marketing-contact", "non-marketing-contact", "unsubscribed"],
     default: "marketing-contact",
   },
+  // Whether the business is still there, as last heard (mostly from the AI
+  // WhatsApp agent). "closed" often means the shop was sold and the number
+  // changed hands — a warning to check, never a reason to delete.
+  businessStatus: {
+    type: String,
+    enum: ["open", "closed", "sold", "wrong_number"],
+    default: "open",
+  },
+  businessStatusReason: String,
+  businessStatusAt: Date,
+  businessStatusBy: String, // "ai", or the name of whoever set it
   openingTime: {
     type: String,
     trim: true,

@@ -8,8 +8,9 @@
 //   - outreach batches — preview who would be contacted, strike accounts off,
 //     launch, follow each account to its outcome, stop.
 //
-// Agents see conversations for their own leads only. Batches are for admins
-// and sales managers.
+// Agents see conversations for their own leads (and customers) only. Batches,
+// any conversation by thread, and assigning an account are for admins and
+// sales managers.
 
 const Lead = require("../models/Lead");
 const Customer = require("../models/Customer");
@@ -67,6 +68,100 @@ const threadAction = (fn) => async (req, res) => {
 exports.takeoverLeadConversation = threadAction(intelligence.takeover);
 exports.resumeLeadConversation = threadAction(intelligence.resume);
 
+/* ── Any outreach conversation, by thread (managers) ─────────────────── */
+
+/** The AI conversation behind a batch row, whether or not it became a lead. */
+exports.getThreadConversation = async (req, res) => {
+  try {
+    const data = await intelligence.lookupThread({ threadId: req.params.threadId }, req.user);
+    res.json({ success: true, data });
+  } catch (err) {
+    if (err.status === 404) return res.json({ success: true, data: null });
+    fail(res, err);
+  }
+};
+
+const byThread = (fn) => async (req, res) => {
+  try {
+    res.json({ success: true, data: await fn(req.params.threadId, req.user) });
+  } catch (err) {
+    fail(res, err);
+  }
+};
+
+exports.takeoverThread = byThread(intelligence.takeover);
+exports.resumeThread = byThread(intelligence.resume);
+
+/**
+ * Put an outreach account in an agent's hands, replied or not, with a note:
+ * an AI lead assigned to them, a call task due now, a notification.
+ */
+exports.assignAccount = async (req, res) => {
+  try {
+    const { cardCode, threadId, agentId, note } = req.body || {};
+    if (!cardCode || !agentId) return res.status(400).json({ success: false, message: "cardCode and agentId are required" });
+    const { assignAiAccount } = require("./lead2.controller");
+    const data = await assignAiAccount({ cardCode: String(cardCode), threadId, agentId, note, user: req.user });
+    res.json({ success: true, data });
+  } catch (err) {
+    fail(res, err);
+  }
+};
+
+/* ── A customer's AI conversations (customer page) ───────────────────── */
+
+/**
+ * The AI WhatsApp conversation with a customer, live from hfs-intelligence;
+ * when it cannot be reached, the copies stored with the AI leads. Agents see
+ * their own customers (or customers whose AI lead is theirs) only.
+ */
+exports.getCustomerConversation = async (req, res) => {
+  try {
+    const { cardCode } = req.params;
+    const customer = await Customer.findOne({ CardCode: cardCode }).select("_id assignedTo phoneNumber").lean();
+    if (!customer) return res.status(404).json({ success: false, message: "Customer not found" });
+    const leads = await Lead.find({ sapCardCode: cardCode, sourceType: "ai_generated" })
+      .select("fullName company status assignedTo aiHandoff createdAt")
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .lean();
+    if (req.user.role === "sales_agent") {
+      const mine = (id) => id && String(id) === String(req.user._id);
+      if (!mine(customer.assignedTo) && !leads.some((l) => mine(l.assignedTo))) {
+        return res.status(403).json({ success: false, message: "You can only see your own customers' conversations" });
+      }
+    }
+    const stored = leads.map((l) => ({
+      leadId: l._id,
+      status: l.status,
+      createdAt: l.createdAt,
+      handoff: l.aiHandoff ? { ...l.aiHandoff, conversation: undefined } : null,
+      messages: (l.aiHandoff?.conversation || []).map((m, i) => ({
+        id: `${l._id}-${i}`,
+        direction: m.direction,
+        by: m.direction === "inbound" ? "customer" : m.author === "human" ? "agent" : "ai",
+        text: m.text,
+        at: m.at,
+      })),
+    }));
+
+    let live = null;
+    let liveError = null;
+    if (intelligence.configured()) {
+      try {
+        live = await intelligence.lookupThread({ cardCode }, req.user);
+      } catch (err) {
+        if (err.status !== 404) liveError = err.message;
+      }
+    } else {
+      liveError = "AI outreach is not configured on this server";
+    }
+    res.json({ success: true, data: { live, stored, liveError } });
+  } catch (err) {
+    fail(res, err);
+  }
+};
+
 /* ── Batches ─────────────────────────────────────────────────────────── */
 
 exports.overview = async (req, res) => {
@@ -101,12 +196,30 @@ exports.listBatches = async (req, res) => {
 const withOwners = async (rows, codeKey = "cardCode") => {
   const codes = [...new Set(rows.map((r) => r[codeKey]).filter(Boolean))];
   if (!codes.length) return rows;
-  const customers = await Customer.find({ CardCode: { $in: codes } }).select("CardCode assignedTo").lean();
-  const ownerIds = [...new Set(customers.map((c) => String(c.assignedTo || "")).filter(Boolean))];
+  const [customers, leads] = await Promise.all([
+    Customer.find({ CardCode: { $in: codes } }).select("CardCode assignedTo").lean(),
+    // The open AI lead on each account, so a row shows who is following it up.
+    Lead.find({ sapCardCode: { $in: codes }, sourceType: "ai_generated", status: { $nin: ["converted", "dead"] } })
+      .select("sapCardCode assignedTo")
+      .sort({ createdAt: 1 })
+      .lean(),
+  ]);
+  const ownerIds = [...new Set([...customers, ...leads].map((c) => String(c.assignedTo || "")).filter(Boolean))];
   const users = await User.find({ _id: { $in: ownerIds } }).select("firstName lastName").lean();
   const nameOf = new Map(users.map((u) => [String(u._id), `${u.firstName || ""} ${u.lastName || ""}`.trim()]));
-  const ownerOf = new Map(customers.map((c) => [c.CardCode, c.assignedTo ? nameOf.get(String(c.assignedTo)) || null : null]));
-  return rows.map((r) => ({ ...r, owner: ownerOf.get(r[codeKey]) || null }));
+  const customerOf = new Map(customers.map((c) => [c.CardCode, c]));
+  const leadOf = new Map(leads.map((l) => [l.sapCardCode, l]));
+  return rows.map((r) => {
+    const c = customerOf.get(r[codeKey]);
+    const l = leadOf.get(r[codeKey]);
+    return {
+      ...r,
+      owner: c?.assignedTo ? nameOf.get(String(c.assignedTo)) || null : null,
+      customerId: c?._id || null,
+      assignedTo: c?.assignedTo || null,
+      aiLead: l ? { id: l._id, assignedTo: l.assignedTo || null, agent: l.assignedTo ? nameOf.get(String(l.assignedTo)) || null : null } : null,
+    };
+  });
 };
 
 exports.previewBatch = async (req, res) => {

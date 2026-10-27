@@ -465,6 +465,14 @@ router.post(
   customerController.assignCustomer
 );
 
+// Business closed / sold / wrong number (flagged by the AI agent) — reset by a manager
+router.patch(
+  "/:id/business-status",
+  auth,
+  checkRole(["admin", "sales_manager"]),
+  customerController.updateBusinessStatus
+);
+
 // Get customers assigned to a specific sales agent
 router.get("/agent/:agentId", auth, customerController.getCustomersByAgent);
 

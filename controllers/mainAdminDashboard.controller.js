@@ -78,6 +78,36 @@ function getAgentFilter(query) {
 // (Previously `$ne null` alone wrongly counted quotations with a 0 value.)
 const CONVERTED_QUOTATION_EXPR = { $gt: [{ $ifNull: ["$ConvertedToOrderDocEntry", 0] }, 0] };
 
+// Sales channel (?channel=all|cash_carry|delivery), applied to invoices and
+// credit notes alike. Cash & Carry = rung up on the depot till: the document
+// carries an EPOS receipt number (U_EPOSNo "T001_…", always SalesPersonCode 1)
+// or is billed to the walk-in counter customers. Everything else is delivery.
+// Checked on live data (Oct 2026): 2,667 EPOS invoices, 2 with a same-day
+// delivery note; 572 non-EPOS invoices, 156 with one. The isPOS / isDelivery
+// flags on Invoice are never set, so they cannot be used.
+const WALK_IN_CARD_CODES = ["C9999", "C9996"];
+const CHANNELS = ["cash_carry", "delivery"];
+function getChannel(query) {
+    const c = String(query?.channel || "").toLowerCase();
+    return CHANNELS.includes(c) ? c : null;
+}
+function channelMatch(channel) {
+    if (channel === "cash_carry") {
+        return { $or: [{ U_EPOSNo: { $nin: [null, ""] } }, { CardCode: { $in: WALK_IN_CARD_CODES } }] };
+    }
+    if (channel === "delivery") {
+        return { U_EPOSNo: { $in: [null, ""] }, CardCode: { $nin: WALK_IN_CARD_CODES } };
+    }
+    return {};
+}
+// Combine match fragments that may use the same keys (CardCode, $or).
+function andMatch(...parts) {
+    const nonEmpty = parts.filter((p) => p && Object.keys(p).length);
+    if (nonEmpty.length === 0) return {};
+    if (nonEmpty.length === 1) return nonEmpty[0];
+    return { $and: nonEmpty };
+}
+
 /**
  * Resolve the agent-visibility scope for the caller.
  *
@@ -112,10 +142,12 @@ async function resolveScope(req) {
         pickedId = new mongoose.Types.ObjectId(picked);
     }
 
+    const channel = getChannel(req.query);
+
     let agentIds;
     if (pickedId) {
         if (teamAgentIds && !teamAgentIds.some((id) => id.equals(pickedId))) {
-            return { agentIds: [], cardCodes: [], forbidden: true };
+            return { agentIds: [], cardCodes: [], channel, forbidden: true };
         }
         agentIds = [pickedId];
     } else {
@@ -129,7 +161,7 @@ async function resolveScope(req) {
         ).filter(Boolean);
     }
 
-    return { agentIds, cardCodes, forbidden: false };
+    return { agentIds, cardCodes, channel, forbidden: false };
 }
 
 // Match fragment for collections that have a `salesAgent` field (orders, quotations).
@@ -137,9 +169,13 @@ function agentMatch(scope) {
     return scope.agentIds ? { salesAgent: { $in: scope.agentIds } } : {};
 }
 
-// Match fragment for invoices (no salesAgent) — scoped via customer CardCode.
+// Match fragment for invoices and credit notes (no salesAgent) — scoped via
+// customer CardCode, plus the optional sales channel.
 function invoiceAgentMatch(scope) {
-    return scope.cardCodes ? { CardCode: { $in: scope.cardCodes } } : {};
+    return andMatch(
+        scope.cardCodes ? { CardCode: { $in: scope.cardCodes } } : {},
+        channelMatch(scope.channel)
+    );
 }
 
 /**
@@ -680,38 +716,57 @@ exports.getTeamPerformance = async (req, res) => {
         });
 
         // Invoice revenue grouped by customer (NET = DocTotal - VatSum), then
-        // rolled up per agent via the CardCode -> agent map above.
-        const invoicesByCard = await Invoice.aggregate([
-            {
-                $match: {
-                    DocDate: { $gte: fromDate, $lte: toDate },
-                    CardCode: { $in: scopedCardCodes },
+        // rolled up per agent via the CardCode -> agent map above. Credit notes
+        // are grouped the same way and deducted from the agent's revenue.
+        const cardMatch = andMatch(
+            { DocDate: { $gte: fromDate, $lte: toDate }, CardCode: { $in: scopedCardCodes } },
+            channelMatch(scope.channel)
+        );
+        const [invoicesByCard, creditNotesByCard] = await Promise.all([
+            Invoice.aggregate([
+                { $match: cardMatch },
+                {
+                    $addFields: {
+                        netTotal: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] },
+                    },
                 },
-            },
-            {
-                $addFields: {
-                    netTotal: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] },
+                {
+                    $group: {
+                        _id: "$CardCode",
+                        invoiceCount: { $sum: 1 },
+                        totalRevenue: { $sum: "$netTotal" },
+                    },
                 },
-            },
-            {
-                $group: {
-                    _id: "$CardCode",
-                    invoiceCount: { $sum: 1 },
-                    totalRevenue: { $sum: "$netTotal" },
-                },
-            },
+            ]),
+            CreditNote.aggregate([
+                { $match: cardMatch },
+                { $group: { _id: "$CardCode", count: { $sum: 1 }, value: { $sum: NET } } },
+            ]),
         ]);
 
         const invoiceMap = {};
+        const agentBucket = (agentId) => {
+            if (!invoiceMap[agentId]) {
+                invoiceMap[agentId] = { invoiceCount: 0, totalRevenue: 0, grossRevenue: 0, creditNotes: 0, creditNoteCount: 0, uniqueCustomers: new Set() };
+            }
+            return invoiceMap[agentId];
+        };
         invoicesByCard.forEach((row) => {
             const agentId = cardCodeToAgent[row._id];
             if (!agentId) return;
-            if (!invoiceMap[agentId]) {
-                invoiceMap[agentId] = { invoiceCount: 0, totalRevenue: 0, uniqueCustomers: new Set() };
-            }
-            invoiceMap[agentId].invoiceCount += row.invoiceCount;
-            invoiceMap[agentId].totalRevenue += row.totalRevenue;
-            invoiceMap[agentId].uniqueCustomers.add(row._id);
+            const b = agentBucket(agentId);
+            b.invoiceCount += row.invoiceCount;
+            b.totalRevenue += row.totalRevenue;
+            b.grossRevenue += row.totalRevenue;
+            b.uniqueCustomers.add(row._id);
+        });
+        creditNotesByCard.forEach((row) => {
+            const agentId = cardCodeToAgent[row._id];
+            if (!agentId) return;
+            const b = agentBucket(agentId);
+            b.totalRevenue -= row.value;
+            b.creditNotes += row.value;
+            b.creditNoteCount += row.count;
         });
         Object.values(invoiceMap).forEach((m) => {
             m.avgOrderValue = m.invoiceCount > 0 ? m.totalRevenue / m.invoiceCount : 0;
@@ -762,7 +817,7 @@ exports.getTeamPerformance = async (req, res) => {
 
         const teamData = agents.map((agent) => {
             const id = agent._id.toString();
-            const inv = invoiceMap[id] || { invoiceCount: 0, totalRevenue: 0, avgOrderValue: 0, uniqueCustomers: [] };
+            const inv = invoiceMap[id] || { invoiceCount: 0, totalRevenue: 0, grossRevenue: 0, creditNotes: 0, creditNoteCount: 0, avgOrderValue: 0, uniqueCustomers: [] };
             const quotes = quotationMap[id] || { quotationCount: 0, quotationValue: 0, convertedCount: 0, openUnconvertedCount: 0 };
 
             // Resolve a period-aware target: prefer targetHistory entry for
@@ -799,7 +854,11 @@ exports.getTeamPerformance = async (req, res) => {
                 },
                 invoices: {
                     count: inv.invoiceCount,
+                    // net of credit notes (as SAP); gross kept alongside
                     totalRevenue: parseFloat((inv.totalRevenue || 0).toFixed(2)),
+                    grossRevenue: parseFloat((inv.grossRevenue || 0).toFixed(2)),
+                    creditNotes: parseFloat((inv.creditNotes || 0).toFixed(2)),
+                    creditNoteCount: inv.creditNoteCount || 0,
                     avgInvoiceValue: parseFloat((inv.avgOrderValue || 0).toFixed(2)),
                     uniqueCustomers: (inv.uniqueCustomers || []).length,
                 },
@@ -869,26 +928,32 @@ exports.getSalesByAgent = async (req, res) => {
             }
         });
 
-        // Invoice revenue per customer (NET = DocTotal - VatSum) for the period.
-        const invoicesByCard = await Invoice.aggregate([
-            {
-                $match: {
-                    DocDate: { $gte: fromDate, $lte: toDate },
-                    CardCode: { $in: scopedCardCodes },
+        // Invoice revenue per customer (NET = DocTotal - VatSum) for the period,
+        // and the same customers' credit notes, which are deducted (as SAP).
+        const cardMatch = andMatch(
+            { DocDate: { $gte: fromDate, $lte: toDate }, CardCode: { $in: scopedCardCodes } },
+            channelMatch(scope.channel)
+        );
+        const [invoicesByCard, creditNotesByCard] = await Promise.all([
+            Invoice.aggregate([
+                { $match: cardMatch },
+                {
+                    $addFields: {
+                        netTotal: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] },
+                    },
                 },
-            },
-            {
-                $addFields: {
-                    netTotal: { $subtract: [{ $ifNull: ["$DocTotal", 0] }, { $ifNull: ["$VatSum", 0] }] },
+                {
+                    $group: {
+                        _id: "$CardCode",
+                        invoiceCount: { $sum: 1 },
+                        totalRevenue: { $sum: "$netTotal" },
+                    },
                 },
-            },
-            {
-                $group: {
-                    _id: "$CardCode",
-                    invoiceCount: { $sum: 1 },
-                    totalRevenue: { $sum: "$netTotal" },
-                },
-            },
+            ]),
+            CreditNote.aggregate([
+                { $match: cardMatch },
+                { $group: { _id: "$CardCode", count: { $sum: 1 }, value: { $sum: NET } } },
+            ]),
         ]);
 
         // Roll each customer's totals up to their assigned agent. One aggregation
@@ -900,6 +965,9 @@ exports.getSalesByAgent = async (req, res) => {
                 name: `${a.firstName || ""} ${a.lastName || ""}`.trim(),
                 email: a.email,
                 totalRevenue: 0,
+                grossRevenue: 0,
+                creditNotes: 0,
+                creditNoteCount: 0,
                 invoiceCount: 0,
                 customerCount: 0,
             };
@@ -908,14 +976,24 @@ exports.getSalesByAgent = async (req, res) => {
             const bucket = perAgent[cardCodeToAgent[row._id]];
             if (!bucket) return;
             bucket.totalRevenue += row.totalRevenue;
+            bucket.grossRevenue += row.totalRevenue;
             bucket.invoiceCount += row.invoiceCount;
             bucket.customerCount += 1;
+        });
+        creditNotesByCard.forEach((row) => {
+            const bucket = perAgent[cardCodeToAgent[row._id]];
+            if (!bucket) return;
+            bucket.totalRevenue -= row.value;
+            bucket.creditNotes += row.value;
+            bucket.creditNoteCount += row.count;
         });
 
         const data = Object.values(perAgent)
             .map((a) => ({
                 ...a,
                 totalRevenue: parseFloat((a.totalRevenue || 0).toFixed(2)),
+                grossRevenue: parseFloat((a.grossRevenue || 0).toFixed(2)),
+                creditNotes: parseFloat((a.creditNotes || 0).toFixed(2)),
                 avgInvoiceValue: a.invoiceCount > 0
                     ? parseFloat((a.totalRevenue / a.invoiceCount).toFixed(2))
                     : 0,
@@ -957,30 +1035,38 @@ exports.getInvoices = async (req, res) => {
         if (req.query.cardCode) {
             query.CardCode = { $regex: req.query.cardCode, $options: "i" };
         }
+        if (req.query.search) {
+            const s = { $regex: req.query.search, $options: "i" };
+            query.$or = [{ CardCode: s }, { CardName: s }, { DocNum: !isNaN(req.query.search) ? parseInt(req.query.search) : -1 }];
+        }
+        // Credit notes for the same period / customer search / scope (they carry
+        // no paymentStatus or tag, so those two filters apply to invoices only).
+        const creditNoteQuery = { ...query };
         if (req.query.paymentStatus) {
             query.paymentStatus = req.query.paymentStatus;
         }
         if (req.query.tag) {
             query.tag = req.query.tag;
         }
-        if (req.query.search) {
-            const s = { $regex: req.query.search, $options: "i" };
-            query.$or = [{ CardCode: s }, { CardName: s }, { DocNum: !isNaN(req.query.search) ? parseInt(req.query.search) : -1 }];
-        }
 
-        // Restrict to in-scope customers (selected agent / manager's team).
+        // Restrict to in-scope customers (selected agent / manager's team) and channel.
         const scopeMatch = invoiceAgentMatch(scope);
         if (Object.keys(scopeMatch).length) query = { $and: [query, scopeMatch] };
+        const cnQuery = andMatch(creditNoteQuery, scopeMatch);
 
-        const [invoices, total] = await Promise.all([
+        const [invoices, total, [invoiceTotals], creditNotes] = await Promise.all([
             Invoice.find(query)
-                .select("DocNum DocDate CardCode CardName DocTotal VatSum DocCurrency paymentStatus tag isPOS isDelivery PaidToDate DocumentLines")
+                .select("DocNum DocDate CardCode CardName DocTotal VatSum DocCurrency paymentStatus tag isPOS isDelivery PaidToDate DocumentLines U_EPOSNo")
                 .sort({ DocDate: -1 })
                 .skip(skip)
                 .limit(limit)
                 .lean(),
             Invoice.countDocuments(query),
+            Invoice.aggregate([{ $match: query }, { $group: { _id: null, totalValue: { $sum: NET } } }]),
+            creditNoteTotals(cnQuery),
         ]);
+        const round2 = (n) => Math.round((n || 0) * 100) / 100;
+        const grossValue = round2(invoiceTotals?.totalValue);
 
         res.status(200).json({
             success: true,
@@ -988,6 +1074,13 @@ exports.getInvoices = async (req, res) => {
             total,
             page,
             pages: Math.ceil(total / limit),
+            // Period totals without VAT: invoices, credit notes, net (as SAP).
+            summary: {
+                invoiceCount: total,
+                grossValue,
+                creditNotes: { count: creditNotes.count, totalValue: round2(creditNotes.totalValue) },
+                netValue: round2(grossValue - creditNotes.totalValue),
+            },
             data: invoices,
         });
     } catch (error) {

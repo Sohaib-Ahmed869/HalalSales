@@ -2372,9 +2372,15 @@ exports.getGlobalKPIs = async (req, res) => {
     }
 
     // Initialize result object
+    // totalAmount is invoices minus credit notes over the same filter (as SAP);
+    // grossAmount is the invoices alone. Amounts stay VAT-inclusive (DocTotal),
+    // as this endpoint always has; the *ExVat fields give the same without VAT.
     const kpiResult = {
       totalInvoices: 0,
       totalAmount: 0,
+      grossAmount: 0,
+      creditNotes: { count: 0, amount: 0, amountExVat: 0 },
+      totalAmountExVat: 0,
       totalPaid: 0,
       totalUnpaid: 0,
       averageInvoiceAmount: 0,
@@ -2400,8 +2406,25 @@ exports.getGlobalKPIs = async (req, res) => {
           _id: null,
           totalInvoices: { $sum: 1 },
           totalAmount: { $sum: "$DocTotal" },
+          totalVat: { $sum: { $ifNull: ["$VatSum", 0] } },
           totalPaid: { $sum: "$PaidToDate" },
           averageAmount: { $avg: "$DocTotal" },
+        },
+      },
+    ];
+
+    // 1b. Credit notes over the same filter, overall and per month.
+    const creditNotesPipeline = [
+      { $match: dateFilter },
+      {
+        $group: {
+          _id: {
+            year: { $year: "$CreationDate" },
+            month: { $month: "$CreationDate" },
+          },
+          count: { $sum: 1 },
+          amount: { $sum: { $ifNull: ["$DocTotal", 0] } },
+          vat: { $sum: { $ifNull: ["$VatSum", 0] } },
         },
       },
     ];
@@ -2413,14 +2436,31 @@ exports.getGlobalKPIs = async (req, res) => {
       { $count: "uniqueCustomerCount" },
     ];
 
-    // 3. Channel distribution
+    // 3. Channel distribution. The isPOS / isDelivery flags are never set on
+    // synced invoices, so the till (cash & carry) is recognised the same way as
+    // the main dashboard: an EPOS receipt number or the walk-in customers;
+    // everything else counts as delivery.
     const channelStatsPipeline = [
       { $match: dateFilter },
       {
         $group: {
           _id: {
-            isPOS: "$isPOS",
-            isDelivery: "$isDelivery",
+            isPOS: {
+              $or: [
+                { $gt: [{ $strLenCP: { $ifNull: ["$U_EPOSNo", ""] } }, 0] },
+                { $in: ["$CardCode", ["C9999", "C9996"]] },
+              ],
+            },
+            isDelivery: {
+              $not: [
+                {
+                  $or: [
+                    { $gt: [{ $strLenCP: { $ifNull: ["$U_EPOSNo", ""] } }, 0] },
+                    { $in: ["$CardCode", ["C9999", "C9996"]] },
+                  ],
+                },
+              ],
+            },
           },
           count: { $sum: 1 },
           amount: { $sum: "$DocTotal" },
@@ -2501,6 +2541,7 @@ exports.getGlobalKPIs = async (req, res) => {
       paymentMethodsResults,
       topCustomersResults,
       topProductsResults,
+      creditNotesResults,
     ] = await Promise.all([
       Invoice.aggregate(totalStatsPipeline).allowDiskUse(true),
       Invoice.aggregate(uniqueCustomersPipeline).allowDiskUse(true),
@@ -2509,16 +2550,34 @@ exports.getGlobalKPIs = async (req, res) => {
       Invoice.aggregate(paymentMethodsPipeline).allowDiskUse(true),
       Invoice.aggregate(topCustomersPipeline).allowDiskUse(true),
       Invoice.aggregate(topProductsPipeline).allowDiskUse(true),
+      require("../models/CreditNotes").aggregate(creditNotesPipeline).allowDiskUse(true),
     ]);
+
+    const creditTotals = creditNotesResults.reduce(
+      (acc, r) => ({ count: acc.count + r.count, amount: acc.amount + r.amount, vat: acc.vat + r.vat }),
+      { count: 0, amount: 0, vat: 0 }
+    );
+    kpiResult.creditNotes = {
+      count: creditTotals.count,
+      amount: creditTotals.amount,
+      amountExVat: creditTotals.amount - creditTotals.vat,
+    };
 
     // Extract and format total stats
     if (totalStatsResults.length > 0) {
       const stats = totalStatsResults[0];
       kpiResult.totalInvoices = stats.totalInvoices;
-      kpiResult.totalAmount = stats.totalAmount;
+      kpiResult.grossAmount = stats.totalAmount;
+      kpiResult.totalAmount = stats.totalAmount - creditTotals.amount;
+      kpiResult.totalAmountExVat =
+        stats.totalAmount - (stats.totalVat || 0) - kpiResult.creditNotes.amountExVat;
       kpiResult.totalPaid = stats.totalPaid;
+      // Open balance and collection rate stay on the invoices themselves: a
+      // credit note applied to an invoice already shows in its PaidToDate.
       kpiResult.totalUnpaid = stats.totalAmount - stats.totalPaid;
-      kpiResult.averageInvoiceAmount = stats.averageAmount;
+      kpiResult.averageInvoiceAmount = stats.totalInvoices
+        ? kpiResult.totalAmount / stats.totalInvoices
+        : 0;
 
       // Get unique customer count
       kpiResult.uniqueCustomerCount =
@@ -2531,8 +2590,8 @@ exports.getGlobalKPIs = async (req, res) => {
         ? kpiResult.totalAmount / kpiResult.uniqueCustomerCount
         : 0;
 
-      kpiResult.collectionRate = kpiResult.totalAmount
-        ? ((kpiResult.totalPaid / kpiResult.totalAmount) * 100).toFixed(2)
+      kpiResult.collectionRate = kpiResult.grossAmount
+        ? ((kpiResult.totalPaid / kpiResult.grossAmount) * 100).toFixed(2)
         : 0;
     }
 
@@ -2576,16 +2635,26 @@ exports.getGlobalKPIs = async (req, res) => {
       "Dec",
     ];
 
+    // Each month's amount is net of that month's credit notes (gross kept).
+    const creditByMonth = new Map(
+      creditNotesResults.map((r) => [`${r._id.year}-${r._id.month}`, r])
+    );
     kpiResult.monthlyTrends = monthlyTrendsResults.map((item) => {
+      const cn = creditByMonth.get(`${item._id.year}-${item._id.month}`);
+      const creditAmount = cn ? cn.amount : 0;
+      const amount = item.totalAmount - creditAmount;
       // Calculate monthly unique customers separately if needed for high precision
       return {
         month: months[item._id.month - 1],
         year: item._id.year,
         count: item.invoiceCount,
-        amount: item.totalAmount,
+        amount,
+        grossAmount: item.totalAmount,
+        creditNoteAmount: creditAmount,
+        creditNoteCount: cn ? cn.count : 0,
         customers: 0, // Will be updated below if necessary
         averageInvoiceValue: item.invoiceCount
-          ? (item.totalAmount / item.invoiceCount).toFixed(2)
+          ? (amount / item.invoiceCount).toFixed(2)
           : 0,
       };
     });

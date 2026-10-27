@@ -11,6 +11,15 @@ router.get("/leads/:leadId/conversation", auth, ctrl.getLeadConversation);
 router.post("/leads/:leadId/takeover", auth, ctrl.takeoverLeadConversation);
 router.post("/leads/:leadId/resume", auth, ctrl.resumeLeadConversation);
 
+// A customer's AI conversations, for the customer page (agents: their own customers only).
+router.get("/customers/:cardCode/conversation", auth, ctrl.getCustomerConversation);
+
+// Any outreach conversation by thread, and assigning an account to an agent — admins and sales managers.
+router.get("/threads/:threadId", auth, managers, ctrl.getThreadConversation);
+router.post("/threads/:threadId/takeover", auth, managers, ctrl.takeoverThread);
+router.post("/threads/:threadId/resume", auth, managers, ctrl.resumeThread);
+router.post("/assign", auth, managers, ctrl.assignAccount);
+
 // Batches — admins and sales managers.
 router.get("/overview", auth, managers, ctrl.overview);
 router.get("/batches/options", auth, managers, ctrl.batchOptions);

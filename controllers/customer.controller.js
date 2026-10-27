@@ -7793,3 +7793,35 @@ exports.exportCustomersToRingoverCSV = async (req, res) => {
     });
   }
 };
+
+// Set (usually: reset to "open") whether the business is still there. The AI
+// agent flags closed businesses and wrong numbers; a manager who has checked
+// clears the warning here.
+exports.updateBusinessStatus = async (req, res) => {
+  try {
+    const { status = "open", reason } = req.body || {};
+    if (!["open", "closed", "sold", "wrong_number"].includes(status)) {
+      return res.status(400).json({ success: false, message: "Invalid business status" });
+    }
+    const by = `${req.user.firstName || ""} ${req.user.lastName || ""}`.trim() || req.user.email;
+    const customer = await Customer.findByIdAndUpdate(
+      req.params.id,
+      {
+        $set: {
+          businessStatus: status,
+          businessStatusReason: reason ? String(reason).slice(0, 1000) : status === "open" ? `Checked by ${by}` : undefined,
+          businessStatusAt: new Date(),
+          businessStatusBy: by,
+        },
+      },
+      { new: true }
+    )
+      .select("businessStatus businessStatusReason businessStatusAt businessStatusBy")
+      .lean();
+    if (!customer) return res.status(404).json({ success: false, message: "Customer not found" });
+    res.json({ success: true, data: customer });
+  } catch (error) {
+    console.error("Business status update error:", error);
+    res.status(500).json({ success: false, message: "Server error", error: error.message });
+  }
+};
