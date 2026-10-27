@@ -3,6 +3,8 @@
 // details of those in our departments. Shows on the Uber Eats Scraper page like any other job.
 //   node scripts/ubereatsCityScrape.js [--prefixes=75,92,93,94] [--places=city/vincennes-idf,...]
 //     [--concurrency=N] [--skip-fresh=HOURS] [--no-details] [--headed]
+//   --sitemap: instead, the stores of Uber Eats' store sitemaps we don't have yet (names a town of the
+//     region; add --all-france for every French store, ~240,000 — days of requests)
 // Run it from a machine Uber Eats does not block (the live server's IP gets a reCAPTCHA, 27 Oct 2026).
 require("dotenv").config();
 const dns = require("dns");
@@ -27,7 +29,8 @@ async function main() {
   const list = (k) => (flags.get(k) || "").split(",").map((s) => s.trim()).filter(Boolean);
   const options = {
     ...DEFAULT_JOB_OPTIONS,
-    mode: "city",
+    mode: flags.has("sitemap") ? "sitemap" : "city",
+    ...(flags.has("all-france") && { allFrance: true }),
     concurrency: Number(flags.get("concurrency")) || DEFAULT_JOB_OPTIONS.concurrency,
     skipFreshHours: flags.has("skip-fresh") ? Number(flags.get("skip-fresh")) : 168,
     fetchDetails: !flags.has("no-details"),
@@ -51,8 +54,8 @@ async function main() {
     progress: { postalCodesDone: 0, postalCodesTotal: 0, storesDiscovered: 0, storesScraped: 0, storesFailed: 0, created: 0, updated: 0, unchanged: 0, missing: 0 },
     logs: [],
   });
-  console.log(`Job ${jobId}: Uber Eats city pages (${options.places ? options.places.join(", ") : "all of Île-de-France"})`);
-  await runJob(jobId, { headless: !flags.has("headed"), profileDir: path.join(PROFILE_ROOT, "browser-profile-city") });
+  console.log(`Job ${jobId}: Uber Eats ${options.mode === "sitemap" ? "store sitemaps" : `city pages (${options.places ? options.places.join(", ") : "all of Île-de-France"})`}`);
+  await runJob(jobId, { headless: !flags.has("headed"), profileDir: path.join(PROFILE_ROOT, `browser-profile-${options.mode}`) });
   const done = await jobs.findOne({ _id: jobId });
   console.log(`Status: ${done?.status}`, done?.progress);
   process.exit(0);

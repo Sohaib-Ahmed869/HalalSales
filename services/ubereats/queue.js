@@ -20,7 +20,8 @@ const DEFAULT_JOB_OPTIONS = {
   storeRaw: false, // keep the raw getStoreV1 payload (large)
 };
 // city = Uber Eats' public city / neighbourhood pages: every store of the region, open or closed.
-const MODES = ["vertical", "horizontal", "both", "city"];
+// sitemap = the stores of Uber Eats' store sitemaps we don't have yet (see runner.scrapeSitemap).
+const MODES = ["vertical", "horizontal", "both", "city", "sitemap"];
 
 /** Normalise and validate French postal codes (5 digits). */
 function parsePostalCodes(input) {

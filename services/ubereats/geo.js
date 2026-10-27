@@ -131,4 +131,47 @@ async function* placeStores(client, place, { maxPages = MAX_PAGES } = {}) {
   }
 }
 
-module.exports = { geoPaths, placeStores, parseGeoPage, storeIdToUuid, MAX_PAGES };
+const fold = (s) => String(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+
+/**
+ * Every French store in Uber Eats' store sitemaps (sitemap-store-*.xml.gz, ~240,000 incl. closed
+ * ones): [{ uuid, slug, url }]. The sitemap has no address; `townsOf()` below narrows it.
+ */
+async function sitemapStores(client, { onFile } = {}) {
+  const robots = await fetchIn(client, "/robots.txt");
+  const index = (robots.text.match(/Sitemap:\s*\S*\/(sitemap-index-[^\s/]+)/) || [])[1];
+  if (!index) throw new Error("No sitemap index in Uber Eats' robots.txt");
+  const files = [...(await fetchSitemap(client, index)).matchAll(/<loc>[^<]*\/(sitemap-store-[0-9a-f]+-\d+\.xml(?:\.gz)?)<\/loc>/g)].map((m) => m[1]);
+  const out = new Map();
+  for (const [i, f] of files.entries()) {
+    let xml;
+    for (let a = 0; a < 3 && !xml; a++) {
+      try {
+        xml = await fetchSitemap(client, f);
+      } catch (e) {
+        if (a === 2) throw e;
+        await client.resetSession().catch(() => {});
+      }
+    }
+    for (const m of xml.matchAll(/<loc>(https:\/\/www\.ubereats\.com\/fr(?:-en)?\/store\/([^/<]+)\/([A-Za-z0-9_-]{22}))<\/loc>/g)) {
+      const uuid = storeIdToUuid(m[3]);
+      if (uuid && !out.has(uuid)) out.set(uuid, { uuid, slug: decodeURIComponent(m[2]), url: m[1] });
+    }
+    if (onFile) await onFile(i + 1, files.length, out.size);
+  }
+  return [...out.values()];
+}
+
+/** A test for store slugs that name a town of the region ("kebab-du-marche-montreuil"). */
+async function townsOf(client, { region = "idf" } = {}) {
+  const towns = new Set(region === "idf" ? ["paris"] : []);
+  for (const p of await geoPaths(client, { region })) {
+    const m = p.match(new RegExp(`^city/(.+)-${region}$`));
+    if (m) towns.add(fold(m[1]));
+  }
+  const list = [...towns].filter((t) => t.length >= 4 && /^[a-z0-9-]+$/.test(t)).sort((a, b) => b.length - a.length);
+  const re = new RegExp(`(^|-)(${list.join("|")})(-|$)`);
+  return (slug) => re.test(fold(slug));
+}
+
+module.exports = { geoPaths, placeStores, parseGeoPage, storeIdToUuid, sitemapStores, townsOf, MAX_PAGES };

@@ -83,6 +83,7 @@ async function runJob(jobId, { headless = true, echo = true, profileDir } = {}) 
     if (resumeSince) log(`Continuing: ${progress.postalCodesDone} of ${job.postalCodes.length} postal codes already done`);
     await client.start();
     if (opts.mode === "city") await scrapeCity();
+    else if (opts.mode === "sitemap") await scrapeSitemap();
     else {
       for (const code of job.postalCodes.slice(progress.postalCodesDone || 0)) {
         progress.currentPostalCode = code;
@@ -236,6 +237,76 @@ async function runJob(jobId, { headless = true, echo = true, profileDir } = {}) 
       await Promise.all(Array.from({ length: Math.max(1, opts.concurrency) }, worker));
       await flush(true);
     }
+  }
+
+  /**
+   * Mode "sitemap": the stores of Uber Eats' store sitemaps (every French store, open or closed) that we
+   * don't have yet, details fetched one by one; only those in our departments are saved. By default
+   * only stores whose link names a town of the region (opts.allFrance = every French store: ~240,000,
+   * days of requests). The list and the position in it are kept on the job, so it resumes.
+   */
+  async function scrapeSitemap() {
+    const prefixes = (opts.postalPrefixes?.length ? opts.postalPrefixes : CITY_DEFAULT_PREFIXES).map(String);
+    const ours = (pc) => pc && prefixes.some((p) => pc.startsWith(p));
+    let list = job.resumeState?.sitemap?.uuids;
+    if (!list?.length) {
+      const all = await geo.sitemapStores(client, {
+        onFile: async (i, n, size) => {
+          progress.currentPostalCode = `sitemap ${i}/${n}`;
+          if (i % 10 === 0 || i === n) log(`Store sitemaps: ${i}/${n} read, ${size} French stores`);
+          await flush();
+        },
+      });
+      const inRegion = opts.allFrance ? () => true : await geo.townsOf(client, { region: opts.region || "idf" });
+      const known = new Set(await restaurants.distinct("uuid"));
+      list = all.filter((s) => !known.has(s.uuid) && inRegion(s.slug)).map((s) => s.uuid);
+      log(`${all.length} French stores in the sitemaps; ${list.length} we don't have${opts.allFrance ? "" : " whose link names a town of the region"}`);
+      await jobs.updateOne({ _id: jobId }, { $set: { "resumeState.sitemap": { uuids: list, done: 0 } } });
+    }
+    let done = job.resumeState?.sitemap?.done || 0;
+    progress.postalCodesTotal = list.length;
+    progress.postalCodesDone = done;
+    progress.storesDiscovered = list.length;
+    progress.currentPostalCode = "store details";
+    const location = await client.resolveLocation("75001");
+    await client.setLocation(location);
+    let outside = 0;
+    for (; done < list.length; done += 300) {
+      const batch = list.slice(done, done + 300);
+      let i = 0;
+      let stopAll = false;
+      const worker = async () => {
+        while (i < batch.length && !stopAll) {
+          const uuid = batch[i++];
+          try {
+            const raw = await client.store(uuid);
+            const parsed = parseStore(raw);
+            if (!ours(parsed.postalCode)) {
+              outside++;
+              continue;
+            }
+            await fillMissingGeo(parsed, (m) => log(m, "warn"));
+            const result = await ingestStore(parsed, { jobId, postalCode: parsed.postalCode, feedCategories: [], storeRaw: opts.storeRaw ? raw : undefined });
+            progress.storesScraped++;
+            progress[result]++;
+          } catch (e) {
+            if (e instanceof RateLimitError) {
+              stopAll = true;
+              throw e;
+            }
+            // Delisted stores answer 404 / an error: nothing to save.
+            progress.storesFailed++;
+          }
+          await flush();
+        }
+      };
+      await Promise.all(Array.from({ length: Math.max(1, opts.concurrency) }, worker));
+      progress.postalCodesDone = Math.min(list.length, done + 300);
+      await jobs.updateOne({ _id: jobId }, { $set: { "resumeState.sitemap.done": Math.min(list.length, done + 300) } });
+      log(`Store details: ${progress.postalCodesDone}/${list.length} checked, ${progress.created} new in our departments, ${outside} elsewhere, ${progress.storesFailed} gone`);
+      await flush(true);
+    }
+    delete progress.currentPostalCode;
   }
 
   async function scrapePostalCode(code) {
