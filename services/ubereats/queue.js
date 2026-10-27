@@ -111,7 +111,9 @@ async function claimJob(workerId) {
   const { jobs } = await ueCollections();
   return jobs.findOneAndUpdate(
     // notBefore: a job waiting out an Uber Eats rate limit is left alone until then.
-    { status: "queued", $or: [{ notBefore: { $exists: false } }, { notBefore: null }, { notBefore: { $lte: new Date() } }] },
+    // Jobs started from the command line (scripts/ubereats*Scrape.js) stay with the machine that runs them:
+    // the live server's IP is blocked by Uber Eats (27 Oct 2026), so its worker must not take them over.
+    { status: "queued", trigger: { $ne: "cli" }, $or: [{ notBefore: { $exists: false } }, { notBefore: null }, { notBefore: { $lte: new Date() } }] },
     [
       {
         $set: {

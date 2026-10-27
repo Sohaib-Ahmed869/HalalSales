@@ -9,6 +9,7 @@
 // name, the cuisine line and the full address with the postcode, so stores outside our departments
 // are dropped before any detail request.
 const zlib = require("zlib");
+const { RateLimitError } = require("./client");
 
 const BASE = "https://www.ubereats.com";
 const MAX_PAGES = 25;
@@ -113,9 +114,19 @@ async function* placeStores(client, place, { maxPages = MAX_PAGES } = {}) {
   const seen = new Set();
   for (let p = 1; p <= maxPages; p++) {
     let r;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    // "Too many requests" (429): wait minutes, not seconds (27 Oct: three quick retries failed the job).
+    const waits = [60, 120, 240, 480, 900];
+    for (let attempt = 0, limited = 0; ; attempt++) {
       r = await fetchIn(client, `/fr/${encodeURI(place)}${p > 1 ? `?page=${p}` : ""}`);
       if (r.status === 200 || r.status === 404) break;
+      if (r.status === 429) {
+        if (limited >= waits.length) throw new RateLimitError(`${place} page ${p}`);
+        client.log(`Uber Eats says too many requests on ${place}: waiting ${waits[limited] / 60} min`);
+        await new Promise((res) => setTimeout(res, waits[limited++] * 1000));
+        await client.resetSession().catch(() => {});
+        continue;
+      }
+      if (attempt >= 2) break;
       await client.resetSession().catch(() => {});
     }
     if (r.status !== 200) {
