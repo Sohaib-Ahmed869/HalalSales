@@ -168,6 +168,42 @@ async function ingestFeedOnly(store, ctx) {
 }
 
 /**
+ * Record a store found on a city / neighbourhood page (mode "city"), without its details yet. The card
+ * has the address and postcode, so the store is placed on the map and in its postcode at once; the
+ * detail scrape fills in the rest. `place` is the page it was found on.
+ */
+async function ingestGeoCard(card, ctx) {
+  const { restaurants, changes } = await ueCollections();
+  const now = new Date();
+  const res = await restaurants.updateOne(
+    { uuid: card.uuid },
+    {
+      $set: clean({ lastSeenAt: now, lastJobId: ctx.jobId, [`seenOnPlace.${String(ctx.place).replace(/[.$]/g, "_")}`]: now }),
+      $setOnInsert: clean({
+        title: card.title,
+        slug: card.slug,
+        url: card.url,
+        imageUrls: card.imageUrl ? [card.imageUrl] : [],
+        categories: card.categories || [],
+        postalCode: card.postalCode || undefined,
+        location: card.address ? clean({ address: card.address, postalCode: card.postalCode || undefined }) : undefined,
+        isRestaurant: true,
+        menu: [],
+        menuItemCount: 0,
+        firstSeenAt: now,
+      }),
+      $addToSet: { feedCategories: { $each: card.categories || [] } },
+    },
+    { upsert: true }
+  );
+  if (res.upsertedCount) {
+    await changes.insertOne(clean({ restaurantUuid: card.uuid, restaurantTitle: card.title, jobId: ctx.jobId, postalCode: card.postalCode, type: "created", fields: [], at: now }));
+    return "created";
+  }
+  return "unchanged";
+}
+
+/**
  * After a complete vertical pass of a searched postal code, flag stores that used to be listed
  * there and no longer are (closed, delisted, or out of delivery range).
  */
@@ -185,4 +221,4 @@ async function markMissing(postalCode, seen, jobId) {
   return stale.length;
 }
 
-module.exports = { ingestStore, ingestFeedOnly, markMissing, contentHash };
+module.exports = { ingestStore, ingestFeedOnly, ingestGeoCard, markMissing, contentHash };

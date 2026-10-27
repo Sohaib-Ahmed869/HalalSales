@@ -9,7 +9,11 @@ const { UberEatsClient, RateLimitError } = require("./client");
 const RATE_LIMIT_RETRY_MS = Number(process.env.UBEREATS_RATE_LIMIT_RETRY_MIN || 45) * 60000;
 const { parseStore } = require("./parse");
 const { fillMissingGeo } = require("./geocode");
-const { ingestFeedOnly, ingestStore, markMissing } = require("./ingest");
+const { ingestFeedOnly, ingestStore, ingestGeoCard, markMissing } = require("./ingest");
+const geo = require("./geo");
+
+/** Mode "city": departments kept (the rest of Île-de-France's pages list a few stores further out). */
+const CITY_DEFAULT_PREFIXES = ["75", "77", "78", "91", "92", "93", "94", "95"];
 
 class CancelledError extends Error {}
 class PausedError extends Error {}
@@ -78,12 +82,15 @@ async function runJob(jobId, { headless = true, echo = true, profileDir } = {}) 
   try {
     if (resumeSince) log(`Continuing: ${progress.postalCodesDone} of ${job.postalCodes.length} postal codes already done`);
     await client.start();
-    for (const code of job.postalCodes.slice(progress.postalCodesDone || 0)) {
-      progress.currentPostalCode = code;
-      progress.currentCategory = undefined;
-      await flush(true);
-      await scrapePostalCode(code);
-      progress.postalCodesDone++;
+    if (opts.mode === "city") await scrapeCity();
+    else {
+      for (const code of job.postalCodes.slice(progress.postalCodesDone || 0)) {
+        progress.currentPostalCode = code;
+        progress.currentCategory = undefined;
+        await flush(true);
+        await scrapePostalCode(code);
+        progress.postalCodesDone++;
+      }
     }
     delete progress.currentPostalCode;
     delete progress.currentCategory;
@@ -136,6 +143,99 @@ async function runJob(jobId, { headless = true, echo = true, profileDir } = {}) 
   } finally {
     clearInterval(beat);
     await client.close();
+  }
+
+  /**
+   * Mode "city": every store on Uber Eats' Île-de-France city / neighbourhood pages, open or not
+   * (services/ubereats/geo.js), then the details of those in our departments. Resumable: the pages
+   * done are kept on the job, and the details pass picks up whatever this job found and has not
+   * scraped yet.
+   */
+  async function scrapeCity() {
+    const prefixes = (opts.postalPrefixes?.length ? opts.postalPrefixes : CITY_DEFAULT_PREFIXES).map(String);
+    const ours = (pc) => pc && prefixes.some((p) => pc.startsWith(p));
+    let places = job.resumeState?.city?.places;
+    if (!places?.length) {
+      places = opts.places?.length ? opts.places : await geo.geoPaths(client, { region: opts.region || "idf" });
+      await jobs.updateOne({ _id: jobId }, { $set: { "resumeState.city": { places, done: 0 } } });
+    }
+    let done = job.resumeState?.city?.done || 0;
+    progress.postalCodesTotal = places.length;
+    progress.postalCodesDone = done;
+    log(`${places.length} Uber Eats city / neighbourhood pages${done ? `, ${done} already done` : ""}; keeping postcodes ${prefixes.join(", ")}`);
+
+    // 1. Discovery: the cards of every page (name, cuisine, address).
+    const seen = new Set();
+    for (; done < places.length; done++) {
+      const place = places[done];
+      progress.currentPostalCode = place;
+      let n = 0;
+      let kept = 0;
+      for await (const card of geo.placeStores(client, place, { maxPages: opts.maxPlacePages || geo.MAX_PAGES })) {
+        n++;
+        if (!ours(card.postalCode)) continue;
+        kept++;
+        if (seen.has(card.uuid)) continue;
+        seen.add(card.uuid);
+        const r = await ingestGeoCard(card, { jobId, place });
+        if (r === "created") progress.created++;
+        progress.storesDiscovered = seen.size;
+      }
+      progress.postalCodesDone = done + 1;
+      await jobs.updateOne({ _id: jobId }, { $set: { "resumeState.city.done": done + 1 } });
+      log(`[${place}] ${n} stores listed, ${kept} in our departments (${seen.size} different so far)`);
+      await flush(true);
+    }
+    delete progress.currentPostalCode;
+
+    if (!opts.fetchDetails) return;
+    // 2. Details (phone, email, SIRET, hours, menu) of the stores this job found.
+    const location = await client.resolveLocation("75001");
+    await client.setLocation(location);
+    const since = new Date(Date.now() - (opts.skipFreshHours || 168) * 3600000);
+    const regex = new RegExp(`^(${prefixes.join("|")})`);
+    const failed = new Set();
+    const query = () => ({
+      lastJobId: jobId,
+      postalCode: regex,
+      uuid: { $nin: [...failed] },
+      $or: [{ detailsScrapedAt: { $exists: false } }, { detailsScrapedAt: { $lt: since } }],
+    });
+    progress.storesDiscovered = Math.max(progress.storesDiscovered, await restaurants.countDocuments({ lastJobId: jobId, postalCode: regex }));
+    log(`Details: ${await restaurants.countDocuments(query())} stores to fetch`);
+    for (;;) {
+      const batch = await restaurants.find(query(), { projection: { uuid: 1, title: 1, postalCode: 1, feedCategories: 1 } }).limit(300).toArray();
+      if (!batch.length) break;
+      let i = 0;
+      let stopAll = false;
+      const worker = async () => {
+        while (i < batch.length && !stopAll) {
+          const t = batch[i++];
+          try {
+            const raw = await client.store(t.uuid);
+            const parsed = parseStore(raw);
+            await fillMissingGeo(parsed, (m) => log(m, "warn"));
+            const result = await ingestStore(parsed, {
+              jobId, postalCode: parsed.postalCode || t.postalCode, feedCategories: t.feedCategories || [],
+              storeRaw: opts.storeRaw ? raw : undefined,
+            });
+            progress.storesScraped++;
+            progress[result]++;
+          } catch (e) {
+            if (e instanceof RateLimitError) {
+              stopAll = true;
+              throw e;
+            }
+            failed.add(t.uuid);
+            progress.storesFailed++;
+            log(`${t.title} (${t.uuid}): ${e.message}`, "error");
+          }
+          await flush();
+        }
+      };
+      await Promise.all(Array.from({ length: Math.max(1, opts.concurrency) }, worker));
+      await flush(true);
+    }
   }
 
   async function scrapePostalCode(code) {
