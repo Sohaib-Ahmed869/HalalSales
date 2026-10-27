@@ -331,7 +331,8 @@ async function runJob(jobId, { headless = true, echo = true, profileDir } = {}) 
     const regex = new RegExp(`^(${prefixes.join("|")})`);
     const from = opts.fromHour ?? 11.75;
     const until = opts.untilHour ?? 14.5;
-    while (parisHour() < from) {
+    // Outside the window (before it, or after it: then tomorrow's), wait.
+    while (!(parisHour() >= from && parisHour() < until)) {
       progress.currentPostalCode = `waiting for ${String(Math.floor(from)).padStart(2, "0")}:${String(Math.round((from % 1) * 60)).padStart(2, "0")} Paris`;
       await flush(true);
       await sleep(60000);
