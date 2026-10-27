@@ -11,6 +11,7 @@ const { parseStore } = require("./parse");
 const { fillMissingGeo } = require("./geocode");
 const { ingestFeedOnly, ingestStore, ingestGeoCard, markMissing } = require("./ingest");
 const geo = require("./geo");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Mode "city": departments kept (the rest of Île-de-France's pages list a few stores further out). */
 const CITY_DEFAULT_PREFIXES = ["75", "77", "78", "91", "92", "93", "94", "95"];
@@ -84,6 +85,7 @@ async function runJob(jobId, { headless = true, echo = true, profileDir } = {}) 
     await client.start();
     if (opts.mode === "city") await scrapeCity();
     else if (opts.mode === "sitemap") await scrapeSitemap();
+    else if (opts.mode === "menus") await scrapeMenus();
     else {
       for (const code of job.postalCodes.slice(progress.postalCodesDone || 0)) {
         progress.currentPostalCode = code;
@@ -304,6 +306,83 @@ async function runJob(jobId, { headless = true, echo = true, profileDir } = {}) 
       progress.postalCodesDone = Math.min(list.length, done + 300);
       await jobs.updateOne({ _id: jobId }, { $set: { "resumeState.sitemap.done": Math.min(list.length, done + 300) } });
       log(`Store details: ${progress.postalCodesDone}/${list.length} checked, ${progress.created} new in our departments, ${outside} elsewhere, ${progress.storesFailed} gone`);
+      await flush(true);
+    }
+    delete progress.currentPostalCode;
+  }
+
+  /** Paris hour as a decimal (13.5 = 13:30). */
+  function parisHour() {
+    const [h, m] = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Paris", hour: "2-digit", minute: "2-digit", hour12: false })
+      .format(new Date())
+      .split(":")
+      .map(Number);
+    return h + m / 60;
+  }
+
+  /**
+   * Mode "menus": stores whose details came back without a menu. Uber Eats only returns a menu while
+   * the store is serving (27 Oct: 0% missing at 13-14h, ~23% at 15h and in the evening), so this runs
+   * inside service hours (opts.fromHour-opts.untilHour, Paris; default 11.75-14.5) and stops at the end
+   * of the window. A store still without a menu is tried again on a later run (menuRetryAt).
+   */
+  async function scrapeMenus() {
+    const prefixes = (opts.postalPrefixes?.length ? opts.postalPrefixes : CITY_DEFAULT_PREFIXES).map(String);
+    const regex = new RegExp(`^(${prefixes.join("|")})`);
+    const from = opts.fromHour ?? 11.75;
+    const until = opts.untilHour ?? 14.5;
+    while (parisHour() < from) {
+      progress.currentPostalCode = `waiting for ${String(Math.floor(from)).padStart(2, "0")}:${String(Math.round((from % 1) * 60)).padStart(2, "0")} Paris`;
+      await flush(true);
+      await sleep(60000);
+    }
+    const location = await client.resolveLocation("75001");
+    await client.setLocation(location);
+    const tried = new Set();
+    const query = () => ({
+      postalCode: regex,
+      detailsScrapedAt: { $exists: true },
+      $or: [{ menuItemCount: 0 }, { menuItemCount: { $exists: false } }],
+      uuid: { $nin: [...tried] },
+    });
+    progress.storesDiscovered = await restaurants.countDocuments(query());
+    progress.currentPostalCode = "menus";
+    log(`Menus: ${progress.storesDiscovered} stores without a menu; fetching until ${until} h Paris`);
+    let got = 0;
+    while (parisHour() < until) {
+      const batch = await restaurants.find(query(), { projection: { uuid: 1, title: 1, postalCode: 1, feedCategories: 1 } }).limit(200).toArray();
+      if (!batch.length) break;
+      let i = 0;
+      let stopAll = false;
+      const worker = async () => {
+        while (i < batch.length && !stopAll && parisHour() < until) {
+          const t = batch[i++];
+          tried.add(t.uuid);
+          try {
+            const raw = await client.store(t.uuid);
+            const parsed = parseStore(raw);
+            if (!parsed.menuItemCount) {
+              await restaurants.updateOne({ uuid: t.uuid }, { $set: { menuRetryAt: new Date() } });
+              progress.unchanged++;
+            } else {
+              await fillMissingGeo(parsed, (m) => log(m, "warn"));
+              const result = await ingestStore(parsed, { jobId, postalCode: parsed.postalCode || t.postalCode, feedCategories: t.feedCategories || [] });
+              progress[result === "unchanged" ? "unchanged" : "updated"]++;
+              got++;
+            }
+            progress.storesScraped++;
+          } catch (e) {
+            if (e instanceof RateLimitError) {
+              stopAll = true;
+              throw e;
+            }
+            progress.storesFailed++;
+          }
+          await flush();
+        }
+      };
+      await Promise.all(Array.from({ length: Math.max(1, opts.concurrency) }, worker));
+      log(`Menus: ${progress.storesScraped} checked, ${got} now have a menu`);
       await flush(true);
     }
     delete progress.currentPostalCode;

@@ -64,6 +64,19 @@ function parseGeoPage(html) {
 /** Fetches a URL inside the scraper's browser page (same cookies / Cloudflare clearance). */
 async function fetchIn(client, url, { binary = false } = {}) {
   await client.throttle();
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await evaluateFetch(client, url, binary);
+    } catch (e) {
+      // Right after a session reset the page may be blank or still loading: relative fetches fail.
+      if (attempt >= 3) throw e;
+      await new Promise((res) => setTimeout(res, 5000 * (attempt + 1)));
+      await client.page.goto(`${BASE}/fr`, { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
+    }
+  }
+}
+
+function evaluateFetch(client, url, binary) {
   return client.page.evaluate(
     async ([u, bin]) => {
       const r = await fetch(u, { credentials: "include" });

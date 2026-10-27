@@ -21,7 +21,8 @@ const DEFAULT_JOB_OPTIONS = {
 };
 // city = Uber Eats' public city / neighbourhood pages: every store of the region, open or closed.
 // sitemap = the stores of Uber Eats' store sitemaps we don't have yet (see runner.scrapeSitemap).
-const MODES = ["vertical", "horizontal", "both", "city", "sitemap"];
+// menus = stores fetched outside service hours whose menu came back empty (see runner.scrapeMenus).
+const MODES = ["vertical", "horizontal", "both", "city", "sitemap", "menus"];
 
 /** Normalise and validate French postal codes (5 digits). */
 function parsePostalCodes(input) {
