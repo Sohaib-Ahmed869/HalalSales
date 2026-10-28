@@ -31,7 +31,7 @@ async function main() {
   const list = (k) => (flags.get(k) || "").split(",").map((s) => s.trim()).filter(Boolean);
   const options = {
     ...DEFAULT_JOB_OPTIONS,
-    mode: flags.has("sitemap") ? "sitemap" : flags.has("menus") ? "menus" : "city",
+    mode: flags.has("sitemap") ? "sitemap" : flags.has("menus") ? "menus" : flags.has("details") ? "details" : "city",
     ...(flags.has("from-hour") && { fromHour: Number(flags.get("from-hour")) }),
     ...(flags.has("until-hour") && { untilHour: Number(flags.get("until-hour")) }),
     ...(flags.has("all-france") && { allFrance: true }),
@@ -58,7 +58,7 @@ async function main() {
     progress: { postalCodesDone: 0, postalCodesTotal: 0, storesDiscovered: 0, storesScraped: 0, storesFailed: 0, created: 0, updated: 0, unchanged: 0, missing: 0 },
     logs: [],
   });
-  console.log(`Job ${jobId}: Uber Eats ${options.mode === "sitemap" ? "store sitemaps" : options.mode === "menus" ? "missing menus" : `city pages (${options.places ? options.places.join(", ") : "all of Île-de-France"})`}`);
+  console.log(`Job ${jobId}: Uber Eats ${options.mode === "sitemap" ? "store sitemaps" : options.mode === "menus" ? "missing menus" : options.mode === "details" ? "missing details" : `city pages (${options.places ? options.places.join(", ") : "all of Île-de-France"})`}`);
   await runJob(jobId, { headless: !flags.has("headed"), profileDir: path.join(PROFILE_ROOT, `browser-profile-${options.mode}`) });
   const done = await jobs.findOne({ _id: jobId });
   console.log(`Status: ${done?.status}`, done?.progress);

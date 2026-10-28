@@ -86,6 +86,7 @@ async function runJob(jobId, { headless = true, echo = true, profileDir } = {}) 
     if (opts.mode === "city") await scrapeCity();
     else if (opts.mode === "sitemap") await scrapeSitemap();
     else if (opts.mode === "menus") await scrapeMenus();
+    else if (opts.mode === "details") await scrapeMissingDetails();
     else {
       for (const code of job.postalCodes.slice(progress.postalCodesDone || 0)) {
         progress.currentPostalCode = code;
@@ -384,6 +385,55 @@ async function runJob(jobId, { headless = true, echo = true, profileDir } = {}) 
       };
       await Promise.all(Array.from({ length: Math.max(1, opts.concurrency) }, worker));
       log(`Menus: ${progress.storesScraped} checked, ${got} now have a menu`);
+      await flush(true);
+    }
+    delete progress.currentPostalCode;
+  }
+
+  /**
+   * Mode "details": every store in our departments known only from a city page or a feed card (no
+   * details yet): phone, email, SIRET, hours, menu. Not tied to the job that found them.
+   */
+  async function scrapeMissingDetails() {
+    const prefixes = (opts.postalPrefixes?.length ? opts.postalPrefixes : CITY_DEFAULT_PREFIXES).map(String);
+    const regex = new RegExp(`^(${prefixes.join("|")})`);
+    const location = await client.resolveLocation("75001");
+    await client.setLocation(location);
+    const failed = new Set();
+    const query = () => ({ postalCode: regex, detailsScrapedAt: { $exists: false }, uuid: { $nin: [...failed] } });
+    progress.storesDiscovered = await restaurants.countDocuments(query());
+    progress.currentPostalCode = "store details";
+    log(`Details: ${progress.storesDiscovered} stores without details`);
+    for (;;) {
+      const batch = await restaurants.find(query(), { projection: { uuid: 1, title: 1, postalCode: 1, feedCategories: 1 } }).limit(300).toArray();
+      if (!batch.length) break;
+      let i = 0;
+      let stopAll = false;
+      const worker = async () => {
+        while (i < batch.length && !stopAll) {
+          const t = batch[i++];
+          try {
+            const raw = await client.store(t.uuid);
+            const parsed = parseStore(raw);
+            await fillMissingGeo(parsed, (m) => log(m, "warn"));
+            const result = await ingestStore(parsed, { jobId, postalCode: parsed.postalCode || t.postalCode, feedCategories: t.feedCategories || [] });
+            progress.storesScraped++;
+            progress[result]++;
+          } catch (e) {
+            if (e instanceof RateLimitError) {
+              stopAll = true;
+              throw e;
+            }
+            failed.add(t.uuid);
+            progress.storesFailed++;
+            // Gone from Uber Eats: kept, marked, so a later clean-up can drop it.
+            await restaurants.updateOne({ uuid: t.uuid }, { $set: { detailsFailedAt: new Date(), detailsError: String(e.message).slice(0, 200) } }).catch(() => {});
+          }
+          await flush();
+        }
+      };
+      await Promise.all(Array.from({ length: Math.max(1, opts.concurrency) }, worker));
+      log(`Details: ${progress.storesScraped} fetched, ${progress.storesFailed} failed, ${progress.storesDiscovered - progress.storesScraped - progress.storesFailed} left`);
       await flush(true);
     }
     delete progress.currentPostalCode;
