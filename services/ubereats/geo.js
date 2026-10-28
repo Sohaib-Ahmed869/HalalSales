@@ -79,7 +79,10 @@ async function fetchIn(client, url, { binary = false } = {}) {
 function evaluateFetch(client, url, binary) {
   return client.page.evaluate(
     async ([u, bin]) => {
-      const r = await fetch(u, { credentials: "include" });
+      // A request that never answers would stall the job (27 Oct, 03:03: the server then took it over).
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 45000);
+      const r = await fetch(u, { credentials: "include", signal: ctl.signal }).finally(() => clearTimeout(timer));
       if (!bin) return { status: r.status, text: await r.text() };
       const b = new Uint8Array(await r.arrayBuffer());
       let s = "";
