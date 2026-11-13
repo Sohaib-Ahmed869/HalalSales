@@ -28,7 +28,7 @@ const fail = (res, err) => {
 const leadFor = async (req) => {
   const query = { _id: req.params.leadId };
   if (req.user.role === "sales_agent") query.assignedTo = req.user._id;
-  return Lead.findOne(query).select("fullName company phoneNumber sapCardCode aiHandoff assignedTo sourceType").lean();
+  return Lead.findOne(query).select("fullName company phoneNumber email sapCardCode aiHandoff assignedTo sourceType").lean();
 };
 
 /** The AI conversation behind a lead (by thread id, else SAP code, else phone). */
@@ -284,6 +284,74 @@ exports.catalogueReport = async (req, res) => {
     for (const a of agents) for (const code of a.assignedPostalCodes || []) if (!byCode.has(code)) byCode.set(code, `${a.firstName || ""} ${a.lastName || ""}`.trim());
     data.rows = (data.rows || []).map((r) => ({ ...r, owner: byCode.get(r.postalCode) || null }));
     res.json({ success: true, data });
+  } catch (err) {
+    fail(res, err);
+  }
+};
+
+/* ── Scheduled email campaigns (Amazon SES / Sendy) ──────────────────── */
+//
+// Built, scheduled and followed from the AI Outreach page; hfs-intelligence
+// does the sending and the tracking. Admins and sales managers only (routes),
+// and every change carries the user's name to the campaign's audit trail.
+
+const EC = intelligence.emailCampaigns;
+
+/** postcode → the agent who covers it (the Uber Eats Scraper's postal-code assignment). */
+const agentsByPostcode = async () => {
+  const agents = await User.find({ role: { $in: ["sales_agent", "sales_manager"] }, deactivated: { $ne: true }, assignedPostalCodes: { $exists: true, $ne: [] } })
+    .select("firstName lastName assignedPostalCodes")
+    .lean();
+  const byCode = new Map();
+  for (const a of agents) for (const code of a.assignedPostalCodes || []) if (!byCode.has(code)) byCode.set(code, `${a.firstName || ""} ${a.lastName || ""}`.trim());
+  return byCode;
+};
+
+exports.emailCampaignOptions = pass((req) => EC.options(req.user));
+exports.emailCampaignHealth = pass((req) => EC.health(req.user));
+exports.emailCampaignCalendar = pass((req) => EC.calendar({ from: req.query.from, to: req.query.to }, req.user));
+exports.emailCampaignSendyLists = pass((req) => EC.sendyLists(req.user));
+exports.previewEmailAudience = pass((req) => EC.previewAudience(req.body || {}, req.user));
+exports.planEmailCampaign = pass((req) => EC.plan(req.body || {}, req.user));
+exports.testEmailCampaign = pass((req) => EC.test(req.body || {}, req.user));
+exports.listEmailCampaigns = pass(async (req) => (await EC.list(req.user)).items || []);
+exports.createEmailCampaign = pass((req) => EC.create(req.body || {}, req.user));
+exports.getEmailCampaign = pass((req) => EC.get(req.params.id, req.user));
+exports.updateEmailCampaign = pass((req) => EC.update(req.params.id, req.body || {}, req.user));
+exports.deleteEmailCampaign = pass((req) => EC.remove(req.params.id, req.user));
+exports.emailCampaignKpis = pass((req) => EC.kpis(req.params.id, req.user));
+exports.emailCampaignRecipient = pass((req) => EC.recipient(req.params.id, req.params.messageId, req.user));
+exports.scheduleEmailCampaign = pass((req) => EC.schedule(req.params.id, req.body || {}, req.user));
+exports.rescheduleEmailCampaign = pass((req) => EC.reschedule(req.params.id, req.body || {}, req.user));
+exports.pauseEmailCampaign = pass((req) => EC.pause(req.params.id, req.user));
+exports.resumeEmailCampaign = pass((req) => EC.resume(req.params.id, req.user));
+exports.cancelEmailCampaign = pass((req) => EC.cancel(req.params.id, req.user));
+exports.setEmailCampaignWaveList = pass((req) => EC.setWaveList(req.params.id, req.params.index, req.body || {}, req.user));
+exports.confirmEmailCampaignSendyWave = pass((req) => EC.confirmSendyWave(req.params.id, req.params.index, req.body || {}, req.user));
+
+/** The recipients table, with the agent covering each postcode. */
+exports.emailCampaignRecipients = pass(async (req) => {
+  const { filter, q, page, pageSize, wave } = req.query;
+  const data = await EC.recipients(req.params.id, { filter, q, page, pageSize, wave }, req.user);
+  const byCode = await agentsByPostcode();
+  data.rows = (data.rows || []).map((r) => ({ ...r, owner: byCode.get(r.postalCode) || null }));
+  return data;
+});
+
+/**
+ * Every email the outreach sent to a lead's address — campaigns, catalogue,
+ * the AI's replies — with delivered / opened / clicked / bounced (lead page).
+ * Agents: their own leads only.
+ */
+exports.getLeadEmails = async (req, res) => {
+  try {
+    const lead = await leadFor(req);
+    if (!lead) return res.status(404).json({ success: false, message: "Lead not found" });
+    if (!lead.email) return res.json({ success: true, data: { email: null, emails: [] } });
+    if (!intelligence.configured()) {
+      return res.status(503).json({ success: false, message: "AI outreach is not configured on this server" });
+    }
+    res.json({ success: true, data: await EC.timeline(lead.email, req.user) });
   } catch (err) {
     fail(res, err);
   }

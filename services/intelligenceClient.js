@@ -74,4 +74,35 @@ module.exports = {
   createCatalogue: (body, user) => request("post", "/catalogue", { data: body, user, timeout: 600000 }),
   catalogueReport: (id, user) => request("get", `/catalogue/${encodeURIComponent(id)}`, { user, timeout: 60000 }),
   stopCatalogue: (id, user) => request("post", `/catalogue/${encodeURIComponent(id)}/stop`, { user }),
+
+  // Scheduled email campaigns (Amazon SES / Sendy), see hfs-intelligence deploy/EMAIL_CAMPAIGNS.md.
+  emailCampaigns: {
+    options: (user) => request("get", "/email-campaigns/options", { user, timeout: 60000 }),
+    health: (user) => request("get", "/email-campaigns/health", { user }),
+    calendar: (params, user) => request("get", "/email-campaigns/calendar", { params, user }),
+    timeline: (email, user) => request("get", "/email-campaigns/timeline", { params: { email }, user }),
+    sendyLists: (user) => request("get", "/email-campaigns/sendy/lists", { user, timeout: 60000 }),
+    previewAudience: (body, user) => request("post", "/email-campaigns/audience/preview", { data: body, user, timeout: 170000 }),
+    plan: (body, user) => request("post", "/email-campaigns/plan", { data: body, user }),
+    test: (body, user) => request("post", "/email-campaigns/test", { data: body, user, timeout: 60000 }),
+    list: (user) => request("get", "/email-campaigns", { user, timeout: 60000 }),
+    create: (body, user) => request("post", "/email-campaigns", { data: body, user }),
+    get: (id, user) => request("get", `/email-campaigns/${encodeURIComponent(id)}`, { user, timeout: 60000 }),
+    update: (id, body, user) => request("patch", `/email-campaigns/${encodeURIComponent(id)}`, { data: body, user, timeout: 60000 }),
+    remove: (id, user) => request("delete", `/email-campaigns/${encodeURIComponent(id)}`, { user }),
+    kpis: (id, user) => request("get", `/email-campaigns/${encodeURIComponent(id)}/kpis`, { user, timeout: 60000 }),
+    recipients: (id, params, user) => request("get", `/email-campaigns/${encodeURIComponent(id)}/recipients`, { params, user, timeout: 60000 }),
+    recipient: (id, messageId, user) =>
+      request("get", `/email-campaigns/${encodeURIComponent(id)}/recipients/${encodeURIComponent(messageId)}`, { user }),
+    // Freezing the audience runs the MX checks: give it time.
+    schedule: (id, body, user) => request("post", `/email-campaigns/${encodeURIComponent(id)}/schedule`, { data: body, user, timeout: 600000 }),
+    reschedule: (id, body, user) => request("post", `/email-campaigns/${encodeURIComponent(id)}/reschedule`, { data: body, user, timeout: 60000 }),
+    pause: (id, user) => request("post", `/email-campaigns/${encodeURIComponent(id)}/pause`, { user, timeout: 60000 }),
+    resume: (id, user) => request("post", `/email-campaigns/${encodeURIComponent(id)}/resume`, { user, timeout: 60000 }),
+    cancel: (id, user) => request("post", `/email-campaigns/${encodeURIComponent(id)}/cancel`, { user, timeout: 60000 }),
+    setWaveList: (id, index, body, user) =>
+      request("put", `/email-campaigns/${encodeURIComponent(id)}/waves/${encodeURIComponent(index)}/sendy-list`, { data: body, user, timeout: 60000 }),
+    confirmSendyWave: (id, index, body, user) =>
+      request("post", `/email-campaigns/${encodeURIComponent(id)}/waves/${encodeURIComponent(index)}/sendy-confirm`, { data: body, user, timeout: 120000 }),
+  },
 };
