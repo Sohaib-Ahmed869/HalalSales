@@ -46,6 +46,12 @@ router.get("/team-performance", dashboardController.getTeamPerformance);
 // Ranked per-agent NET sales (excl. VAT), invoice count and distinct customers.
 router.get("/sales-by-agent", dashboardController.getSalesByAgent);
 
+// GET /api/main-admin-dashboard/monthly-metrics?month=2026-10&salesAgent=...&channel=...
+// Customer movement vs the previous month: new / won back / returning / grew /
+// kept / shrank / lost, with counts, net sales and the customers in each bucket.
+// month defaults to the last complete month.
+router.get("/monthly-metrics", dashboardController.getMonthlyMetrics);
+
 // GET /api/dashboard/team-logins
 // Login activity summary and per-user last login.
 router.get("/team-logins", dashboardController.getTeamLogins);
