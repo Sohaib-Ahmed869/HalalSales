@@ -78,6 +78,9 @@ async function ingestStore(parsed, ctx) {
   const { restaurants, changes } = await ueCollections();
   const now = new Date();
   const existing = await restaurants.findOne({ uuid: parsed.uuid });
+  // Uber Eats sends no menu while the store is not serving: keep the menu we already have instead of wiping it.
+  if (!parsed.menuItemCount && existing?.menuItemCount > 0)
+    parsed = { ...parsed, menu: existing.menu, menuItemCount: existing.menuItemCount, menuPartial: existing.menuPartial };
   const hash = contentHash(parsed);
 
   let type;
