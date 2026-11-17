@@ -18,4 +18,7 @@ const SalesLeadSchema = new Schema(
   { collection: "leads", strict: false }
 );
 
+// Merged duplicates (Lead.mergedInto) are hidden here too, like on the Leads page.
+SalesLeadSchema.plugin(require("./plugins/hideMergedLeads"));
+
 module.exports = mongoose.models.SalesLead || mongoose.model("SalesLead", SalesLeadSchema);

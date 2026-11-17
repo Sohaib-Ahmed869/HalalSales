@@ -9,12 +9,15 @@
 //     to their lead directly (Lead.relatedUberEatsUuid), always up to date;
 //     the rest is matched by phone, email, name and address, recomputed every
 //     10 minutes. Brands sharing a kitchen are judged one by one: a customer at
-//     the same address hides only the brand that is that customer.
+//     the same address hides only the brand that is that customer. Once an
+//     owner has a lead, though, all of that owner's brands (same SIREN, or same
+//     phone / email; services/ubereats/owners.js) are that lead.
 const SalesLead = require("../models/SalesLead");
 const User = require("../models/User");
 const { ScrapedRestaurant } = require("../models/ScrapedRestaurant");
 const { ueCollections } = require("./ubereatsDb");
 const { uuidToStoreId } = require("../services/ubereats/parse");
+const { ownerIndex, invalidateOwners } = require("../services/ubereats/owners");
 const pm = require("./prospectMatch");
 
 const TTL_MS = 10 * 60 * 1000;
@@ -61,16 +64,44 @@ async function matchContext() {
 
 const MATCH_FIELDS = { _id: 0, uuid: 1, title: 1, postalCode: 1, addressKey: 1, phoneNumber: 1, email: 1, "legal.phone": 1, "legal.name": 1 };
 
-/** Leads made from Uber Eats stores (assigned from the scraper page): uuid -> { type, id, name, via, agentId }. */
+/**
+ * Leads made from Uber Eats stores (assigned from the scraper page): uuid -> { type, id, name, via, agentId }.
+ * A lead covers its own store and every brand of the same owner listed on it (Lead.brands).
+ */
 async function linkedLeads(uuids = null) {
-  const query = { relatedUberEatsUuid: uuids ? { $in: uuids } : { $exists: true, $ne: null } };
-  const leads = await SalesLead.find(query).select("fullName company status assignedTo relatedUberEatsUuid").lean();
-  return new Map(
-    leads.map((l) => [
-      l.relatedUberEatsUuid,
-      { type: "lead", id: String(l._id), name: l.company || l.fullName, status: l.status || "new", via: "assigned", agentId: l.assignedTo ? String(l.assignedTo) : null, ownerId: l.assignedTo ? String(l.assignedTo) : null },
-    ])
-  );
+  const query = uuids
+    ? { $or: [{ relatedUberEatsUuid: { $in: uuids } }, { "brands.uuid": { $in: uuids } }] }
+    : { $or: [{ relatedUberEatsUuid: { $exists: true, $ne: null } }, { "brands.0": { $exists: true } }] };
+  const leads = await SalesLead.find(query).select("fullName company status assignedTo relatedUberEatsUuid brands.uuid").lean();
+  const wanted = uuids ? new Set(uuids) : null;
+  const out = new Map();
+  leads.forEach((l) => {
+    const link = { type: "lead", id: String(l._id), name: l.company || l.fullName, status: l.status || "new", via: "assigned", agentId: l.assignedTo ? String(l.assignedTo) : null, ownerId: l.assignedTo ? String(l.assignedTo) : null };
+    [l.relatedUberEatsUuid, ...(l.brands || []).map((b) => b.uuid)].filter(Boolean).forEach((u) => (!wanted || wanted.has(u)) && out.set(u, link));
+  });
+  return out;
+}
+
+/**
+ * The other brands of an owner who already has a lead: the same lead, via "same owner". So the
+ * scraper page and the Sales Map never offer them as new prospects (their owner is being called).
+ */
+async function ownerSiblings(linked) {
+  if (!linked.size) return new Map();
+  let index;
+  try {
+    index = await ownerIndex(await ueCollections());
+  } catch (error) {
+    console.warn("[prospects] owner groups unavailable:", error.message);
+    return new Map();
+  }
+  const out = new Map();
+  linked.forEach((link, uuid) => {
+    const group = index.groupOf.get(uuid);
+    if (!group || group.uuids.length < 2) return;
+    group.uuids.forEach((u) => !linked.has(u) && !out.has(u) && out.set(u, { ...link, via: "same owner" }));
+  });
+  return out;
 }
 
 /**
@@ -106,6 +137,8 @@ async function existingUeMatches() {
       else out.set(uuid, { ...m, ownerId: alive.get(m.id) });
     });
   }
+  // A brand whose owner already has a lead is that lead; a direct link still wins.
+  (await ownerSiblings(linked)).forEach((v, uuid) => out.set(uuid, v));
   linked.forEach((v, uuid) => out.set(uuid, v));
   return withOwnerNames(out);
 }
@@ -147,6 +180,7 @@ async function ownerOfCandidate(type, id) {
 function invalidate() {
   contextCache = null;
   matchesCache = null;
+  invalidateOwners();
   pm._reset();
 }
 

@@ -126,6 +126,49 @@ const LeadSchema = new Schema({
     index: true,
     sparse: true,
   },
+  // One lead per owner (services/ubereats/owners.js): virtual brands cooked in one
+  // kitchen by one owner share a lead, so the agent calls that owner once.
+  // ownerKey = "siren:<9 digits>" (or "phone:", "email:", "addr:" when the stores
+  // have no SIREN); brands = every Uber Eats store on this lead, the one in
+  // relatedUberEatsUuid included.
+  ownerKey: {
+    type: String,
+    index: true,
+    sparse: true,
+  },
+  brands: [
+    {
+      _id: false,
+      uuid: { type: String, index: true },
+      title: String,
+      url: String,
+      phone: String,
+      email: String,
+      postalCode: String,
+      address: String,
+      registrationNumber: String,
+      addedAt: { type: Date, default: Date.now },
+    },
+  ],
+  // A duplicate merged into another lead (scripts/mergeOwnerLeads.js). It is kept,
+  // not deleted, for its history, but hidden from every list (models/plugins/hideMergedLeads.js).
+  mergedInto: {
+    type: Schema.Types.ObjectId,
+    ref: "Lead",
+  },
+  mergedAt: Date,
+  // On the lead that was kept: the leads merged into it.
+  mergedLeads: [
+    {
+      _id: false,
+      leadId: { type: Schema.Types.ObjectId, ref: "Lead" },
+      name: String,
+      status: String,
+      assignedTo: { type: Schema.Types.ObjectId, ref: "User" },
+      mergedAt: Date,
+      reason: String,
+    },
+  ],
   restaurantData: {
     name: String,
     postalCode: String,
@@ -183,6 +226,9 @@ LeadSchema.pre("save", function (next) {
   this.updatedAt = Date.now();
   next();
 });
+
+// Merged duplicates stay in the collection but never show up in a list.
+LeadSchema.plugin(require("./plugins/hideMergedLeads"));
 
 // Create a text index for searching leads
 LeadSchema.index({

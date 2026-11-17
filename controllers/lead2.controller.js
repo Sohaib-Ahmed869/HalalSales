@@ -58,6 +58,8 @@ exports.getLeads = async (req, res) => {
         { 'restaurantData.name': { $regex: search, $options: "i" } }, // NEW: Search restaurant name
         { 'restaurantData.postalCode': { $regex: search, $options: "i" } }, // NEW: Search postal code
         { sapCardCode: { $regex: search, $options: "i" } },
+        // One lead per owner: any of the owner's Uber Eats brands finds the lead.
+        { "brands.title": { $regex: search, $options: "i" } },
       ];
     }
 
@@ -148,6 +150,8 @@ exports.getLeadsPaginated = async (req, res) => {
         { 'restaurantData.name': { $regex: search, $options: "i" } }, // NEW: Search restaurant name
         { 'restaurantData.postalCode': { $regex: search, $options: "i" } }, // NEW: Search postal code
         { sapCardCode: { $regex: search, $options: "i" } },
+        // One lead per owner: any of the owner's Uber Eats brands finds the lead.
+        { "brands.title": { $regex: search, $options: "i" } },
       ];
     }
 
@@ -248,6 +252,7 @@ exports.getLeadStats = async (req, res) => {
         { email: s },
         { phoneNumber: s },
         { company: s },
+        { "brands.title": s },
       ];
     }
 
@@ -2420,10 +2425,30 @@ exports.upsertAiProspectLead = async (req, res) => {
     try {
       c = await ueCollections();
       stores = uberEatsUuids.length
-        ? await c.restaurants.find({ uuid: { $in: uberEatsUuids } }, { projection: { uuid: 1, title: 1, url: 1, assignment: 1, menuItemCount: 1, legal: 1 } }).toArray()
+        ? await c.restaurants
+            .find(
+              { uuid: { $in: uberEatsUuids } },
+              { projection: { uuid: 1, title: 1, url: 1, assignment: 1, menuItemCount: 1, legal: 1, phoneNumber: 1, email: 1, postalCode: 1, location: 1, registrationNumber: 1 } }
+            )
+            .toArray()
         : [];
     } catch (err) {
       console.warn("[ai-prospect-handoff] Uber Eats stores unavailable:", err.message);
+    }
+    // One lead per owner (services/ubereats/owners.js): a lead the owner already has for another
+    // of their brands is the one to update.
+    let ownerUuids = [...uberEatsUuids];
+    let ownerKey = null;
+    if (c && uberEatsUuids.length) {
+      try {
+        const { ownerIndex, groupOfStore } = require("../services/ubereats/owners");
+        const index = await ownerIndex(c);
+        const groups = uberEatsUuids.map((u) => groupOfStore(index, u));
+        ownerUuids = [...new Set(groups.flatMap((g) => g.uuids))];
+        ownerKey = groups.map((g) => g.key).find((k) => !k.startsWith("uuid:")) || null;
+      } catch (err) {
+        console.warn("[ai-prospect-handoff] owner groups unavailable:", err.message);
+      }
     }
 
     // Who follows it up: whoever already has the store, else the agent whose
@@ -2458,7 +2483,8 @@ exports.upsertAiProspectLead = async (req, res) => {
     let lead = await Lead.findOne({
       status: { $nin: ["converted", "dead"] },
       $or: [
-        ...(uberEatsUuids.length ? [{ relatedUberEatsUuid: { $in: uberEatsUuids } }] : []),
+        ...(ownerUuids.length ? [{ relatedUberEatsUuid: { $in: ownerUuids } }, { "brands.uuid": { $in: ownerUuids } }] : []),
+        ...(ownerKey ? [{ ownerKey }] : []),
         ...(threadId ? [{ "aiHandoff.threadId": String(threadId) }] : []),
       ],
     });
@@ -2475,6 +2501,8 @@ exports.upsertAiProspectLead = async (req, res) => {
         sourceType: "ai_generated",
         assignedTo: agentId || undefined,
         relatedUberEatsUuid: uberEatsUuids[0],
+        ownerKey: ownerKey || undefined,
+        brands: stores.map((s) => require("../services/ubereats/owners").brandOf(s, at)),
         restaurantData: {
           name: brandList[0],
           postalCode: postalCode || "",
@@ -2517,8 +2545,14 @@ exports.upsertAiProspectLead = async (req, res) => {
     const newlyAssigned = Boolean(lead.assignedTo) && (lead.isNew || lead.isModified("assignedTo"));
     if (newlyAssigned) lead.assignedAt = at;
     await lead.save();
+    // The owner's lead found through another brand: list these stores on it too.
+    if (c && !created && stores.length) {
+      await require("../services/ubereats/ownerLeads").addBrands(c, lead, stores, { ownerKey: ownerKey || undefined, at });
+    }
 
-    // Mark the store(s) as taken on the Uber Eats Scraper page, as its own assign does.
+    // Mark the store(s) as taken on the Uber Eats Scraper page, as its own assign does,
+    // with the agent of the lead (an owner's existing lead keeps its agent).
+    if (lead.assignedTo) agentId = lead.assignedTo;
     if (c && agentId) {
       const agent = await User.findById(agentId).select("firstName lastName email").lean();
       const agentName = `${agent?.firstName || ""} ${agent?.lastName || ""}`.trim() || agent?.email || "Agent";
@@ -2625,13 +2659,14 @@ exports.getLeadChatHistory = async (req, res) => {
     if (req.user.role === "sales_agent") query.assignedTo = req.user._id;
 
     const lead = await Lead.findOne(query)
-      .select("fullName company phoneNumber sapCardCode existingCustomer aiHandoff sourceType")
+      .select("fullName company phoneNumber sapCardCode existingCustomer aiHandoff sourceType brands.phone")
       .lean();
     if (!lead) {
       return res.status(404).json({ success: false, message: "Lead not found" });
     }
 
-    const phones = [lead.phoneNumber];
+    // One lead per owner: a brand of the owner may have been messaged on its own number.
+    const phones = [lead.phoneNumber, ...(lead.brands || []).map((b) => b.phone)];
     if (lead.existingCustomer || lead.sapCardCode) {
       const customer = await Customer.findOne(
         lead.existingCustomer ? { _id: lead.existingCustomer } : { CardCode: lead.sapCardCode }
