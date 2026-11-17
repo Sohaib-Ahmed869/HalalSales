@@ -1949,3 +1949,239 @@ exports.getRecentActivity = async (req, res) => {
         res.status(500).json({ success: false, message: "Error fetching recent activity", error: error.message });
     }
 };
+
+// ─── Monthly metrics: new / won back / returning / grew / kept / shrank / lost ──
+// Customers are compared month M vs M-1 on NET invoiced sales (DocTotal - VatSum,
+// minus credit notes — same as the rest of this dashboard). A customer is
+// "active" in a month when it has at least one invoice in it (a month with only
+// a credit note is not a purchase). Buckets, for month M:
+//   grew / kept / shrank — active in M and M-1; grew if net is up more than
+//                          GROWTH_THRESHOLD_PCT, shrank if down more than it,
+//                          kept otherwise
+//   new       — active in M, no invoice ever before M
+//   won back  — active in M, bought before, but nothing in the
+//               WON_BACK_LAPSE_MONTHS months before M (a genuinely lapsed customer)
+//   returning — active in M, skipped M-1 but bought within the lapse window
+//               (occasional buyers; kept apart so "won back" is not inflated)
+//   lost      — active in M-1, no invoice in M
+// History (new / won back / returning) honours the same channel filter, so in
+// the Delivery view "new" means first-ever delivery invoice.
+// The walk-in counter accounts (C9999 / C9996) stand for many anonymous till
+// customers, not one customer, so they are left out of the buckets; their
+// sales are reported separately so totals still reconcile with the dashboard.
+const GROWTH_THRESHOLD_PCT = 10;
+const WON_BACK_LAPSE_MONTHS = 3;
+const WALK_IN_CARD_CODES = ["C9999", "C9996"];
+const METRIC_BUCKETS = [
+    { key: "new", label: "New" },
+    { key: "wonBack", label: "Won back" },
+    { key: "returning", label: "Returning" },
+    { key: "grew", label: "Grew" },
+    { key: "kept", label: "Kept" },
+    { key: "shrank", label: "Shrank" },
+    { key: "lost", label: "Lost" },
+];
+
+// ?month=YYYY-MM (UTC month, like getDateRange). Defaults to the last complete month.
+function getMetricsMonth(query) {
+    const m = /^(\d{4})-(\d{2})$/.exec(String(query?.month || ""));
+    let year, month0;
+    if (m && Number(m[2]) >= 1 && Number(m[2]) <= 12) {
+        year = Number(m[1]);
+        month0 = Number(m[2]) - 1;
+    } else {
+        const now = new Date();
+        year = now.getUTCFullYear();
+        month0 = now.getUTCMonth() - 1;
+    }
+    const at = (offset) => new Date(Date.UTC(year, month0 + offset, 1));
+    const label = (d) => d.toISOString().slice(0, 7);
+    return {
+        start: at(0),
+        end: at(1), // exclusive
+        prevStart: at(-1),
+        lapseStart: at(-WON_BACK_LAPSE_MONTHS),
+        month: label(at(0)),
+        prevMonth: label(at(-1)),
+    };
+}
+
+/**
+ * GET /api/main-admin-dashboard/monthly-metrics?month=YYYY-MM&salesAgent=...&channel=...
+ * Customer movement for month M vs M-1 (rules above): per-bucket customer count,
+ * net sales in M and M-1 and the delta, plus the customers in each bucket.
+ * Three aggregations, all bounded by DocDate / CardCode: invoices and credit
+ * notes of M-1..M grouped per customer, then the invoice history of only the
+ * customers who bought in M but not in M-1.
+ */
+exports.getMonthlyMetrics = async (req, res) => {
+    try {
+        const period = getMetricsMonth(req.query);
+        const scope = await resolveScope(req);
+        if (scope.forbidden) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+
+        const windowMatch = andMatch(
+            { DocDate: { $gte: period.prevStart, $lt: period.end } },
+            invoiceAgentMatch(scope)
+        );
+        const inCurrent = { $gte: ["$DocDate", period.start] };
+        const perCustomer = (extra = {}) => [
+            { $match: windowMatch },
+            {
+                $group: {
+                    _id: "$CardCode",
+                    cardName: { $last: "$CardName" },
+                    cur: { $sum: { $cond: [inCurrent, NET, 0] } },
+                    prev: { $sum: { $cond: [inCurrent, 0, NET] } },
+                    ...extra,
+                },
+            },
+        ];
+        const [invRows, cnRows] = await Promise.all([
+            Invoice.aggregate(perCustomer({
+                curCount: { $sum: { $cond: [inCurrent, 1, 0] } },
+                prevCount: { $sum: { $cond: [inCurrent, 0, 1] } },
+            })),
+            CreditNote.aggregate(perCustomer()),
+        ]);
+
+        // Net per customer = invoices - credit notes, per month.
+        const customers = new Map();
+        const row = (code, name) => {
+            if (!customers.has(code)) {
+                customers.set(code, { cardCode: code, cardName: name || "", cur: 0, prev: 0, curCount: 0, prevCount: 0 });
+            }
+            return customers.get(code);
+        };
+        invRows.forEach((r) => {
+            const c = row(r._id, r.cardName);
+            c.cur += r.cur;
+            c.prev += r.prev;
+            c.curCount = r.curCount;
+            c.prevCount = r.prevCount;
+        });
+        cnRows.forEach((r) => {
+            const c = row(r._id, r.cardName);
+            c.cur -= r.cur;
+            c.prev -= r.prev;
+        });
+
+        // Walk-in counter accounts: reported apart, not counted as customers.
+        const walkIn = { value: 0, prevValue: 0 };
+        WALK_IN_CARD_CODES.forEach((code) => {
+            const c = customers.get(code);
+            if (!c) return;
+            walkIn.value += c.cur;
+            walkIn.prevValue += c.prev;
+            customers.delete(code);
+        });
+
+        // Customers who bought in M but not in M-1: look up when they last
+        // bought before M-1 to tell new / won back / returning apart.
+        const gapCodes = [...customers.values()]
+            .filter((c) => c.curCount > 0 && c.prevCount === 0)
+            .map((c) => c.cardCode);
+        const lastBefore = new Map();
+        if (gapCodes.length) {
+            const history = await Invoice.aggregate([
+                {
+                    $match: andMatch(
+                        { CardCode: { $in: gapCodes }, DocDate: { $lt: period.prevStart } },
+                        channelMatch(scope.channel)
+                    ),
+                },
+                { $group: { _id: "$CardCode", lastDate: { $max: "$DocDate" } } },
+            ]);
+            history.forEach((h) => lastBefore.set(h._id, h.lastDate));
+        }
+
+        const bucketOf = (c) => {
+            const boughtNow = c.curCount > 0;
+            const boughtPrev = c.prevCount > 0;
+            if (boughtNow && boughtPrev) {
+                // A previous month at or below zero (credit notes >= invoices)
+                // has no meaningful %; any increase then counts as growth.
+                const change = c.cur - c.prev;
+                const pct = c.prev > 0 ? (change / c.prev) * 100 : change > 0 ? Infinity : change < 0 ? -Infinity : 0;
+                if (pct > GROWTH_THRESHOLD_PCT) return "grew";
+                if (pct < -GROWTH_THRESHOLD_PCT) return "shrank";
+                return "kept";
+            }
+            if (boughtNow) {
+                const last = lastBefore.get(c.cardCode);
+                if (!last) return "new";
+                return last < period.lapseStart ? "wonBack" : "returning";
+            }
+            if (boughtPrev) return "lost";
+            return null; // only credit notes in the window
+        };
+
+        // Agent per customer (Customer.assignedTo), for the drill-down.
+        const custDocs = await Customer.find({ CardCode: { $in: [...customers.keys()] } })
+            .select("CardCode CardName assignedTo")
+            .populate("assignedTo", "firstName lastName")
+            .lean();
+        const custInfo = new Map(custDocs.map((c) => [c.CardCode, c]));
+
+        const round2 = (n) => Math.round(n * 100) / 100;
+        const buckets = {};
+        const lists = {};
+        METRIC_BUCKETS.forEach((b) => {
+            buckets[b.key] = { ...b, count: 0, value: 0, prevValue: 0, delta: 0 };
+            lists[b.key] = [];
+        });
+        customers.forEach((c) => {
+            const key = bucketOf(c);
+            if (!key) return;
+            const info = custInfo.get(c.cardCode);
+            const change = c.cur - c.prev;
+            lists[key].push({
+                cardCode: c.cardCode,
+                cardName: info?.CardName || c.cardName,
+                agent: info?.assignedTo
+                    ? `${info.assignedTo.firstName || ""} ${info.assignedTo.lastName || ""}`.trim()
+                    : null,
+                prevValue: round2(c.prev),
+                value: round2(c.cur),
+                change: round2(change),
+                changePct: c.prev > 0 ? parseFloat(((change / c.prev) * 100).toFixed(1)) : null,
+            });
+            const b = buckets[key];
+            b.count += 1;
+            b.value += c.cur;
+            b.prevValue += c.prev;
+        });
+        Object.values(buckets).forEach((b) => {
+            b.value = round2(b.value);
+            b.prevValue = round2(b.prevValue);
+            b.delta = round2(b.value - b.prevValue);
+        });
+        // Biggest movers first.
+        Object.values(lists).forEach((l) => l.sort((a, b) => Math.abs(b.change) - Math.abs(a.change)));
+
+        const all = Object.values(buckets);
+        const sum = (keys, field) => keys.reduce((s, k) => s + buckets[k][field], 0);
+        res.status(200).json({
+            success: true,
+            data: {
+                month: period.month,
+                prevMonth: period.prevMonth,
+                rules: { growthThresholdPct: GROWTH_THRESHOLD_PCT, wonBackLapseMonths: WON_BACK_LAPSE_MONTHS },
+                totals: {
+                    customers: sum(["new", "wonBack", "returning", "grew", "kept", "shrank"], "count"),
+                    prevCustomers: sum(["grew", "kept", "shrank", "lost"], "count"),
+                    value: round2(all.reduce((s, b) => s + b.value, 0)),
+                    prevValue: round2(all.reduce((s, b) => s + b.prevValue, 0)),
+                },
+                walkIn: { cardCodes: WALK_IN_CARD_CODES, value: round2(walkIn.value), prevValue: round2(walkIn.prevValue) },
+                buckets: METRIC_BUCKETS.map((b) => buckets[b.key]),
+                customers: lists,
+            },
+        });
+    } catch (error) {
+        console.error("Error in getMonthlyMetrics:", error);
+        res.status(500).json({ success: false, message: "Error fetching monthly metrics", error: error.message });
+    }
+};

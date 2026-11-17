@@ -497,6 +497,11 @@ const invoiceSchema = new mongoose.Schema(
   }
 );
 
+// The sales dashboard filters invoices by date and groups them per customer
+// (monthly metrics: per-customer history lookups), as CreditNotes already is.
+invoiceSchema.index({ DocDate: -1 });
+invoiceSchema.index({ CardCode: 1, DocDate: -1 });
+
 const Invoice = mongoose.model("Invoices", invoiceSchema);
 
 module.exports = Invoice;
