@@ -85,6 +85,7 @@ const whatsappBusinessRoutes = require("./routes/whatsapp.routes");
 const whatsappAgentRoutes = require("./routes/whatsappAgent.routes");
 const sapSyncRoutes = require("./routes/sapSyncRoutes");
 const mainAdminDashboardRoutes = require("./routes/mainAdminDashboard.routes");
+const agentProductivityRoutes = require("./routes/agentProductivity.routes");
 const whatsappAdminRoutes = require("./routes/whatsappAdmin.routes");
 const whatsappAIAgentRoutes = require("./routes/whatsappAIAgent.routes");
 const agentRoutes = require('./routes/agentRoutes');
@@ -209,6 +210,7 @@ app.get("/", (req, res) => {
 
 // Routes
 app.use("/api/main-admin-dashboard", mainAdminDashboardRoutes);
+app.use("/api/agent-productivity", agentProductivityRoutes);
 app.use("/api/sap-sync", sapSyncRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/customers", customerRoutes);
