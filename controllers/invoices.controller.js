@@ -2438,28 +2438,16 @@ exports.getGlobalKPIs = async (req, res) => {
 
     // 3. Channel distribution. The isPOS / isDelivery flags are never set on
     // synced invoices, so the till (cash & carry) is recognised the same way as
-    // the main dashboard: an EPOS receipt number or the walk-in customers;
-    // everything else counts as delivery.
+    // the main dashboard: an EPOS receipt number only; everything else counts
+    // as delivery.
     const channelStatsPipeline = [
       { $match: dateFilter },
       {
         $group: {
           _id: {
-            isPOS: {
-              $or: [
-                { $gt: [{ $strLenCP: { $ifNull: ["$U_EPOSNo", ""] } }, 0] },
-                { $in: ["$CardCode", ["C9999", "C9996"]] },
-              ],
-            },
+            isPOS: { $gt: [{ $strLenCP: { $ifNull: ["$U_EPOSNo", ""] } }, 0] },
             isDelivery: {
-              $not: [
-                {
-                  $or: [
-                    { $gt: [{ $strLenCP: { $ifNull: ["$U_EPOSNo", ""] } }, 0] },
-                    { $in: ["$CardCode", ["C9999", "C9996"]] },
-                  ],
-                },
-              ],
+              $not: [{ $gt: [{ $strLenCP: { $ifNull: ["$U_EPOSNo", ""] } }, 0] }],
             },
           },
           count: { $sum: 1 },

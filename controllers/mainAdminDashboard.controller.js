@@ -80,12 +80,12 @@ const CONVERTED_QUOTATION_EXPR = { $gt: [{ $ifNull: ["$ConvertedToOrderDocEntry"
 
 // Sales channel (?channel=all|cash_carry|delivery), applied to invoices and
 // credit notes alike. Cash & Carry = rung up on the depot till: the document
-// carries an EPOS receipt number (U_EPOSNo "T001_…", always SalesPersonCode 1)
-// or is billed to the walk-in counter customers. Everything else is delivery.
+// carries an EPOS receipt number (U_EPOSNo "T001_…", always SalesPersonCode 1).
+// Everything else is delivery. The walk-in counter accounts (C9999 / C9996) are
+// no longer used to decide the channel (HFS, 12 Nov meeting): only the EPOS number.
 // Checked on live data (Oct 2026): 2,667 EPOS invoices, 2 with a same-day
 // delivery note; 572 non-EPOS invoices, 156 with one. The isPOS / isDelivery
 // flags on Invoice are never set, so they cannot be used.
-const WALK_IN_CARD_CODES = ["C9999", "C9996"];
 const CHANNELS = ["cash_carry", "delivery"];
 function getChannel(query) {
     const c = String(query?.channel || "").toLowerCase();
@@ -93,10 +93,10 @@ function getChannel(query) {
 }
 function channelMatch(channel) {
     if (channel === "cash_carry") {
-        return { $or: [{ U_EPOSNo: { $nin: [null, ""] } }, { CardCode: { $in: WALK_IN_CARD_CODES } }] };
+        return { U_EPOSNo: { $nin: [null, ""] } };
     }
     if (channel === "delivery") {
-        return { U_EPOSNo: { $in: [null, ""] }, CardCode: { $nin: WALK_IN_CARD_CODES } };
+        return { U_EPOSNo: { $in: [null, ""] } };
     }
     return {};
 }
