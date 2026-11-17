@@ -5,6 +5,7 @@ const Invoice = require("../models/Invoice");
 const SalesOrder = require("../models/SalesOrder");
 const Payment = require("../models/payment");
 const mongoose = require("mongoose");
+const upsell = require("../services/upsell");
 
 /**
  * Get personalized recommendations based on user role
@@ -1029,3 +1030,113 @@ async function getPerformanceInsights(salesAgents, customers, invoices) {
   // Sort by recent sales (highest first)
   return insights.sort((a, b) => b.metrics.recentSales - a.metrics.recentSales);
 }
+
+// ---------- Upsell flags (menu vs purchases) ----------
+// What a customer sells on Uber Eats but doesn't buy from us (services/upsell.js,
+// keyword table in config/upsellCategories.js). Agents see their own customers;
+// managers and admins see everyone, or one agent's with ?agent=<userId> (none =
+// nobody's).
+
+const isAgent = (user) => user.role === "sales_agent";
+
+/**
+ * @route GET /api/recommendations/upsell
+ * ?agent=<userId>|none  ?kind=<chicken|drinks|…>  ?category=<key>  ?search=  ?sort=flags|revenue
+ * ?page=1&limit=50  ?fresh=true (managers / admins: rebuild instead of the 10-minute copy)
+ */
+exports.getUpsellFlags = async (req, res) => {
+  try {
+    const fresh = req.query.fresh === "true" && !isAgent(req.user);
+    const all = await upsell.allFlags({ fresh });
+
+    let rows = all.rows;
+    if (isAgent(req.user)) {
+      rows = rows.filter((r) => r.ownerId === String(req.user._id));
+    } else if (req.query.agent === "none") {
+      rows = rows.filter((r) => !r.ownerId);
+    } else if (req.query.agent && mongoose.isValidObjectId(req.query.agent)) {
+      rows = rows.filter((r) => r.ownerId === String(req.query.agent));
+    }
+
+    // Only the flags of one kind / category (customers left without any drop out).
+    const { kind, category } = req.query;
+    if (kind || category) {
+      rows = rows
+        .map((r) => {
+          const flags = r.flags.filter((f) => (!kind || f.kind === kind) && (!category || f.key === category));
+          return { ...r, flags, flagCount: flags.length };
+        })
+        .filter((r) => r.flagCount > 0);
+    }
+
+    const search = String(req.query.search || "").trim().toLowerCase();
+    if (search) {
+      rows = rows.filter(
+        (r) => r.cardName?.toLowerCase().includes(search) || r.cardCode.toLowerCase().includes(search) || r.stores.some((s) => s.title?.toLowerCase().includes(search))
+      );
+    }
+
+    // Per category: how many of these customers have the flag (for the filter and the summary).
+    const byCategory = new Map();
+    rows.forEach((r) =>
+      r.flags.forEach((f) => {
+        const c = byCategory.get(f.key) || { key: f.key, label: f.label, kind: f.kind, customers: 0 };
+        c.customers += 1;
+        byCategory.set(f.key, c);
+      })
+    );
+
+    const byRevenue = req.query.sort === "revenue";
+    rows = [...rows].sort((a, b) =>
+      byRevenue ? b.purchases.total - a.purchases.total || b.flagCount - a.flagCount : b.flagCount - a.flagCount || b.purchases.total - a.purchases.total
+    );
+
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        rows: rows.slice((page - 1) * limit, page * limit),
+        total: rows.length,
+        page,
+        limit,
+        summary: {
+          customers: rows.length,
+          withFlags: rows.filter((r) => r.flagCount > 0).length,
+          flags: rows.reduce((n, r) => n + r.flagCount, 0),
+          byCategory: [...byCategory.values()].sort((a, b) => b.customers - a.customers),
+        },
+        linkedCustomers: all.linkedCustomers,
+        buyingCustomers: all.buyingCustomers,
+        withoutProducts: all.withoutProducts,
+        builtAt: all.at,
+        buildMs: all.ms,
+        settings: upsell.settings(),
+      },
+    });
+  } catch (error) {
+    console.error("Error building upsell flags:", error);
+    return res.status(500).json({ success: false, message: "Failed to build the upsell flags", error: error.message });
+  }
+};
+
+/**
+ * @route GET /api/recommendations/upsell/:cardCode
+ * One customer's flags, computed now.
+ */
+exports.getCustomerUpsellFlags = async (req, res) => {
+  try {
+    const { cardCode } = req.params;
+    if (isAgent(req.user)) {
+      const own = await Customer.exists({ CardCode: cardCode, assignedTo: req.user._id });
+      if (!own) return res.status(403).json({ success: false, message: "You can only view customers assigned to you" });
+    }
+    const data = await upsell.customerFlags(cardCode);
+    if (!data) return res.status(404).json({ success: false, message: "Customer not found" });
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    console.error("Error building a customer's upsell flags:", error);
+    return res.status(500).json({ success: false, message: "Failed to build the upsell flags", error: error.message });
+  }
+};
