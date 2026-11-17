@@ -519,8 +519,9 @@ exports.assignRestaurants = handle(async (req, res, c) => {
   if (!agent || !["sales_agent", "sales_manager"].includes(agent.role) || agent.deactivated) {
     return res.status(400).json({ message: "Choose an active sales agent or sales manager" });
   }
-  const { assigned, skipped } = await assignStores(c, { uuids: list, agent, by: req.user, priority, source: "the Uber Eats Scraper" });
-  res.json({ assigned: assigned.length, leads: assigned, skipped, agent: { id: String(agent._id), name: agentName(agent) } });
+  const { assigned, grouped, skipped } = await assignStores(c, { uuids: list, agent, by: req.user, priority, source: "the Uber Eats Scraper" });
+  // grouped = brands put on their owner's lead (one lead per owner), not a lead of their own.
+  res.json({ assigned: assigned.length, leads: assigned, grouped, skipped, agent: { id: String(agent._id), name: agentName(agent) } });
 });
 
 // ---------- agents' postal codes + auto-assign (as on the old Postal Scraping page) ----------
@@ -618,6 +619,7 @@ exports.autoAssignRestaurants = handle(async (req, res, c) => {
   for (const agent of agents) {
     const codes = (agent.assignedPostalCodes || []).filter((x) => POSTAL_RE.test(String(x)));
     const done = [];
+    const grouped = [];
     const skipped = [];
     const tried = new Set();
     // assignStores may skip a store (taken a moment ago, lead failed): top up from the next ones.
@@ -632,7 +634,9 @@ exports.autoAssignRestaurants = handle(async (req, res, c) => {
       if (!batch.length) break;
       batch.forEach((s) => tried.add(s.uuid));
       const r = await assignStores(c, { uuids: batch.map((s) => s.uuid), agent, by: req.user, priority, source: "the Uber Eats Scraper (auto-assign)", notify: false });
+      // One lead per owner: perAgent counts leads; the owner's other brands come with each one (grouped).
       done.push(...r.assigned);
+      grouped.push(...r.grouped);
       skipped.push(...r.skipped);
     }
     if (done.length) {
@@ -645,6 +649,7 @@ exports.autoAssignRestaurants = handle(async (req, res, c) => {
       postalCodes: codes,
       assigned: done.length,
       stores: done,
+      grouped,
       skipped,
       note: done.length ? "" : "No free restaurants left in this agent's postal codes",
     });
@@ -660,21 +665,33 @@ const leadWorked = (lead) => (lead.status && lead.status !== "new") || (lead.tas
  * Takes stores back from their agent: the assignment moves into the store's assignmentHistory and the
  * lead made by the assign is deleted, so the store is a prospect again. A lead the agent has already
  * worked (status moved on, tasks, follow-up date) is never deleted here: that store is skipped with
- * the reason, and can be released by deleting the lead on the Leads page.
+ * the reason, and can be released by deleting the lead on the Leads page. The owner's other brands
+ * listed on a deleted lead are taken back with it.
  */
 exports.unassignRestaurants = handle(async (req, res, c) => {
   const list = [...new Set((Array.isArray(req.body?.uuids) ? req.body.uuids : []).map(String))].slice(0, 500);
   if (!list.length) return res.status(400).json({ message: "Select at least one restaurant" });
   const byId = req.user?._id || req.user?.id;
   const byName = req.user ? agentName(req.user) : "";
-  const stores = await c.restaurants.find({ uuid: { $in: list } }, { projection: { uuid: 1, title: 1, assignment: 1 } }).toArray();
+  // One lead per owner: a lead can carry several brands. Taking one back releases the owner,
+  // so every brand on that lead is taken back with it (they would otherwise point at no lead).
+  const leads = await Lead.find({ $or: [{ relatedUberEatsUuid: { $in: list } }, { "brands.uuid": { $in: list } }] })
+    .select("relatedUberEatsUuid brands.uuid status tasks nextFollowUp")
+    .lean();
+  const leadOf = new Map();
+  leads.forEach((l) => [l.relatedUberEatsUuid, ...(l.brands || []).map((b) => b.uuid)].filter(Boolean).forEach((u) => leadOf.set(u, l)));
+  // The selected stores first, then the other brands on their leads.
+  const selected = new Set(list);
+  const all = [...new Set([...list, ...leadOf.keys()])];
+  const stores = await c.restaurants.find({ uuid: { $in: all } }, { projection: { uuid: 1, title: 1, assignment: 1 } }).toArray();
   const byUuid = new Map(stores.map((s) => [s.uuid, s]));
-  const leads = await Lead.find({ relatedUberEatsUuid: { $in: list } }).select("relatedUberEatsUuid status tasks nextFollowUp").lean();
-  const leadOf = new Map(leads.map((l) => [l.relatedUberEatsUuid, l]));
   const unassigned = [];
   const skipped = [];
-  for (const uuid of list) {
+  const deleted = new Set();
+  for (const uuid of all) {
     const s = byUuid.get(uuid);
+    // Another brand on a selected store's lead: taken back only when that lead was just deleted.
+    if (!selected.has(uuid) && (!s?.assignment?.agentId || !deleted.has(String(leadOf.get(uuid)?._id)))) continue;
     if (!s) {
       skipped.push({ uuid, title: "", reason: "not found" });
       continue;
@@ -689,7 +706,10 @@ exports.unassignRestaurants = handle(async (req, res, c) => {
       skipped.push({ uuid, title: s.title, reason: `${s.assignment.agentName || "The agent"} has already worked this lead (${what}). It stays; delete the lead on the Leads page if it should go.` });
       continue;
     }
-    if (lead) await Lead.deleteOne({ _id: lead._id });
+    if (lead && !deleted.has(String(lead._id))) {
+      await Lead.deleteOne({ _id: lead._id });
+      deleted.add(String(lead._id));
+    }
     await c.restaurants.updateOne(
       { uuid },
       {

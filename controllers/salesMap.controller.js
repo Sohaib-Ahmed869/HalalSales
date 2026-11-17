@@ -1153,6 +1153,8 @@ exports.assignProspects = async (req, res) => {
       const r = await assignStores(c, { uuids: ueIds, agent, by: req.user, priority, source: "the Sales Map", notify: false });
       r.assigned.forEach((x) => assigned.push({ id: `ue:${x.uuid}`, name: x.title, leadId: x.leadId }));
       r.skipped.forEach((x) => skipped.push({ id: `ue:${x.uuid}`, name: x.title, reason: x.reason }));
+      // A brand put on its owner's lead (one lead per owner) is not a lead of its own: listed with the reason.
+      (r.grouped || []).forEach((x) => skipped.push({ id: `ue:${x.uuid}`, name: x.title, reason: x.reason, grouped: true, leadId: x.leadId }));
       if (r.assigned.length && (req.user?._id || req.user?.id)) await notifyAgent(agent, req.user._id || req.user.id, r.assigned.length);
     }
 
