@@ -349,8 +349,84 @@ async function sendDailyReport(day) {
   return { sent: true, to, report: r };
 }
 
+/* ── Follow-up due: remind the agent (Idris, 18 Nov meeting) ─────── */
+
+// "Call him back in 1 hour" must pop up for the agent in 1 hour. Every few
+// minutes, each open follow-up / call task on a lead whose time has come gets
+// one in-app notification. Tasks more than REMINDER_LOOKBACK_H overdue are
+// left alone, so switching this on does not flood agents with old tasks.
+const REMINDER_TYPES = ["follow-up", "call", "restaurant_follow_up"];
+const REMINDER_LOOKBACK_H = 12;
+
+async function remindDueFollowUps(now = new Date()) {
+  const due = await Task.find({
+    type: { $in: REMINDER_TYPES },
+    status: { $in: ["pending", "pending_approval"] },
+    leadId: { $ne: null },
+    dueDate: { $lte: now, $gte: new Date(now.getTime() - REMINDER_LOOKBACK_H * 3600 * 1000) },
+    reminderSentAt: null,
+  })
+    .select("_id title leadId assignedTo createdBy dueDate")
+    .limit(500)
+    .lean();
+  if (!due.length) return 0;
+
+  const NotificationService = require("../utils/notificationService");
+  const leads = await Lead.find({ _id: { $in: due.map((t) => t.leadId) } })
+    .select("_id company fullName phoneNumber lastContactOutcome")
+    .lean();
+  const byId = new Map(leads.map((l) => [String(l._id), l]));
+
+  let sent = 0;
+  for (const t of due) {
+    // Claim the task first: with several server processes only one reminds.
+    const claimed = await Task.updateOne({ _id: t._id, reminderSentAt: null }, { $set: { reminderSentAt: now } });
+    if (!claimed.modifiedCount) continue;
+    const lead = byId.get(String(t.leadId));
+    const who = lead?.company || lead?.fullName || t.title;
+    const last = lead?.lastContactOutcome ? ` Last attempt: ${OUTCOME_LABEL[lead.lastContactOutcome] || lead.lastContactOutcome}.` : "";
+    try {
+      await NotificationService.createNotification({
+        recipient: t.assignedTo,
+        sender: t.createdBy || t.assignedTo,
+        type: "follow_up_due",
+        title: `Follow-up due: ${who}`,
+        message: `Time to contact them again${lead?.phoneNumber ? ` (${lead.phoneNumber})` : ""}.${last} Log the call on the lead when done.`,
+        relatedTask: t._id,
+        relatedLead: t.leadId,
+        allowSelfNotify: true,
+      });
+      sent++;
+    } catch (err) {
+      // Let the next run try again.
+      await Task.updateOne({ _id: t._id }, { $set: { reminderSentAt: null } }).catch(() => {});
+      console.warn("[lead-reminder] notification failed:", err.message);
+    }
+  }
+  return sent;
+}
+
+let reminderJob = null;
+function startReminderCron() {
+  const expr = process.env.LEAD_REMINDER_CRON || "*/5 * * * *";
+  if (expr === "off" || reminderJob) return;
+  if (!cron.validate(expr)) {
+    console.warn(`[lead-reminder] LEAD_REMINDER_CRON "${expr}" is not valid; follow-up reminders are off`);
+    return;
+  }
+  reminderJob = cron.schedule(
+    expr,
+    () =>
+      remindDueFollowUps()
+        .then((n) => n && console.log(`[lead-reminder] ${n} follow-up reminder(s) sent`))
+        .catch((e) => console.error("[lead-reminder] failed:", e.message)),
+    { timezone: TZ }
+  );
+}
+
 let job = null;
 function startCron() {
+  startReminderCron();
   const expr = process.env.LEAD_REPORT_CRON || "30 18 * * 1-6";
   if (expr === "off" || job) return;
   if (!cron.validate(expr)) {
@@ -380,5 +456,6 @@ module.exports = {
   sendDailyReport,
   reportHtml,
   parisDay,
+  remindDueFollowUps,
   startCron,
 };

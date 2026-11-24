@@ -27,6 +27,7 @@ const NotificationSchema = new Schema({
       "rfq_stalled",            // Negotiation stalled — human intervention needed
       "rfq_accepted",           // Admin accepted a vendor quotation
       "lead_assigned",          // A lead (e.g. an AI WhatsApp hand-off) needs this agent
+      "follow_up_due",          // A follow-up / call-back task on a lead is due now
     ],
     required: true,
   },

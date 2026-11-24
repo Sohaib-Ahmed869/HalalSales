@@ -86,6 +86,12 @@ const TaskSchema = new Schema({
     type: Schema.Types.ObjectId,
     ref: "Customer",
   },
+  // When the "follow-up due" notification went out (services/leadFollowUp.js).
+  // Cleared whenever the due date moves, so a rescheduled follow-up reminds again.
+  reminderSentAt: {
+    type: Date,
+    default: null,
+  },
 });
 
 // Indexes for the task list endpoints, which filter on owner/status and always
@@ -98,9 +104,25 @@ TaskSchema.index({ dueDate: 1 });
 TaskSchema.index({ leadId: 1 });
 TaskSchema.index({ relatedQuotation: 1 });
 
+TaskSchema.index({ status: 1, dueDate: 1, reminderSentAt: 1 });
+
 // Update the updatedAt timestamp on save
 TaskSchema.pre("save", function (next) {
   this.updatedAt = Date.now();
+  if (!this.isNew && this.isModified("dueDate")) this.reminderSentAt = null;
+  next();
+});
+
+// Tasks are also edited with findByIdAndUpdate: a new due date there must
+// re-arm the reminder too.
+TaskSchema.pre("findOneAndUpdate", function (next) {
+  const u = this.getUpdate() || {};
+  const set = u.$set || u;
+  if (set.dueDate !== undefined && set.reminderSentAt === undefined) {
+    if (u.$set) u.$set.reminderSentAt = null;
+    else u.reminderSentAt = null;
+    this.setUpdate(u);
+  }
   next();
 });
 
