@@ -2021,6 +2021,13 @@ const complaintWatchers = async (agentId) => {
   return ids.length ? ids : activeManagerIds();
 };
 
+// Where the AI conversation happened ("email" / "whatsapp"), sent by HFS
+// Intelligence, becomes a tag so the team can tell email leads apart (18 Nov).
+const sourceTags = (source, extra) =>
+  [source, ...(Array.isArray(extra) ? extra : [])]
+    .map((t) => String(t || "").trim().toLowerCase())
+    .filter((t) => /^[a-z0-9_-]{2,30}$/.test(t));
+
 const notifyAiHandoff = async (lead, task, { reasonLabel, priority, name, complaint = false }) => {
   try {
     const NotificationService = require("../utils/notificationService");
@@ -2104,6 +2111,8 @@ exports.upsertAiHandoffLead = async (req, res) => {
       conversation,
       threadId,
       handedOffAt,
+      source,
+      tags: extraTags,
     } = req.body || {};
 
     if (!name && !cardCode) {
@@ -2157,6 +2166,8 @@ exports.upsertAiHandoffLead = async (req, res) => {
       lead.notes = lead.notes ? `${noteEntry}\n\n${lead.notes}` : noteEntry;
       if (isClosure) lead.status = "dead";
       if (!lead.assignedTo && customer?.assignedTo) lead.assignedTo = customer.assignedTo;
+      // A phone number sent in a later reply ("call me on …") lands on the lead.
+      if (phoneNumber && !lead.phoneNumber) lead.phoneNumber = phoneNumber;
     }
     // Nobody owns the account: the agent with the fewest open AI leads gets it.
     const leadFollowUp = require("../services/leadFollowUp");
@@ -2173,6 +2184,7 @@ exports.upsertAiHandoffLead = async (req, res) => {
       const tags = new Set([...(lead.tags || [])].filter((t) => !["hot", "warm", "cold"].includes(t)));
       tags.add(AI_PRIORITY_TAGS[priority] || "warm");
       if (reason === "complaint") tags.add("priority");
+      for (const t of sourceTags(source, extraTags)) tags.add(t);
       lead.tags = [...tags];
     }
     lead.aiHandoff = {
@@ -2415,7 +2427,7 @@ exports.upsertAiProspectLead = async (req, res) => {
     const {
       name, email, phoneNumber, uberEatsUuids = [], brands = [], categories = [], postalCode, address,
       registrationNumber, channel, reason, reasonLabel, priority = "medium", intent, products,
-      campaignId, campaignName, summary, conversation, threadId, handedOffAt,
+      campaignId, campaignName, summary, conversation, threadId, handedOffAt, source, tags: extraTags,
     } = req.body || {};
     if (!name && !email) return res.status(400).json({ success: false, message: "name or email is required" });
 
@@ -2518,9 +2530,15 @@ exports.upsertAiProspectLead = async (req, res) => {
       lead.notes = lead.notes ? `${noteEntry}\n\n${lead.notes}` : noteEntry;
       if (!lead.assignedTo && agentId) lead.assignedTo = agentId;
       if (lead.sourceType !== "ai_generated" && lead.status === "new") lead.status = "qualified";
+      // A phone number sent in a later reply ("call me on …") lands on the lead.
+      if (phoneNumber && !lead.phoneNumber) {
+        lead.phoneNumber = phoneNumber;
+        if (lead.restaurantData?.contactInfo && !lead.restaurantData.contactInfo.phone) lead.restaurantData.contactInfo.phone = phoneNumber;
+      }
     }
     const tags = new Set([...(lead.tags || [])].filter((t) => !["hot", "warm", "cold"].includes(t)));
     tags.add(AI_PRIORITY_TAGS[priority] || "warm");
+    for (const t of sourceTags(source || channel, extraTags)) tags.add(t);
     lead.tags = [...tags];
     lead.aiHandoff = {
       reason,
