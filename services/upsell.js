@@ -23,6 +23,8 @@ const Invoice = require("../models/Invoice");
 const Item = require("../models/item");
 const { ueCollections } = require("../utils/ubereatsDb");
 const { existingUeMatches, ownerNames } = require("../utils/prospectContext");
+const pm = require("../utils/prospectMatch");
+const { addressKey } = require("./ubereats/parse");
 const cfg = require("../config/upsellCategories");
 
 const TTL_MS = 10 * 60 * 1000;
@@ -81,6 +83,66 @@ function storeUuidFromUrl(url) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+// The Sales Map hides a store whose name matches a customer in the same postal code (a prospect less is
+// harmless). Here that would merge every same-name store of a chain (Franprix, …) into one customer's
+// menus, so a matched store is kept only on proof it is this customer's own (client, 18 Nov): the same
+// phone, the same email, or the same name at the customer's address (same postal code, similar street).
+// The other same-name stores stay prospects. The store saved on the customer (uberEatsUrl) always counts.
+
+const STREET_TYPES = new Set(["rue", "avenue", "boulevard", "place", "faubourg", "route", "impasse", "square", "quai", "allee", "chemin", "cours", "passage", "saint", "sainte", "centre", "commercial", "cc", "zac", "zi", "za"]);
+
+/** Two addressKey()s ("75011|12 rue oberkampf") in the same postal code with the same street (and number when both have one). */
+function sameAddress(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const [zipA, streetA = ""] = a.split("|");
+  const [zipB, streetB = ""] = b.split("|");
+  if (zipA !== zipB) return false;
+  const parts = (s) => {
+    const words = s.split(" ");
+    return { num: words.find((w) => /^\d+[btq]?$/.test(w)) || null, words: new Set(words.filter((w) => w.length >= 3 && !/\d/.test(w) && !STREET_TYPES.has(w))) };
+  };
+  const pa = parts(streetA);
+  const pb = parts(streetB);
+  if (pa.num && pb.num && pa.num.replace(/\D/g, "") !== pb.num.replace(/\D/g, "")) return false;
+  const common = [...pa.words].filter((w) => pb.words.has(w)).length;
+  return common > 0 && common >= Math.min(pa.words.size, pb.words.size) / 2;
+}
+
+/** Every address of a customer (main, delivery, SAP bill-to / ship-to) as addressKey()s. */
+function customerAddressKeys(c) {
+  const list = [c.address, c.deliveryAddress, ...(c.addresses || [])].filter(Boolean);
+  return [...new Set(list.map((a) => a.zipCode && addressKey({ postalCode: a.zipCode, streetAddress: [a.streetNo, a.street].filter(Boolean).join(" ") })).filter(Boolean))];
+}
+
+/** Why the store is this customer's own ("same phone" …); null when only the name matches. */
+function ownStore(c, s) {
+  const phones = new Set([c.phoneNumber, ...(c.additionalPhoneNumbers || [])].map(pm.normPhone).filter(Boolean));
+  if ([s.phoneNumber, s.legal?.phone].map(pm.normPhone).some((p) => p && phones.has(p))) return "same phone";
+  const emails = new Set([c.Email, ...(c.additionalEmails || [])].map(pm.normEmail).filter(Boolean));
+  if (emails.has(pm.normEmail(s.email))) return "same email";
+  const named = pm.namesMatch(pm.nameVariants(s.title, s.legal?.name), pm.nameVariants(pm.repairText(c.CardName)));
+  if (named && customerAddressKeys(c).some((k) => sameAddress(k, s.addressKey))) return "same name and address";
+  return null;
+}
+
+const CUSTOMER_PROOF_FIELDS = "CardCode CardName phoneNumber additionalPhoneNumbers Email additionalEmails address deliveryAddress addresses.street addresses.streetNo addresses.zipCode";
+const STORE_PROOF_FIELDS = { _id: 0, uuid: 1, title: 1, addressKey: 1, phoneNumber: 1, email: 1, "legal.phone": 1, "legal.name": 1 };
+
+/** The matched [{ code, uuid }] that are the customer's own store, with why ("same phone" …). */
+async function ownStores(found) {
+  if (!found.length) return [];
+  const [customers, stores] = await Promise.all([
+    Customer.find({ CardCode: { $in: [...new Set(found.map((f) => f.code))] } }).select(CUSTOMER_PROOF_FIELDS).lean(),
+    ueCollections().then((c) => c.restaurants.find({ uuid: { $in: found.map((f) => f.uuid) } }, { projection: STORE_PROOF_FIELDS }).toArray()),
+  ]);
+  const byCode = new Map(customers.map((c) => [c.CardCode, c]));
+  const byUuid = new Map(stores.map((s) => [s.uuid, s]));
+  return found
+    .map((f) => byCode.has(f.code) && byUuid.has(f.uuid) && { ...f, via: ownStore(byCode.get(f.code), byUuid.get(f.uuid)) })
+    .filter((f) => f && f.via);
+}
+
 /** CardCode -> [{ uuid, via }] for every customer that is an Uber Eats store. `onlyCodes` limits it to some customers. */
 async function linkedStores(onlyCodes = null) {
   const out = new Map();
@@ -91,7 +153,9 @@ async function linkedStores(onlyCodes = null) {
     out.set(code, list);
   };
   const matches = await existingUeMatches();
-  matches.forEach((m, uuid) => m.type === "customer" && add(m.id, uuid, `same ${m.via}`));
+  const found = [];
+  matches.forEach((m, uuid) => m.type === "customer" && (!onlyCodes || onlyCodes.has(m.id)) && found.push({ code: m.id, uuid }));
+  (await ownStores(found)).forEach((f) => add(f.code, f.uuid, f.via));
   const saved = await Customer.find({ uberEatsUrl: { $nin: [null, ""] }, ...(onlyCodes ? { CardCode: { $in: [...onlyCodes] } } : {}) })
     .select("CardCode uberEatsUrl")
     .lean();
