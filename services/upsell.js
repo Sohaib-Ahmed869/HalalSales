@@ -138,9 +138,38 @@ async function ownStores(found) {
   ]);
   const byCode = new Map(customers.map((c) => [c.CardCode, c]));
   const byUuid = new Map(stores.map((s) => [s.uuid, s]));
-  return found
+  const own = found
     .map((f) => byCode.has(f.code) && byUuid.has(f.uuid) && { ...f, via: ownStore(byCode.get(f.code), byUuid.get(f.uuid)) })
     .filter((f) => f && f.via);
+  return dropHeadOfficeLinks(own, byCode, byUuid);
+}
+
+// A chain's head-office number is on every one of its stores (Franprix: 09 70 17 10 00 on 33 stores), so
+// "same phone" alone would hand a whole chain to one customer. When a customer's phone / email links it to
+// more than SHARED_CONTACT_MAX stores at more than SHARED_CONTACT_ADDRESSES addresses, it is a shared
+// contact: only the stores at the customer's own address are kept. Several brands cooking in one kitchen
+// (one address) are not affected.
+const SHARED_CONTACT_MAX = 5;
+const SHARED_CONTACT_ADDRESSES = 3;
+
+function dropHeadOfficeLinks(own, byCode, byUuid) {
+  const contactLinks = new Map(); // code -> [{ uuid, addressKey }] linked by phone / email
+  for (const f of own) {
+    if (f.via !== "same phone" && f.via !== "same email") continue;
+    const list = contactLinks.get(f.code) || [];
+    list.push({ uuid: f.uuid, addressKey: byUuid.get(f.uuid)?.addressKey || f.uuid });
+    contactLinks.set(f.code, list);
+  }
+  const shared = new Set();
+  contactLinks.forEach((list, code) => {
+    if (list.length > SHARED_CONTACT_MAX && new Set(list.map((l) => l.addressKey)).size > SHARED_CONTACT_ADDRESSES) shared.add(code);
+  });
+  if (!shared.size) return own;
+  return own.filter((f) => {
+    if (!shared.has(f.code) || (f.via !== "same phone" && f.via !== "same email")) return true;
+    const store = byUuid.get(f.uuid);
+    return customerAddressKeys(byCode.get(f.code)).some((k) => sameAddress(k, store?.addressKey));
+  });
 }
 
 /** CardCode -> [{ uuid, via }] for every customer that is an Uber Eats store. `onlyCodes` limits it to some customers. */
